@@ -44,19 +44,27 @@ fill `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SHIPYARD_SECRET_KEY` and
 `SHIPYARD_ALLOWED_GITHUB_USERS` in `.env` — step by step in
 [docs/github.md](docs/github.md#setup).
 
-## Deploy something (CLI)
+## The `shipyard` CLI
+
+Create an API key in the dashboard (**API keys**), then:
 
 ```bash
-# Any public GitHub repo with a Dockerfile — or a Node.js app (package.json) without one
-npm run shipyard -- deploy https://github.com/<owner>/<repo>
-npm run shipyard -- deploy https://github.com/<owner>/<repo> --branch develop
-# (CLI deployments aren't stored in the database, so they always use a port URL, not Traefik)
-
-# Manage it using the container name printed by deploy
-npm run shipyard -- logs    shipyard-<repo>-<id> [--tail 100]
-npm run shipyard -- restart shipyard-<repo>-<id>
-npm run shipyard -- stop    shipyard-<repo>-<id>
+npm run shipyard -- login --url http://localhost:3000 --token shp_…
+npm run shipyard -- projects
+npm run shipyard -- deploy shop            # streams the build, exits 0 once live, 1 if it failed
+npm run shipyard -- status shop
+npm run shipyard -- logs shop --follow     # the app's output; --build for the build log
+npm run shipyard -- rollback shop
+npm run shipyard -- env shop set DATABASE_URL=postgres://… --secret
 ```
+
+It only talks to the API, as you, with your team roles. In CI, set
+`SHIPYARD_URL` and `SHIPYARD_TOKEN` instead of logging in. Details:
+[docs/cli.md](docs/cli.md).
+
+`npm run shipyard:local -- deploy <repo-url>` is the older engine-only tool:
+it deploys straight through Docker on this machine, without the database or
+API. It's kept for working on the deployment engine itself.
 
 A sample app lives in [`examples/hello-node`](examples/hello-node) — push it to
 a GitHub repo of your own to try a full deployment.

@@ -16,11 +16,12 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:integration": "npm run test:integration -w @shipyard/api",
-    "shipyard": "npm run cli -w @shipyard/api --",
+    "shipyard": "npm run start -w @shipyard/cli --",
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "db:migrate": "npm run db:migrate -w @shipyard/api",
     "db:deploy": "npm run db:deploy -w @shipyard/api",
-    "db:studio": "npm run db:studio -w @shipyard/api"
+    "db:studio": "npm run db:studio -w @shipyard/api",
+    "shipyard:local": "npm run cli -w @shipyard/api --"
   }
 }

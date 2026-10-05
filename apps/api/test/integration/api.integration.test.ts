@@ -7,6 +7,7 @@ import path from "node:path";
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import { main as runCli } from "../../../cli/src/main.js";
 import { createApp } from "../../src/app.js";
 import type { RateLimits } from "../../src/middleware/rateLimit.js";
 import type { PrismaClient } from "../../src/db/prisma.js";
@@ -1430,3 +1431,64 @@ describe("teams and roles", () => {
   });
 });
 
+
+describe("shipyard CLI against the API", () => {
+  async function cli(args: string[], configPath: string, env: NodeJS.ProcessEnv = {}) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runCli(args, {
+      env,
+      stdout: (t) => void out.push(t),
+      stderr: (t) => void err.push(t),
+      readLine: async () => "",
+      configPath,
+    });
+    return { code, out: out.join(""), err: err.join("") };
+  }
+
+  it("logs in with an API key and does a day's work: projects, env, deploy, status, logs, rollback", async () => {
+    const alice = await sessionFor(ALICE);
+    const configDir = await fs.mkdtemp(path.join(os.tmpdir(), "shipyard-cli-it-"));
+    const config = path.join(configDir, "cli.json");
+    try {
+      const { token } = (await call(alice, "POST", "/api/api-keys", { name: "cli" })).body!.data;
+      await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/cli-app" });
+
+      const login = await cli(["login", "--url", api, "--token", token], config);
+      expect(login).toMatchObject({ code: 0, out: `Signed in to ${api} as alice.\n` });
+
+      expect((await cli(["projects"], config)).out).toMatch(/^NAME\s+TEAM\s+STATUS\s+URL\ncli-app\s+—\s+never deployed\n$/);
+
+      expect((await cli(["env", "cli-app", "set", "API_TOKEN=s3cret=yes", "--secret"], config)).out).toContain("Set API_TOKEN (secret)");
+      const listed = await cli(["env", "cli-app"], config);
+      expect(listed.out).toContain("API_TOKEN  (secret)  runtime");
+      expect(listed.out).not.toContain("s3cret");
+
+      const first = await cli(["deploy", "cli-app"], config);
+      expect(first.code).toBe(0);
+      expect(first.out).toContain("Live at http://cli-app.localhost");
+      await deployments.waitForIdle();
+      expect(lastJob?.env?.runtime).toEqual({ API_TOKEN: "s3cret=yes" }); // `=` inside the value survives
+
+      expect((await cli(["deploy", "cli-app", "--no-follow"], config)).code).toBe(0);
+      await deployments.waitForIdle();
+      expect((await cli(["status", "cli-app"], config)).out).toMatch(/Live at http:\/\/cli-app\.localhost — deployment/);
+      expect((await cli(["logs", "cli-app"], config)).out).toBe("hello\n");
+
+      const rolledBack = await cli(["rollback", "cli-app"], config);
+      expect(rolledBack.code).toBe(0);
+      expect(rolledBack.out).toMatch(/is live again at http:\/\/cli-app\.localhost/);
+
+      // Errors come back as the API's own words, with a non-zero exit.
+      const missing = await cli(["status", "nope"], config);
+      expect(missing).toMatchObject({ code: 1, err: 'No project "nope". `shipyard projects` lists yours.\n' });
+
+      // A revoked key stops the CLI too.
+      const keyId = (await prisma.apiKey.findFirstOrThrow({ where: { name: "cli" } })).id;
+      await call(alice, "DELETE", `/api/api-keys/${keyId}`);
+      expect((await cli(["projects"], config)).err).toContain("Run `shipyard login`");
+    } finally {
+      await fs.rm(configDir, { recursive: true, force: true });
+    }
+  });
+});

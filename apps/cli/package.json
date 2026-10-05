@@ -1,0 +1,16 @@
+{
+  "name": "@shipyard/cli",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The shipyard command: talks to a Shipyard server's API with an API key.",
+  "bin": {
+    "shipyard": "./dist/bin.js"
+  },
+  "scripts": {
+    "start": "tsx src/bin.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  }
+}
