@@ -27,6 +27,7 @@ import { silentLogger } from "../helpers/silentLogger.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const HELLO_APP = path.resolve(here, "../../../../examples/hello-node");
 const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
+const NODE_NO_DOCKERFILE_APP = path.resolve(here, "../fixtures/node-no-dockerfile");
 
 function localSource(sourceDir: string): SourceProvider {
   return {
@@ -133,6 +134,27 @@ describe("deployment engine against real Docker", () => {
     expect(error.deployment.status).toBe(S.FAILED);
     expect(error.message).toContain("exited with code 1");
     expect(runtimeLogs.join("")).toContain("fatal: missing DATABASE_URL");
+  });
+
+  it("generates a Dockerfile for a Node app without one, honouring .dockerignore", async () => {
+    const service = engine(NODE_NO_DOCKERFILE_APP);
+    let systemLog = "";
+
+    const record = await service.run(job("node-no-dockerfile"), {
+      onLog: (source, text) => void (source === "system" && (systemLog += text)),
+    });
+    created.push(record);
+
+    expect(record.status).toBe(S.RUNNING);
+    expect(systemLog).toContain("detected a Node.js project (npm, Node 24)");
+
+    const response = await fetch(record.deploymentUrl!.replace("localhost", "127.0.0.1"));
+    expect(await response.json()).toEqual({
+      built: "built during docker build", // `npm run build` ran
+      secretInImage: false, // .dockerignore was applied to the build context
+      user: "node", // not root
+      nodeEnv: "production",
+    });
   });
 
   it("refuses to operate on containers Shipyard did not create", async () => {

@@ -1,0 +1,9 @@
+{
+  "name": "node-no-dockerfile",
+  "private": true,
+  "description": "Fixture: Node app WITHOUT a Dockerfile. Shipyard must generate one.",
+  "scripts": {
+    "build": "node build.js",
+    "start": "node server.js"
+  }
+}

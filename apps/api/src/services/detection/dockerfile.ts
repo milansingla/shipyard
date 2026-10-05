@@ -1,10 +1,13 @@
-import fs from "node:fs/promises";
 import path from "node:path";
+
+import { readRegularFile } from "./files.js";
 
 /** Port assumed when a Dockerfile has no usable EXPOSE instruction (V0.1 behaviour). */
 export const DEFAULT_CONTAINER_PORT = 3000;
 
 export const DOCKERFILE_NAME = "Dockerfile";
+
+const MAX_DOCKERFILE_BYTES = 1024 * 1024;
 
 export interface DockerfileInfo {
   path: string;
@@ -18,19 +21,9 @@ export interface DockerfileInfo {
  * repository cannot trick Shipyard into reading files outside the clone.
  */
 export async function detectDockerfile(sourceDir: string): Promise<DockerfileInfo | null> {
-  const dockerfilePath = path.join(sourceDir, DOCKERFILE_NAME);
-
-  let stats;
-  try {
-    stats = await fs.lstat(dockerfilePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-  if (!stats.isFile()) return null;
-
-  const contents = await fs.readFile(dockerfilePath, "utf8");
-  return { path: dockerfilePath, exposedPort: parseExposedPort(contents) };
+  const contents = await readRegularFile(sourceDir, DOCKERFILE_NAME, MAX_DOCKERFILE_BYTES);
+  if (contents === null) return null;
+  return { path: path.join(sourceDir, DOCKERFILE_NAME), exposedPort: parseExposedPort(contents) };
 }
 
 /**

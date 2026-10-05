@@ -52,7 +52,14 @@ afterEach(async () => {
   await fs.rm(tmpRoot, { recursive: true, force: true });
 });
 
-function harness(options: { dockerfile?: string | null; buildFails?: boolean; healthFails?: boolean } = {}): Harness {
+function harness(
+  options: {
+    dockerfile?: string | null;
+    files?: Record<string, string>;
+    buildFails?: boolean;
+    healthFails?: boolean;
+  } = {},
+): Harness {
   const calls: string[] = [];
   const statuses: DeploymentStatus[] = [];
   const workspaceRoot = path.join(tmpRoot, "ws");
@@ -63,6 +70,9 @@ function harness(options: { dockerfile?: string | null; buildFails?: boolean; he
       await fs.mkdir(destination, { recursive: true });
       const dockerfile = options.dockerfile === undefined ? "FROM node\nEXPOSE 8080\n" : options.dockerfile;
       if (dockerfile !== null) await fs.writeFile(path.join(destination, "Dockerfile"), dockerfile);
+      for (const [name, contents] of Object.entries(options.files ?? {})) {
+        await fs.writeFile(path.join(destination, name), contents);
+      }
       return { path: destination, commitSha: COMMIT };
     },
   };
@@ -72,8 +82,9 @@ function harness(options: { dockerfile?: string | null; buildFails?: boolean; he
   };
 
   const docker: EngineDocker = {
-    async buildImage(_ctx: string, imageName: string, labels: Record<string, string>) {
+    async buildImage(ctx: string, imageName: string, labels: Record<string, string>, _onLog, dockerfile = "Dockerfile") {
       calls.push(`build:${imageName}:${labels["shipyard.container-port"]}:${labels["shipyard.project-id"]}`);
+      calls.push(`dockerfile:${dockerfile}:${await fs.readFile(path.join(ctx, dockerfile), "utf8").then(() => "present", () => "missing")}`);
       if (options.buildFails) {
         throw new AppError(ErrorCode.DOCKER_BUILD_FAILED, "Docker build failed: npm ci exited 1");
       }
@@ -136,6 +147,7 @@ describe("DeploymentEngine.run", () => {
     expect(h.calls).toEqual([
       "clone:main",
       "build:shipyard/hello:3f2a9c1e77b4:8080:p1",
+      "dockerfile:Dockerfile:present",
       "start:shipyard-hello-3f2a9c1e77b4:8080",
       "health:http://127.0.0.1:49153/",
     ]);
@@ -176,6 +188,29 @@ describe("DeploymentEngine.run", () => {
     expect(state.containerPort).toBe(3000);
     expect(state.branch).toBeNull();
     expect(h.calls[0]).toBe("clone:default");
+  });
+
+  it("generates a Dockerfile for a Node project without one, builds with it, and cleans up", async () => {
+    const h = harness({ dockerfile: null, files: { "package.json": JSON.stringify({ scripts: { start: "node ." } }) } });
+    let systemLog = "";
+    const state = await h.engine.run(job(), {
+      ...h.observer,
+      onLog: (source, text) => void (source === "system" && (systemLog += text)),
+    });
+
+    expect(state.status).toBe(S.RUNNING);
+    expect(state.containerPort).toBe(3000);
+    expect(h.calls).toContain("dockerfile:.shipyard.Dockerfile:present");
+    expect(systemLog).toContain("Generated Dockerfile:");
+    expect(await workspaceEntries(h.workspaceRoot)).toEqual([]);
+  });
+
+  it("fails with PROJECT_DETECTION_FAILED for a Node project it cannot start", async () => {
+    const h = harness({ dockerfile: null, files: { "package.json": "{}" } });
+    const error = (await h.engine.run(job(), h.observer).catch((e: unknown) => e)) as DeploymentFailedError;
+
+    expect(error.code).toBe(ErrorCode.PROJECT_DETECTION_FAILED);
+    expect(h.statuses).toEqual([S.CLONING, S.FAILED]);
   });
 
   it("fails with DOCKERFILE_NOT_FOUND and cleans up the clone", async () => {

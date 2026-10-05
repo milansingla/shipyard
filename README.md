@@ -32,7 +32,7 @@ cp .env.example .env      # optional — every variable has a safe default
 ## Deploy something (CLI)
 
 ```bash
-# Any public GitHub repo with a Dockerfile at its root
+# Any public GitHub repo with a Dockerfile — or a Node.js app (package.json) without one
 npm run shipyard -- deploy https://github.com/<owner>/<repo>
 npm run shipyard -- deploy https://github.com/<owner>/<repo> --branch develop
 
@@ -46,7 +46,8 @@ A sample app lives in [`examples/hello-node`](examples/hello-node) — push it t
 a GitHub repo of your own to try a full deployment.
 
 **Your app must** listen on `0.0.0.0` and on the port in `$PORT` (Shipyard sets
-it to the Dockerfile's `EXPOSE` port, or 3000 when there is none).
+it to the Dockerfile's `EXPOSE` port, or 3000 when there is none or when
+Shipyard generated the Dockerfile — see [build detection](docs/deployment-engine.md#build-detection--dockerfile-generation)).
 
 ## Run the API
 
@@ -86,7 +87,7 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 
 - [x] **M1** TypeScript foundation, status model, health checks, tests
 - [ ] **M2** PostgreSQL + Prisma, REST deployment API, deployment history
-- [ ] **M3** Node.js project detection + Dockerfile generation
+- [x] **M3** Node.js project detection + Dockerfile generation
 - [ ] **M4** GitHub OAuth, repository & branch selection
 - [ ] **M5** Next.js dashboard
 - [ ] **M6** GitHub webhooks (auto-deploy on push)

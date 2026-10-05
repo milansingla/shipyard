@@ -1,6 +1,6 @@
 import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
-import { DEFAULT_CONTAINER_PORT, detectDockerfile } from "../detection/dockerfile.js";
+import { prepareBuild } from "../build/prepareBuild.js";
 import { type DockerService, ShipyardLabel } from "../docker/DockerService.js";
 import type { LogChunk } from "../docker/logs.js";
 import { buildContainerName, buildImageName } from "../docker/naming.js";
@@ -52,7 +52,7 @@ export class DeploymentFailedError extends AppError {
 const FAILURE_LOG_TAIL = 50;
 
 /**
- * The mechanics of a deployment: clone → detect → build → start → health check.
+ * The mechanics of a deployment: clone → detect/generate Dockerfile → build → start → health check.
  *
  * It enforces the status order for ONE run and reports progress to an observer.
  * It knows nothing about the database, projects, or which other deployments
@@ -97,27 +97,20 @@ export class DeploymentEngine {
       state.commitSha = source.commitSha;
       log("system", `Cloned ${job.repository.cloneUrl} at ${source.commitSha.slice(0, 7)}\n`);
 
-      // 2. Detect
-      const dockerfile = await detectDockerfile(source.path);
-      if (!dockerfile) {
-        throw new AppError(
-          ErrorCode.DOCKERFILE_NOT_FOUND,
-          "No Dockerfile found at the repository root. (Automatic Dockerfile generation for Node.js projects is planned.)",
-          { statusCode: 422 },
-        );
-      }
-      state.containerPort = dockerfile.exposedPort ?? DEFAULT_CONTAINER_PORT;
-      log(
-        "system",
-        dockerfile.exposedPort === null
-          ? `Dockerfile has no EXPOSE; assuming port ${state.containerPort}\n`
-          : `Dockerfile exposes port ${state.containerPort}\n`,
-      );
+      // 2. Detect: the repository's own Dockerfile, or one generated for a Node.js project.
+      const plan = await prepareBuild(source.path, (text) => log("system", text));
+      state.containerPort = plan.containerPort;
 
       // 3. Build
       await moveTo(DeploymentStatus.BUILDING);
       const labels = this.labelsFor(job, state.containerPort);
-      await this.deps.docker.buildImage(source.path, state.imageName, labels, (text) => log("build", text));
+      await this.deps.docker.buildImage(
+        source.path,
+        state.imageName,
+        labels,
+        (text) => log("build", text),
+        plan.dockerfile,
+      );
       // Source is baked into the image now; the clone is no longer needed.
       await this.deps.workspace.cleanup(workspacePath);
       workspacePath = null;

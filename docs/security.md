@@ -52,6 +52,11 @@ scanning.
 | Stack traces / secrets in API errors | Generic 500 message in production; only `AppError` messages returned      | `errorHandler.ts` |
 | Secrets in logs                    | pino `redact` for auth headers, cookies, tokens                             | `logger.ts` |
 | Secrets in git                     | `.env` git-ignored; only `.env.example` committed                           | `.gitignore` |
+| Secrets copied into images         | `.dockerignore` applied client-side (the daemon doesn't), `.git` always excluded | `buildContext.ts` |
+| Injection via generated Dockerfile | RUN lines are fixed templates; the only repo-derived value (start file) is validated and emitted as exec-form JSON | `generateDockerfile.ts`, `nodeProject.ts` |
+| Generated file written via symlink | Written with `O_EXCL` under a reserved name: fails if anything exists there | `prepareBuild.ts` |
+| Builds running as root             | Generated Dockerfiles install, build and run as the `node` user             | `generateDockerfile.ts` |
+| Oversized repo metadata            | `package.json` / Dockerfile / `.dockerignore` size-capped, read only if regular files | `detection/files.ts` |
 | Oversized request bodies           | `express.json({ limit: "100kb" })`                                          | `app.ts` |
 
 ## Known gaps (tracked)
@@ -63,7 +68,6 @@ scanning.
   build leaves unlabelled intermediate layers. Planned for M2 (build deadline + cleanup).
 - No memory/CPU limits on containers (would break some apps without per-project config).
 - No egress restrictions for deployed containers.
-- Build context respects `.git` exclusion only, not the repo's `.dockerignore`.
 - Webhook signature verification arrives with webhooks (M6) — HMAC-SHA256,
   constant-time compare, raw body.
 - GitHub access tokens (M4) will be stored server-side only, never sent to the browser.
