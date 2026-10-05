@@ -88,6 +88,17 @@ retried or redelivered webhook hits the primary key and is skipped. If handling
 fails, the row is deleted again so GitHub's retry can succeed. Rows older than
 30 days are pruned at startup.
 
+### EnvironmentVariable (`environment_variables`)
+
+| Column | Notes |
+| ------ | ----- |
+| `projectId` + `key` (unique) | Deleted with the project (cascade) |
+| `value` | SecretBox ciphertext (`v1:…`), never plaintext, bound to `env:<projectId>:<key>` |
+| `secret` | Value never returned by the API |
+| `target` | `RUNTIME` · `BUILD` · `BOTH` (secrets: `RUNTIME` only) |
+
+See [environment.md](environment.md).
+
 ## Known limits
 
 - The route table Traefik reads (`<SHIPYARD_DATA_DIR>/traefik/routes.yml`) is

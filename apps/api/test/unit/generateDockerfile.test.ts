@@ -61,6 +61,15 @@ describe("generateNodeDockerfile", () => {
     expect(dockerfile.split("\n").filter((line) => line.startsWith("RUN id"))).toEqual([]);
   });
 
+  it("declares build variables as ARGs (names only) before install and build", () => {
+    const dockerfile = generateNodeDockerfile(project(), 3000, ["API_URL", "SENTRY_RELEASE"]);
+    expect(dockerfile).toContain("COPY --chown=node:node . .\n# Build variables set in Shipyard\nARG API_URL\nARG SENTRY_RELEASE\nRUN npm ci");
+  });
+
+  it("refuses a build variable name that could inject an instruction", () => {
+    expect(() => generateNodeDockerfile(project(), 3000, ["X\nRUN id"])).toThrow(RangeError);
+  });
+
   it.each([0, 70000, 1.5])("rejects port %d", (port) => {
     expect(() => generateNodeDockerfile(project(), port)).toThrow(RangeError);
   });

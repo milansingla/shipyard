@@ -65,6 +65,18 @@ export interface ProjectWithLatestDeployment extends Project {
   latestDeployment: Deployment | null;
 }
 
+/** When a variable is available: to the running app, to the build, or both. */
+export type EnvironmentTarget = "RUNTIME" | "BUILD" | "BOTH";
+
+export interface EnvironmentVariable {
+  key: string;
+  /** null for secrets: the API never sends a secret's value back. */
+  value: string | null;
+  secret: boolean;
+  target: EnvironmentTarget;
+  updatedAt: string;
+}
+
 export interface DeploymentLogs {
   type: "build" | "runtime";
   content: string;

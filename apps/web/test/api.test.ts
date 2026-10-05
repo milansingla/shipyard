@@ -39,6 +39,21 @@ describe("API client", () => {
     await expect(api("/x")).rejects.toMatchObject({ status: 409, code: "DEPLOYMENT_IN_PROGRESS", message: "Wait for it." });
   });
 
+  it("adds the per-field reasons of a validation error to its message", async () => {
+    const { api } = client(() =>
+      json(400, {
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "Invalid variable name.",
+          details: { formErrors: [], fieldErrors: { key: ["is set by Shipyard and can't be overridden"] } },
+        },
+      }),
+    );
+    await expect(api("/x")).rejects.toMatchObject({
+      message: "Invalid variable name. key: is set by Shipyard and can't be overridden",
+    });
+  });
+
   it("flags 401 as signed out", async () => {
     const { api } = client(() => json(401, { error: { code: "UNAUTHENTICATED", message: "Sign in." } }));
     const error = (await api("/x").catch((e: unknown) => e)) as ApiError;

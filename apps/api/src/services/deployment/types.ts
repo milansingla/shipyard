@@ -11,6 +11,8 @@ export interface DeploymentJob {
   name: string;
   /** Extra Docker labels, e.g. the owning project's id. */
   labels?: Record<string, string>;
+  /** Decrypted variables: `runtime` goes into the container, `build` becomes build args. */
+  env?: { runtime: Record<string, string>; build: Record<string, string> };
 }
 
 /**

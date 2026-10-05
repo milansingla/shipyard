@@ -21,6 +21,7 @@ const app = createApp({
   docker: services.docker,
   projects: services.projects,
   deployments: services.deployments,
+  environment: services.environment,
   auth: services.auth,
   webhooks: services.webhooks,
   allowedOrigins: [config.publicUrl, config.appUrl],

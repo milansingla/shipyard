@@ -9,6 +9,7 @@ import { sessionCookieName } from "./middleware/authenticate.js";
 import { AuthService } from "./modules/auth/AuthService.js";
 import { BuildLogStore } from "./modules/deployments/BuildLogStore.js";
 import { DeploymentService } from "./modules/deployments/DeploymentService.js";
+import { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { ProjectService } from "./modules/projects/ProjectService.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
@@ -31,6 +32,8 @@ export interface ApiServices extends EngineServices {
   prisma: PrismaClient;
   projects: ProjectService;
   deployments: DeploymentService;
+  /** null without SHIPYARD_SECRET_KEY (values are always stored encrypted). */
+  environment: EnvironmentService | null;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -83,10 +86,15 @@ function createRouter(config: AppConfig, logger: Logger): Router {
 export function createApiServices(config: AppConfig, databaseUrl: string, logger: Logger): ApiServices {
   const engineServices = createEngineServices(config, logger);
   const prisma = createPrismaClient(databaseUrl);
+  const secretBox = config.auth.secretKey ? new SecretBox(config.auth.secretKey) : null;
+  const environment = secretBox
+    ? new EnvironmentService({ prisma, secretBox, logger: logger.child({ component: "environment" }) })
+    : null;
 
   const deployments = new DeploymentService({
     prisma,
     engine: engineServices.engine,
+    environment,
     router: engineServices.router,
     buildLogs: new BuildLogStore(config.dataDir),
     allowedGitHosts: config.allowedGitHosts,
@@ -107,18 +115,19 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
       }
     : null;
 
-  return { ...engineServices, prisma, projects, deployments, auth: createAuth(config, prisma, logger), webhooks };
+  const auth = createAuth(config, prisma, secretBox, logger);
+  return { ...engineServices, prisma, projects, deployments, environment, auth, webhooks };
 }
 
-function createAuth(config: AppConfig, prisma: PrismaClient, logger: Logger): AppAuth | null {
-  const { github: githubConfig, secretKey } = config.auth;
-  if (!githubConfig || !secretKey) return null; // config validation guarantees both or neither
+function createAuth(config: AppConfig, prisma: PrismaClient, secretBox: SecretBox | null, logger: Logger): AppAuth | null {
+  const { github: githubConfig } = config.auth;
+  if (!githubConfig || !secretBox) return null; // config validation guarantees both or neither
 
   const github = new GitHubClient(githubConfig);
   const service = new AuthService({
     prisma,
     github,
-    secretBox: new SecretBox(secretKey),
+    secretBox,
     redirectUri: `${config.publicUrl}/api/auth/github/callback`,
     sessionTtlMs: config.auth.sessionTtlMs,
     allowedUsers: config.auth.allowedUsers,

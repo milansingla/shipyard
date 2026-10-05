@@ -79,7 +79,7 @@ model Project {
   owner           User         @relation(fields: [ownerId], references: [id], onDelete: Restrict)
   name            String
   /// URL/Docker-safe identifier derived from `name`. Used for container names
-  /// now and for the project's hostname once Traefik routing exists.
+  /// and the project's hostname (<slug>.<SHIPYARD_PUBLIC_DOMAIN>).
   slug            String       @unique
   repositoryUrl   String
   repositoryOwner String
@@ -88,9 +88,37 @@ model Project {
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   deployments     Deployment[]
+  environmentVariables EnvironmentVariable[]
 
   @@index([ownerId, createdAt(sort: Desc)])
   @@map("projects")
+}
+
+/// When a variable is available: to the running app, to `docker build`, or both.
+enum EnvironmentVariableTarget {
+  RUNTIME
+  BUILD
+  BOTH
+}
+
+/// A project's environment variable. The value is ALWAYS stored encrypted
+/// (SecretBox, bound to project + key). `secret` only decides whether the API
+/// ever shows the value again; secrets are runtime-only (build args end up in
+/// image history).
+model EnvironmentVariable {
+  id        String                    @id @default(uuid()) @db.Uuid
+  projectId String                    @db.Uuid
+  project   Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  key       String
+  /// SecretBox ciphertext ("v1:…"), never plaintext.
+  value     String
+  secret    Boolean                   @default(false)
+  target    EnvironmentVariableTarget @default(RUNTIME)
+  createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @updatedAt
+
+  @@unique([projectId, key])
+  @@map("environment_variables")
 }
 
 /// One attempt to build and run a project at a specific commit. Never updated

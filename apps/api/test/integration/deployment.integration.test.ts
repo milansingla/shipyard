@@ -55,12 +55,13 @@ function engine(sourceDir: string): DeploymentEngine {
   });
 }
 
-function job(name: string): DeploymentJob {
+function job(name: string, env?: DeploymentJob["env"]): DeploymentJob {
   return {
     id: randomUUID(),
     repository: parseRepositoryUrl(`https://github.com/shipyard-test/${name}`, ["github.com"]),
     branch: null,
     name,
+    env,
   };
 }
 
@@ -148,11 +149,15 @@ describe("deployment engine against real Docker", () => {
     expect(runtimeLogs.join("")).toContain("fatal: missing DATABASE_URL");
   });
 
-  it("generates a Dockerfile for a Node app without one, honouring .dockerignore", async () => {
+  it("generates a Dockerfile for a Node app without one, honouring .dockerignore and variables", async () => {
     const service = engine(NODE_NO_DOCKERFILE_APP);
     let systemLog = "";
+    const env = {
+      runtime: { GREETING: "ahoy", API_TOKEN: "tok-secret-123" },
+      build: { BUILD_LABEL: "v42" },
+    };
 
-    const record = await service.run(job("node-no-dockerfile"), {
+    const record = await service.run(job("node-no-dockerfile", env), {
       onLog: (source, text) => void (source === "system" && (systemLog += text)),
     });
     created.push(record);
@@ -162,11 +167,21 @@ describe("deployment engine against real Docker", () => {
 
     const response = await fetch(record.deploymentUrl!.replace("localhost", "127.0.0.1"));
     expect(await response.json()).toEqual({
-      built: "built during docker build", // `npm run build` ran
+      built: "built during docker build (v42)", // `npm run build` ran, and saw the build variable
       secretInImage: false, // .dockerignore was applied to the build context
       user: "node", // not root
       nodeEnv: "production",
+      greeting: "ahoy", // runtime variable reached the app
     });
+
+    // Runtime variables live in the container's config, never in the image.
+    const container = await dockerode.getContainer(record.containerId!).inspect();
+    expect(container.Config.Env).toEqual(expect.arrayContaining(["API_TOKEN=tok-secret-123", "PORT=3000"]));
+    const image = JSON.stringify(await dockerode.getImage(record.imageName).history());
+    expect(image).not.toContain("tok-secret-123");
+    // Build variables DO end up in the image history — why secrets can't be build variables.
+    expect(image).toContain("BUILD_LABEL=v42");
+    expect(systemLog).not.toContain("tok-secret-123");
   });
 
   it("refuses to operate on containers Shipyard did not create", async () => {

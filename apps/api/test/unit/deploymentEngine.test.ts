@@ -86,7 +86,15 @@ function harness(
   };
 
   const docker: EngineDocker = {
-    async buildImage(ctx: string, imageName: string, labels: Record<string, string>, _onLog, dockerfile = "Dockerfile") {
+    async buildImage(
+      ctx: string,
+      imageName: string,
+      labels: Record<string, string>,
+      _onLog,
+      dockerfile = "Dockerfile",
+      buildArgs: Record<string, string> = {},
+    ) {
+      if (Object.keys(buildArgs).length > 0) calls.push(`buildArgs:${JSON.stringify(buildArgs)}`);
       calls.push(`build:${imageName}:${labels["shipyard.container-port"]}:${labels["shipyard.project-id"]}`);
       calls.push(`dockerfile:${dockerfile}:${await fs.readFile(path.join(ctx, dockerfile), "utf8").then(() => "present", () => "missing")}`);
       if (options.buildFails) {
@@ -95,6 +103,7 @@ function harness(
     },
     async createAndStartContainer(opts) {
       calls.push(`start:${opts.containerName}:${opts.containerPort}:${opts.network ?? "bridge"}`);
+      if (opts.env && Object.keys(opts.env).length > 0) calls.push(`env:${JSON.stringify(opts.env)}`);
       return { id: "container-id", hostPort: 49153 };
     },
     async getContainerState() {
@@ -297,6 +306,22 @@ describe("DeploymentEngine.run", () => {
     expect(error.deployment.failedStage).toBe(S.ROUTING);
     expect(h.calls.at(-1)).toBe("stop:container-id");
     expect(error.deployment.deploymentUrl).toBeNull();
+  });
+
+  it("passes runtime variables to the container and build variables to the build, logging only names", async () => {
+    const h = harness({ dockerfile: null, files: { "package.json": JSON.stringify({ scripts: { start: "node ." } }) } });
+    let systemLog = "";
+    await h.engine.run(
+      job({ env: { runtime: { DATABASE_URL: "postgres://secret" }, build: { API_URL: "https://api" } } }),
+      { onLog: (source, text) => void (source === "system" && (systemLog += text)) },
+    );
+
+    expect(h.calls).toContain('buildArgs:{"API_URL":"https://api"}');
+    expect(h.calls).toContain('env:{"DATABASE_URL":"postgres://secret"}');
+    expect(systemLog).toContain("ARG API_URL"); // declared in the generated Dockerfile
+    expect(systemLog).toContain("Environment: runtime DATABASE_URL; build API_URL");
+    expect(systemLog).not.toContain("postgres://secret");
+    expect(systemLog).not.toContain("https://api");
   });
 
   it("a failing observer fails the deployment instead of being ignored", async () => {

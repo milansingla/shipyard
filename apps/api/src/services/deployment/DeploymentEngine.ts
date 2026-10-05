@@ -104,7 +104,9 @@ export class DeploymentEngine {
 
       // 2. Detect: the repository's own Dockerfile, or one generated for a Node.js project.
       await moveTo(DeploymentStatus.DETECTING);
-      const plan = await prepareBuild(source.path, (text) => log("system", text));
+      const env = job.env ?? { runtime: {}, build: {} };
+      const plan = await prepareBuild(source.path, (text) => log("system", text), Object.keys(env.build).sort());
+      log("system", describeEnvironment(env));
       state.containerPort = plan.containerPort;
 
       // 3. Build
@@ -116,6 +118,7 @@ export class DeploymentEngine {
         labels,
         (text) => log("build", text),
         plan.dockerfile,
+        env.build,
       );
       // Source is baked into the image now; the clone is no longer needed.
       await this.deps.workspace.cleanup(workspacePath);
@@ -129,6 +132,7 @@ export class DeploymentEngine {
         containerPort: state.containerPort,
         labels,
         network: this.deps.router.network,
+        env: env.runtime,
       });
       state.containerId = container.id;
       state.hostPort = container.hostPort;
@@ -310,6 +314,12 @@ export class DeploymentEngine {
       logger.warn({ err: logError }, "Could not read logs of failed container");
     }
   }
+}
+
+/** Names only — values never reach a log. */
+function describeEnvironment(env: { runtime: Record<string, string>; build: Record<string, string> }): string {
+  const list = (vars: Record<string, string>) => Object.keys(vars).sort().join(", ") || "none";
+  return `Environment: runtime ${list(env.runtime)}; build ${list(env.build)}\n`;
 }
 
 // Published ports are bound to 127.0.0.1 or 0.0.0.0; either way, loopback reaches them.

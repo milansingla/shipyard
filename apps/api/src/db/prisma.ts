@@ -3,7 +3,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "../generated/prisma/client.js";
 
 export { Prisma, PrismaClient };
-export type { Deployment, Project, User } from "../generated/prisma/client.js";
+export type { Deployment, EnvironmentVariable, Project, User } from "../generated/prisma/client.js";
 export { DeploymentTrigger } from "../generated/prisma/enums.js";
 
 /**

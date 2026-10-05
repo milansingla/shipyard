@@ -42,7 +42,7 @@ export function createApiClient(fetchImpl: typeof fetch = (...args) => fetch(...
     if (res.status === 204) return undefined as T;
 
     const body = (await res.json().catch(() => null)) as
-      | { data?: T; error?: { code?: string; message?: string } }
+      | { data?: T; error?: { code?: string; message?: string; details?: unknown } }
       | null;
 
     if (!res.ok) {
@@ -50,10 +50,28 @@ export function createApiClient(fetchImpl: typeof fetch = (...args) => fetch(...
       if (!body?.error) {
         throw new ApiError(res.status, "API_UNAVAILABLE", "The Shipyard API isn't responding. Is it running (npm run dev:api)?");
       }
-      throw new ApiError(res.status, body.error.code ?? "UNKNOWN", body.error.message ?? `Request failed (HTTP ${res.status}).`);
+      const message = body.error.message ?? `Request failed (HTTP ${res.status}).`;
+      throw new ApiError(res.status, body.error.code ?? "UNKNOWN", withValidationDetails(message, body.error.details));
     }
     return body?.data as T;
   };
 }
 
 export const api = createApiClient();
+
+/**
+ * The API reports validation failures as a summary ("Invalid environment
+ * variable.") plus per-field messages (zod's flattened errors). The person
+ * needs the reasons, so they are appended: "… key: is set by Shipyard".
+ */
+function withValidationDetails(message: string, details: unknown): string {
+  const { formErrors = [], fieldErrors = {} } = (details ?? {}) as {
+    formErrors?: string[];
+    fieldErrors?: Record<string, string[] | undefined>;
+  };
+  const reasons = [
+    ...formErrors,
+    ...Object.entries(fieldErrors).flatMap(([field, messages]) => (messages ?? []).map((m) => `${field}: ${m}`)),
+  ];
+  return reasons.length === 0 ? message : `${message} ${reasons.join("; ")}`;
+}

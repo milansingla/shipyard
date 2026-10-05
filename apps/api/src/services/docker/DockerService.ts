@@ -43,6 +43,8 @@ export interface CreateContainerOptions {
   labels: Record<string, string>;
   /** Docker network to attach the container to (instead of the default bridge), e.g. the proxy's. */
   network?: string | null;
+  /** The app's environment variables. PORT is always Shipyard's. */
+  env?: Record<string, string>;
 }
 
 export interface StartedContainer {
@@ -93,6 +95,7 @@ export class DockerService {
     labels: Record<string, string>,
     onLog: (text: string) => void,
     dockerfile = "Dockerfile",
+    buildArgs: Record<string, string> = {},
   ): Promise<void> {
     const context = tar.pack(contextDir, { ignore: await createContextFilter(contextDir, dockerfile) });
 
@@ -104,6 +107,7 @@ export class DockerService {
         t: imageName,
         dockerfile,
         labels,
+        buildargs: buildArgs,
         rm: true,
         forcerm: true, // remove intermediate containers even when the build fails
         abortSignal: abort.signal,
@@ -167,7 +171,8 @@ export class DockerService {
       container = await this.docker.createContainer({
         Image: options.imageName,
         name: options.containerName,
-        Env: [`PORT=${options.containerPort}`],
+        // PORT last: if a key appears twice, Docker keeps the last one.
+        Env: [...Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`), `PORT=${options.containerPort}`],
         Labels: options.labels,
         ExposedPorts: { [portKey]: {} },
         HostConfig: {

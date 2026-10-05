@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { type Deployment, DeploymentTrigger, type PrismaClient, type Project } from "../../db/prisma.js";
-import { ConflictError, ErrorCode, NotFoundError, errorMessage } from "../../lib/errors.js";
+import { AppError, ConflictError, ErrorCode, NotFoundError, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { DeploymentEngine, DeploymentFailedError } from "../../services/deployment/DeploymentEngine.js";
 import { DeploymentStatus, IN_PROGRESS_STATUSES, assertTransition } from "../../services/deployment/status.js";
@@ -10,6 +10,7 @@ import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
+import type { EnvironmentService } from "../environment/EnvironmentService.js";
 import type { BuildLogStore, BuildLogWriter } from "./BuildLogStore.js";
 
 export type EngineLike = Pick<
@@ -20,6 +21,8 @@ export type EngineLike = Pick<
 export interface DeploymentServiceDeps {
   prisma: PrismaClient;
   engine: EngineLike;
+  /** Decrypts the project's variables for each deployment; null = no variables (no secret key). */
+  environment: Pick<EnvironmentService, "forDeployment"> | null;
   /** The same router the engine uses: stopping takes a deployment out of it, startup rebuilds it. */
   router: Pick<Router, "urlFor" | "deactivate" | "sync">;
   buildLogs: Pick<BuildLogStore, "open" | "read" | "remove">;
@@ -296,6 +299,7 @@ export class DeploymentService {
         branch: deployment.branch,
         name: project.slug,
         labels: { [ShipyardLabel.PROJECT_ID]: project.id },
+        env: (await this.deps.environment?.forDeployment(project.id)) ?? undefined,
       };
 
       await this.deps.engine.run(job, {
@@ -307,8 +311,14 @@ export class DeploymentService {
     } catch (error) {
       // The engine already persisted FAILED for errors inside the pipeline.
       if (!(error instanceof DeploymentFailedError)) {
-        logger.error({ err: error }, "Deployment crashed outside the engine");
-        await this.markFailed(deployment.id, error);
+        if (error instanceof AppError) {
+          // Expected, before the pipeline started (e.g. a variable that can't be decrypted).
+          logger.warn({ code: error.code, reason: error.message }, "Deployment could not start");
+        } else {
+          logger.error({ err: error }, "Deployment crashed outside the engine");
+        }
+        writer?.write(`ERROR: ${errorMessage(error)}\n`);
+        await this.markFailed(deployment.id, error, DeploymentStatus.QUEUED);
       }
     } finally {
       await writer?.close().catch((closeError: unknown) => logger.warn({ err: closeError }, "Could not close build log"));

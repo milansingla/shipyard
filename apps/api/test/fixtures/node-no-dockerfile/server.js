@@ -13,6 +13,7 @@ http
         secretInImage: fs.existsSync("secret.txt"),
         user: os.userInfo().username,
         nodeEnv: process.env.NODE_ENV,
+        greeting: process.env.GREETING ?? null, // a Shipyard runtime variable
       }),
     );
   })

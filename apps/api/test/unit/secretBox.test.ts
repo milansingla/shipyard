@@ -26,6 +26,13 @@ describe("SecretBox", () => {
     expect(() => box.decrypt(other.encrypt("gho_secret"))).toThrow();
   });
 
+  it("binds a value to its context: it won't decrypt under another, or none", () => {
+    const sealed = box.encrypt("db-password", "env:project-a:DATABASE_URL");
+    expect(box.decrypt(sealed, "env:project-a:DATABASE_URL")).toBe("db-password");
+    expect(() => box.decrypt(sealed, "env:project-b:DATABASE_URL")).toThrow();
+    expect(() => box.decrypt(sealed)).toThrow();
+  });
+
   it.each(["", "gho_plaintext", "v2:abc", "v1:", "v1:AAAA"])("rejects malformed %j", (value) => {
     expect(() => box.decrypt(value)).toThrow();
   });

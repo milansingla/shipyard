@@ -14,11 +14,12 @@ import { sessionCookieName } from "../../src/middleware/authenticate.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
 import { BuildLogStore } from "../../src/modules/deployments/BuildLogStore.js";
 import { DeploymentService, type EngineLike } from "../../src/modules/deployments/DeploymentService.js";
+import { EnvironmentService } from "../../src/modules/environment/EnvironmentService.js";
 import { ProjectService } from "../../src/modules/projects/ProjectService.js";
 import { signGitHubPayload } from "../../src/modules/webhooks/signature.js";
 import { WebhookService } from "../../src/modules/webhooks/WebhookService.js";
 import { DeploymentStatus as S } from "../../src/services/deployment/status.js";
-import type { DeploymentState } from "../../src/services/deployment/types.js";
+import type { DeploymentJob, DeploymentState } from "../../src/services/deployment/types.js";
 import { GitHubClient } from "../../src/services/github/GitHubClient.js";
 import type { Router } from "../../src/services/routing/Router.js";
 import { createTestPrisma, resetTables } from "../helpers/db.js";
@@ -124,9 +125,13 @@ const fakeRouter: Router = {
   },
 };
 
+/** The last job the fake engine was asked to run (to see what it would hand to Docker). */
+let lastJob: DeploymentJob | null = null;
+
 /** Walks a deployment to RUNNING instantly, without Docker, routing it like the real engine. */
 const fakeEngine: EngineLike = {
   async run(job, observer = {}) {
+    lastJob = job;
     const state: DeploymentState = {
       id: job.id,
       status: S.QUEUED,
@@ -187,6 +192,7 @@ let apiServer: http.Server;
 let api: string;
 let dataDir: string;
 let deployments: DeploymentService;
+let environment: EnvironmentService;
 
 beforeAll(async () => {
   prisma = createTestPrisma();
@@ -208,16 +214,19 @@ beforeAll(async () => {
   const auth = new AuthService({
     prisma,
     github,
-    secretBox: new SecretBox(Buffer.alloc(32, 5)),
+    secretBox: new SecretBox(Buffer.alloc(32, 5)), // the same key as `environment`, as in bootstrap.ts
     redirectUri: `${api}/api/auth/github/callback`,
     sessionTtlMs: 60 * 60 * 1000,
     // Matched case-insensitively; "alice-renamed" is used by the rename test.
     allowedUsers: ["alice", "bob", "alice-renamed"],
     logger: silentLogger,
   });
+  const secretBox = new SecretBox(Buffer.alloc(32, 5));
+  environment = new EnvironmentService({ prisma, secretBox, logger: silentLogger });
   deployments = new DeploymentService({
     prisma,
     engine: fakeEngine,
+    environment,
     router: fakeRouter,
     buildLogs: new BuildLogStore(dataDir),
     allowedGitHosts: ["github.com"],
@@ -237,6 +246,7 @@ beforeAll(async () => {
       docker: { ping: async () => true },
       projects,
       deployments,
+      environment,
       auth: { service: auth, github, sessionCookie: SESSION_COOKIE, secureCookies: false, appUrl: APP_URL },
       webhooks: {
         service: new WebhookService({ prisma, deployments, logger: silentLogger }),
@@ -698,5 +708,111 @@ describe("routing (zero-downtime redeploys)", () => {
 
     await deployments.reconcileOnStartup();
     expect(liveRoutes).toEqual(new Map([["docs", live]]));
+  });
+});
+
+describe("environment variables and secrets", () => {
+  async function newProject(cookie: string, repo: string): Promise<string> {
+    const created = await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` });
+    expect(created.status).toBe(201);
+    return created.body!.data.id as string;
+  }
+
+  it("stores every value encrypted and never returns a secret", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await newProject(alice, "env-app");
+
+    expect((await call(alice, "PUT", `/api/projects/${projectId}/env/API_URL`, { value: "https://api.example.com" })).status).toBe(200);
+    const saved = await call(alice, "PUT", `/api/projects/${projectId}/env/DATABASE_URL`, {
+      value: "postgres://u:hunter2@db/app",
+      secret: true,
+    });
+    expect(saved.body!.data).toMatchObject({ key: "DATABASE_URL", value: null, secret: true, target: "RUNTIME" });
+
+    const listed = await call(alice, "GET", `/api/projects/${projectId}/env`);
+    expect(JSON.stringify(listed.body)).not.toContain("hunter2");
+    expect(listed.body!.data.map((v: { key: string; value: string | null }) => [v.key, v.value])).toEqual([
+      ["API_URL", "https://api.example.com"],
+      ["DATABASE_URL", null],
+    ]);
+
+    const rows = await prisma.environmentVariable.findMany({ where: { projectId } });
+    for (const row of rows) {
+      expect(row.value.startsWith("v1:")).toBe(true);
+      expect(row.value).not.toContain("hunter2");
+      expect(row.value).not.toContain("api.example.com");
+    }
+  });
+
+  it.each([
+    ["PORT", { value: "8080" }, "set by Shipyard"],
+    ["1BAD", { value: "x" }, "must start with"],
+    ["TOKEN", { value: "x", secret: true, target: "BUILD" }, "only available at runtime"],
+    ["NUL", { value: "a\u0000b" }, "NUL"],
+  ])("rejects %s %j", async (key, body, message) => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await newProject(alice, "env-invalid");
+    const res = await call(alice, "PUT", `/api/projects/${projectId}/env/${key}`, body);
+    expect(res.status).toBe(400);
+    expect(JSON.stringify(res.body)).toContain(message);
+  });
+
+  it("other users can't read, set or delete a project's variables (404)", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = await newProject(alice, "env-private");
+    await call(alice, "PUT", `/api/projects/${projectId}/env/KEY`, { value: "alice-only" });
+
+    expect((await call(bob, "GET", `/api/projects/${projectId}/env`)).status).toBe(404);
+    expect((await call(bob, "PUT", `/api/projects/${projectId}/env/KEY`, { value: "bob" })).status).toBe(404);
+    expect((await call(bob, "DELETE", `/api/projects/${projectId}/env/KEY`)).status).toBe(404);
+    expect((await call(alice, "GET", `/api/projects/${projectId}/env`)).body!.data[0].value).toBe("alice-only");
+  });
+
+  it("hands decrypted values to the deployment: runtime and build, secrets never at build time", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await newProject(alice, "env-deploy");
+    const put = (key: string, body: object) => call(alice, "PUT", `/api/projects/${projectId}/env/${key}`, body);
+    await put("RUNTIME_ONLY", { value: "r" });
+    await put("BUILD_ONLY", { value: "b", target: "BUILD" });
+    await put("EVERYWHERE", { value: "e", target: "BOTH" });
+    await put("SECRET", { value: "s3cr3t", secret: true });
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+
+    expect(lastJob?.env).toEqual({
+      runtime: { RUNTIME_ONLY: "r", EVERYWHERE: "e", SECRET: "s3cr3t" },
+      build: { BUILD_ONLY: "b", EVERYWHERE: "e" },
+    });
+  });
+
+  it("replaces and deletes variables", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await newProject(alice, "env-edit");
+    await call(alice, "PUT", `/api/projects/${projectId}/env/MODE`, { value: "one" });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/MODE`, { value: "two" });
+    expect((await call(alice, "GET", `/api/projects/${projectId}/env`)).body!.data).toMatchObject([{ key: "MODE", value: "two" }]);
+
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}/env/MODE`)).status).toBe(204);
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}/env/MODE`)).status).toBe(404);
+    expect((await call(alice, "GET", `/api/projects/${projectId}/env`)).body!.data).toEqual([]);
+  });
+
+  it("a value copied into another row doesn't decrypt: the deployment fails safely, saying why", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await newProject(alice, "env-tampered");
+    await call(alice, "PUT", `/api/projects/${projectId}/env/A`, { value: "a", secret: true });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/B`, { value: "b", secret: true });
+    // Someone with database access swaps ciphertexts between keys.
+    const a = await prisma.environmentVariable.findFirstOrThrow({ where: { projectId, key: "A" } });
+    await prisma.environmentVariable.updateMany({ where: { projectId, key: "B" }, data: { value: a.value } });
+
+    const deployed = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+
+    const deployment = await call(alice, "GET", `/api/deployments/${deployed.body!.data.id}`);
+    expect(deployment.body!.data).toMatchObject({ status: S.FAILED, failedStage: S.QUEUED });
+    expect(deployment.body!.data.errorMessage).toContain("Environment variable B can't be decrypted");
   });
 });

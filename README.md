@@ -117,6 +117,8 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `DELETE /api/projects/:id`                 | remove project, its containers, images and logs   |
 | `POST /api/projects/:id/deploy`            | new deployment (202)                              |
 | `GET /api/projects/:id/deployments?limit=` | deployment history, newest first                  |
+| `GET /api/projects/:id/env`                | environment variables (secrets: value hidden)     |
+| `PUT /api/projects/:id/env/:key` · `DELETE …` | set (`value`, `secret`, `target`) · remove — applies on next deploy |
 | `GET /api/deployments/:id`                 | one deployment                                    |
 | `GET /api/deployments/:id/logs?type=build\|runtime&tail=` | logs                              |
 | `POST /api/deployments/:id/stop`           | stop (idempotent)                                 |
@@ -156,6 +158,7 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [Architecture](docs/architecture.md) — components and why they are split this way
 - [Deployment engine](docs/deployment-engine.md) — pipeline, statuses, health checks, debugging
 - [Routing](docs/routing.md) — Traefik, stable hostnames, zero-downtime redeploys
+- [Environment variables & secrets](docs/environment.md) — encrypted per-project config, runtime vs build
 - [Database](docs/database.md) — schema and persistence decisions
 - [GitHub](docs/github.md) — sign-in setup, sessions, authorization, repository selection
 - [Dashboard](docs/dashboard.md) — how the web app talks to the API, and its visual language

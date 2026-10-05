@@ -9,6 +9,8 @@ import { createAuthRouter } from "./modules/auth/auth.routes.js";
 import type { AuthService } from "./modules/auth/AuthService.js";
 import { createDeploymentRouter } from "./modules/deployments/deployment.routes.js";
 import type { DeploymentService } from "./modules/deployments/DeploymentService.js";
+import { createEnvironmentRouter } from "./modules/environment/environment.routes.js";
+import type { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { createGitHubRouter } from "./modules/github/github.routes.js";
 import { createProjectRouter } from "./modules/projects/project.routes.js";
 import { createWebhookRouter } from "./modules/webhooks/webhook.routes.js";
@@ -32,6 +34,8 @@ export interface AppDeps {
   /** Optional so the app can be tested without a database. */
   projects?: ProjectService;
   deployments?: DeploymentService;
+  /** Project environment variables; needs SHIPYARD_SECRET_KEY. */
+  environment?: EnvironmentService | null;
   /** null/omitted = GitHub sign-in not configured: protected routes answer 503. */
   auth?: AppAuth | null;
   /** GitHub push webhooks; null/omitted = not configured (503). */
@@ -68,6 +72,7 @@ export function createApp(deps: AppDeps): Express {
   if (projects && deployments) {
     app.use("/api", createProjectRouter(projects, deployments));
     app.use("/api", createDeploymentRouter(deployments));
+    if (deps.environment) app.use("/api", createEnvironmentRouter(deps.environment));
   }
 
   app.use(notFoundHandler);

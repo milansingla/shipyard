@@ -26,7 +26,12 @@ export interface BuildPlan {
  *   3. DOCKERFILE_NOT_FOUND.
  * May write the generated files into `sourceDir`, which must be a disposable clone.
  */
-export async function prepareBuild(sourceDir: string, log: (text: string) => void): Promise<BuildPlan> {
+export async function prepareBuild(
+  sourceDir: string,
+  log: (text: string) => void,
+  /** Build variable names, declared as ARGs in a generated Dockerfile. */
+  buildArgNames: readonly string[] = [],
+): Promise<BuildPlan> {
   const dockerfile = await detectDockerfile(sourceDir);
   if (dockerfile) {
     const containerPort = dockerfile.exposedPort ?? DEFAULT_CONTAINER_PORT;
@@ -51,7 +56,7 @@ export async function prepareBuild(sourceDir: string, log: (text: string) => voi
   log(`No Dockerfile found; detected a Node.js project (${node.packageManager}, Node ${node.nodeMajor})\n`);
   for (const note of node.notes) log(`  note: ${note}\n`);
 
-  const contents = generateNodeDockerfile(node, DEFAULT_CONTAINER_PORT);
+  const contents = generateNodeDockerfile(node, DEFAULT_CONTAINER_PORT, buildArgNames);
   await writeNewFile(sourceDir, GENERATED_DOCKERFILE_NAME, contents);
   if (await writeNewFile(sourceDir, ".dockerignore", GENERATED_DOCKERIGNORE, { ifExists: "skip" })) {
     log("Added a default .dockerignore (node_modules, .git)\n");

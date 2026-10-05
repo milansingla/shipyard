@@ -480,3 +480,50 @@ switch the route, confirm, then retire the current deployment.
 | Opt-in (`SHIPYARD_PUBLIC_DOMAIN`) | Always on                      | CLI and setups without Traefik keep working        |
 | Shared `shipyard-edge` network   | Network per project            | Simple; isolation between apps is a later item     |
 
+
+---
+
+# V3 — Production deployment platform
+
+## V3.1 — A richer state machine
+
+**Key idea.** Every status names work that is actually happening, and is
+persisted when it starts: QUEUED → CLONING → DETECTING → BUILDING → STARTING →
+HEALTH_CHECKING → HEALTHY → ROUTING → RUNNING. `failedStage` records where a
+FAILED deployment stopped, so nobody has to infer it from leftovers.
+
+**Interview: renaming an enum value in production PostgreSQL?**
+`ALTER TYPE … RENAME VALUE` keeps every existing row valid. Prisma's generated
+migration would create a new type and cast the column, which fails for rows
+holding the old value. So the migration is hand-written, and
+`prisma migrate diff` proves schema and migrations still agree.
+
+## V3.2 — Environment variables & secrets
+
+**Key ideas.**
+1. **Encrypt everything at rest**, not only "secrets": users mis-label things.
+   The `secret` flag decides *visibility*, not *protection*.
+2. **Authenticated associated data (AAD)**: AES-GCM can authenticate extra
+   context that isn't stored. Binding `env:<projectId>:<key>` means a
+   ciphertext moved to another row fails to decrypt instead of leaking.
+3. **Build args are not secret**: Docker writes them into image history.
+   Runtime env lives in the container config, not in image layers.
+4. **Immutable deployments**: a container keeps the environment it started
+   with; changes apply on the next deploy, and rollback restores old config too.
+
+**Interview: why not store secrets in plaintext and rely on DB access control?**
+Backups, replicas, logs of slow queries and support dumps all copy the
+database. Encryption with a key that lives elsewhere (`SHIPYARD_SECRET_KEY`)
+means a leaked dump alone reveals nothing.
+
+**Interview: what if the encryption key is lost or rotated?**
+Values can't be decrypted. Shipyard fails the deploy before it starts, naming
+the variable to re-enter, rather than deploying with missing config.
+Supporting rotation properly means versioned keys (the `v1:` prefix leaves
+room for it).
+
+| Decision | Alternative | Why this, for now |
+| -------- | ----------- | ----------------- |
+| App-level AES-GCM | pgcrypto / KMS / Vault | No extra service; key outside the DB; V6 adds secret providers |
+| Secrets runtime-only | BuildKit `--mount=type=secret` | Simple and safe; build secrets later |
+| Changes on next deploy | Live-update containers | Containers are immutable; exact rollbacks |

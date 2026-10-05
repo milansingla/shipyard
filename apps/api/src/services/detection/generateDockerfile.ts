@@ -7,7 +7,7 @@ import type { NodeProject, PackageManager } from "./nodeProject.js";
  * content. The only repository-derived value, the start command, is validated
  * by detection and emitted in exec (JSON) form, so it never passes through a shell.
  */
-export function generateNodeDockerfile(project: NodeProject, port: number): string {
+export function generateNodeDockerfile(project: NodeProject, port: number, buildArgNames: readonly string[] = []): string {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError(`Invalid port: ${port}`);
 
   const pm = project.packageManager;
@@ -31,8 +31,12 @@ export function generateNodeDockerfile(project: NodeProject, port: number): stri
     // Whole source before install: correct for postinstall scripts and workspaces,
     // at the cost of re-installing on every change (build caching comes later).
     "COPY --chown=node:node . .",
-    `RUN ${installCommand(project)}`,
   );
+  if (buildArgNames.length > 0) {
+    // Names only: values are passed to `docker build`, never written into this file.
+    lines.push("# Build variables set in Shipyard", ...buildArgNames.map(assertArgName).map((name) => `ARG ${name}`));
+  }
+  lines.push(`RUN ${installCommand(project)}`);
 
   if (project.hasBuildScript) lines.push(`RUN ${pm} run build`);
 
@@ -44,6 +48,12 @@ export function generateNodeDockerfile(project: NodeProject, port: number): stri
   );
 
   return `${lines.join("\n")}\n`;
+}
+
+/** Build variable names come from the user: allow exactly what the API allows, nothing that could break a line. */
+function assertArgName(name: string): string {
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name)) throw new RangeError(`Invalid build variable name: ${name}`);
+  return name;
 }
 
 /** Ignore rules written only when the repository has no .dockerignore of its own. */
