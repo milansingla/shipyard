@@ -167,6 +167,33 @@ than guessing and producing an image that fails at runtime.
 Shipyard passes the port to the app as `PORT`. Apps must bind `0.0.0.0` — a
 server bound to `localhost` inside a container is unreachable from outside it.
 
+## Resource limits & restart policy
+
+Project page → **Settings → Resources**, or `PATCH /api/projects/:id`:
+
+| Setting | Default | Docker | Rules |
+| ------- | ------- | ------ | ----- |
+| `cpuLimit` | no limit | `NanoCpus` | 0.1–64 cores, 2 decimals (0.5 = half a core) |
+| `memoryLimitMb` | no limit | `Memory` = `MemorySwap` (no swap) | 64–262144 MB |
+| `restartPolicy` | `UNLESS_STOPPED` | `RestartPolicy` | `UNLESS_STOPPED` (always, also after a reboot), `ON_FAILURE` (after a crash, max 5), `NO` |
+
+They apply to the next deployment; the build log says which were used
+(`Resources: 0.5 CPU, 512 MB memory, always restarted`). The CLI keeps the old
+behaviour: no limits, never restarted.
+
+**Restart policies vs. fail-fast health checks.** Under a restart policy, a
+crashing app is restarted by Docker, which reports it as *running* and
+*restarting* at once. Shipyard counts "restarting" as not running, so a
+crash-looping deployment still fails within seconds with its exit code instead
+of waiting out the health check timeout. Once Shipyard stops a container
+(failed, retired or stopped by you), Docker's restart policy no longer brings
+it back.
+
+**Out of memory.** An app that exceeds its memory limit is killed by the
+kernel (exit 137). Docker records this (`OOMKilled`), and Shipyard reports it
+plainly: `Container exited because it ran out of memory (raise the project's
+memory limit) before becoming healthy.`
+
 ## Logs
 
 | Source    | What                               | Stored                                                  |

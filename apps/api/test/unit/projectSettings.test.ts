@@ -28,3 +28,28 @@ describe("project settings", () => {
     },
   );
 });
+
+describe("resource limits", () => {
+  it.each([0.1, 0.15, 0.25, 0.5, 1, 2.5, 64])("accepts %d CPUs", (cpuLimit) => {
+    expect(updateProjectSchema.parse({ cpuLimit })).toEqual({ cpuLimit });
+  });
+
+  it.each([
+    { cpuLimit: 0.05 },
+    { cpuLimit: 0.123 },
+    { cpuLimit: 65 },
+    { memoryLimitMb: 32 },
+    { memoryLimitMb: 512.5 },
+    { restartPolicy: "ALWAYS" },
+  ])("rejects %j", (input) => {
+    expect(updateProjectSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("accepts null to remove a limit", () => {
+    expect(updateProjectSchema.parse({ cpuLimit: null, memoryLimitMb: null, restartPolicy: "NO" })).toEqual({
+      cpuLimit: null,
+      memoryLimitMb: null,
+      restartPolicy: "NO",
+    });
+  });
+});

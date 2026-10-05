@@ -527,3 +527,33 @@ room for it).
 | App-level AES-GCM | pgcrypto / KMS / Vault | No extra service; key outside the DB; V6 adds secret providers |
 | Secrets runtime-only | BuildKit `--mount=type=secret` | Simple and safe; build secrets later |
 | Changes on next deploy | Live-update containers | Containers are immutable; exact rollbacks |
+
+## V3.3 — Health checks and resource limits, per project
+
+**Key ideas.**
+1. **Startup gate, not monitoring.** The health check decides once whether a
+   new version may take traffic. Continuous liveness checks are a later item.
+2. **Immutable deployment settings.** Health settings are stored on the
+   container as labels; a rollback is checked exactly as it was originally.
+3. **cgroups** enforce limits: `NanoCpus` throttles CPU time, `Memory` makes
+   the kernel OOM-kill the process. `MemorySwap = Memory` disables swap, so the
+   limit is real rather than a slow-down.
+4. **Docker state is subtle**: under a restart policy, `Running: true` and
+   `Restarting: true` together mean "crash-looping", not "up".
+
+**Interview: why doesn't a custom health path accept a 404?**
+On `/`, a 404 proves the server listens (many APIs have no root route). On a
+path the user chose, a 404 means the path is wrong, and accepting it would let
+a broken deployment take traffic.
+
+**Interview: what stops a health path from probing another host?**
+Validation (single leading `/`, no `//`, control characters or `\`) plus a
+second check in the engine: the URL is resolved against
+`http://127.0.0.1:<port>` and must keep that origin.
+
+| Decision | Alternative | Why this, for now |
+| -------- | ----------- | ----------------- |
+| Timeout only, no "retries" | Interval × retries (Kubernetes probes) | One number; checks run every second |
+| Limits off by default | Default 512 MB | A wrong default breaks apps confusingly; opt-in and visible |
+| `UNLESS_STOPPED` by default | `NO` | Production apps should survive crashes and host reboots |
+

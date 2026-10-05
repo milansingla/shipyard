@@ -106,10 +106,11 @@ function harness(
       calls.push(`start:${opts.containerName}:${opts.containerPort}:${opts.network ?? "bridge"}`);
       if (opts.env && Object.keys(opts.env).length > 0) calls.push(`env:${JSON.stringify(opts.env)}`);
       if (opts.healthCheckPort) calls.push(`healthPort:${opts.healthCheckPort}`);
+      if (opts.resources) calls.push(`resources:${JSON.stringify(opts.resources)}`);
       return { id: "container-id", hostPort: 49153, healthHostPort: opts.healthCheckPort ? 49154 : 49153 };
     },
     async getContainerState() {
-      return { running: true, exitCode: null };
+      return { running: true, exitCode: null, oomKilled: false };
     },
     async getLogs() {
       calls.push("logs");
@@ -350,6 +351,16 @@ describe("DeploymentEngine.run", () => {
       .catch((e: unknown) => e)) as DeploymentFailedError;
     expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
     expect(h.calls.some((c) => c.startsWith("health:"))).toBe(false);
+  });
+
+  it("applies the project's resource limits and says so in the log", async () => {
+    const h = harness();
+    let systemLog = "";
+    const resources = { cpuLimit: 0.5, memoryLimitMb: 512, restartPolicy: "UNLESS_STOPPED" as const };
+    await h.engine.run(job({ resources }), { onLog: (source, text) => void (source === "system" && (systemLog += text)) });
+
+    expect(h.calls).toContain(`resources:${JSON.stringify(resources)}`);
+    expect(systemLog).toContain("Resources: 0.5 CPU, 512 MB memory, always restarted");
   });
 
   it("a failing observer fails the deployment instead of being ignored", async () => {

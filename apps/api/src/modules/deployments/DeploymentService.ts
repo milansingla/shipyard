@@ -299,6 +299,11 @@ export class DeploymentService {
         branch: deployment.branch,
         name: project.slug,
         labels: { [ShipyardLabel.PROJECT_ID]: project.id },
+        resources: {
+          cpuLimit: project.cpuLimit,
+          memoryLimitMb: project.memoryLimitMb,
+          restartPolicy: project.restartPolicy,
+        },
         healthCheck: {
           path: project.healthCheckPath,
           port: project.healthCheckPort,

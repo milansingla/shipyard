@@ -48,6 +48,7 @@ scanning.
 | Acting on non-Shipyard containers  | Every container op requires `shipyard.managed=true` label                   | `DockerService.inspectManagedContainer` |
 | Apps exposed to the LAN            | Ports published on `127.0.0.1` by default                                   | `SHIPYARD_PUBLISH_HOST` |
 | Privilege escalation in container  | `no-new-privileges`; fork-bomb limit `PidsLimit: 512`                       | `DockerService.createAndStartContainer` |
+| One app starving the host          | Per-project CPU (`NanoCpus`) and memory limits, swap disabled; validated ranges | `resourceConfig`, `project.schemas.ts` |
 | Invalid Docker names               | Names derived from sanitized slug + UUID, never raw input                    | `naming.ts` |
 | Stack traces / secrets in API errors | Generic 500 message in production; only `AppError` messages returned      | `errorHandler.ts` |
 | Secrets in logs                    | pino `redact` for auth headers, cookies, tokens                             | `logger.ts` |
@@ -91,7 +92,9 @@ Details of the sign-in design: [github.md](github.md).
   yet (deleting the user's `sessions` rows does it).
 - A cancelled build (timeout, `SHIPYARD_BUILD_TIMEOUT_MS`) may leave dangling
   image layers; reclaim with `docker image prune`.
-- No memory/CPU limits on containers (would break some apps without per-project config).
+- CPU/memory limits are per project and **off by default** (a limit that is
+  too low breaks apps in confusing ways). Set them for anything you don't
+  fully trust; disk and network bandwidth are not limited yet.
 - No egress restrictions for deployed containers.
 - All deployed apps share the `shipyard-edge` network and can reach each other
   by container name (on the default bridge they could by IP). Per-project

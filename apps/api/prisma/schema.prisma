@@ -92,6 +92,11 @@ model Project {
   healthCheckPort Int?
   /// How long a new deployment has to become healthy; null = server default.
   healthCheckTimeoutSeconds Int?
+  /// CPUs the app may use, e.g. 0.5; null = no limit.
+  cpuLimit        Float?
+  /// Memory in MB (swap disabled); null = no limit.
+  memoryLimitMb   Int?
+  restartPolicy   RestartPolicy @default(UNLESS_STOPPED)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   deployments     Deployment[]
@@ -99,6 +104,16 @@ model Project {
 
   @@index([ownerId, createdAt(sort: Desc)])
   @@map("projects")
+}
+
+/// What Docker does when a running app's process exits.
+enum RestartPolicy {
+  /// Leave it stopped.
+  NO
+  /// Restart after a crash (non-zero exit), up to 5 times.
+  ON_FAILURE
+  /// Always restart, also after a reboot, until Shipyard stops it.
+  UNLESS_STOPPED
 }
 
 /// When a variable is available: to the running app, to `docker build`, or both.

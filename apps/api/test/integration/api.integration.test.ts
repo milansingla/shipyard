@@ -817,7 +817,7 @@ describe("environment variables and secrets", () => {
   });
 });
 
-describe("project settings: health checks", () => {
+describe("project settings: health checks and resources", () => {
   it("updates health check settings, applied to the next deployment", async () => {
     const alice = await sessionFor(ALICE);
     const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/health" });
@@ -839,6 +839,27 @@ describe("project settings: health checks", () => {
     // null resets to the defaults.
     const reset = await call(alice, "PATCH", `/api/projects/${projectId}`, { healthCheckPort: null, healthCheckTimeoutSeconds: null });
     expect(reset.body!.data).toMatchObject({ healthCheckPath: "/healthz", healthCheckPort: null, healthCheckTimeoutSeconds: null });
+  });
+
+  it("sets resource limits, applied to the next deployment", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/limits" });
+    const projectId = created.body!.data.id as string;
+    expect(created.body!.data).toMatchObject({ cpuLimit: null, memoryLimitMb: null, restartPolicy: "UNLESS_STOPPED" });
+
+    const updated = await call(alice, "PATCH", `/api/projects/${projectId}`, {
+      cpuLimit: 0.5,
+      memoryLimitMb: 512,
+      restartPolicy: "ON_FAILURE",
+    });
+    expect(updated.body!.data).toMatchObject({ cpuLimit: 0.5, memoryLimitMb: 512, restartPolicy: "ON_FAILURE" });
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(lastJob?.resources).toEqual({ cpuLimit: 0.5, memoryLimitMb: 512, restartPolicy: "ON_FAILURE" });
+
+    const invalid = await call(alice, "PATCH", `/api/projects/${projectId}`, { memoryLimitMb: 16 });
+    expect(invalid.status).toBe(400);
   });
 
   it("validates settings and keeps them owner-only", async () => {

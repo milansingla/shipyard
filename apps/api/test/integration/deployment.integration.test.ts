@@ -30,6 +30,7 @@ const HELLO_APP = path.resolve(here, "../../../../examples/hello-node");
 const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
 const NODE_NO_DOCKERFILE_APP = path.resolve(here, "../fixtures/node-no-dockerfile");
 const HEALTH_PORT_APP = path.resolve(here, "../fixtures/health-port-app");
+const MEMORY_HOG_APP = path.resolve(here, "../fixtures/memory-hog");
 
 function localSource(sourceDir: string): SourceProvider {
   return {
@@ -56,7 +57,7 @@ function engine(sourceDir: string): DeploymentEngine {
   });
 }
 
-function job(name: string, extra: Pick<DeploymentJob, "env" | "healthCheck"> = {}): DeploymentJob {
+function job(name: string, extra: Pick<DeploymentJob, "env" | "healthCheck" | "resources"> = {}): DeploymentJob {
   return {
     id: randomUUID(),
     repository: parseRepositoryUrl(`https://github.com/shipyard-test/${name}`, ["github.com"]),
@@ -219,5 +220,46 @@ describe("deployment engine against real Docker", () => {
     expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
     expect(error.deployment.failedStage).toBe(S.HEALTH_CHECKING);
     expect(error.message).toMatch(/HTTP 404.*health check path/s);
+  });
+
+  it("applies CPU, memory and restart policy to the container", async () => {
+    const record = await engine(HELLO_APP).run(
+      job("hello-node", { resources: { cpuLimit: 0.5, memoryLimitMb: 128, restartPolicy: "UNLESS_STOPPED" } }),
+    );
+    created.push(record);
+
+    const { HostConfig } = await dockerode.getContainer(record.containerId!).inspect();
+    expect(HostConfig).toMatchObject({
+      NanoCpus: 500_000_000,
+      Memory: 128 * 1024 * 1024,
+      MemorySwap: 128 * 1024 * 1024,
+      RestartPolicy: { Name: "unless-stopped" },
+    });
+    await docker.stopContainer(record.containerId!);
+  });
+
+  it("still fails fast when a crashing app is being restarted by its restart policy", async () => {
+    const startedAt = Date.now();
+    const error = (await engine(CRASHING_APP)
+      .run(job("crashing-app", { resources: { cpuLimit: null, memoryLimitMb: null, restartPolicy: "UNLESS_STOPPED" } }))
+      .catch((e: unknown) => e)) as DeploymentFailedError;
+    created.push(error.deployment);
+
+    expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
+    expect(error.message).toContain("exited with code 1");
+    expect(Date.now() - startedAt).toBeLessThan(25_000); // not the 30s health timeout
+    // Stopped by Shipyard, so Docker's restart policy no longer brings it back.
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    expect((await docker.getContainerState(error.deployment.containerId!)).running).toBe(false);
+  });
+
+  it("explains an app killed for exceeding its memory limit", async () => {
+    const error = (await engine(MEMORY_HOG_APP)
+      .run(job("memory-hog", { resources: { cpuLimit: null, memoryLimitMb: 64, restartPolicy: "NO" } }))
+      .catch((e: unknown) => e)) as DeploymentFailedError;
+    created.push(error.deployment);
+
+    expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
+    expect(error.message).toContain("ran out of memory");
   });
 });

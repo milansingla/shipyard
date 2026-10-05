@@ -35,9 +35,28 @@ export interface HealthCheckSettings {
 }
 
 export interface ContainerState {
+  /** False while Docker is restarting a crashed process: the app is not up. */
   running: boolean;
   exitCode: number | null;
+  /** The kernel killed it for exceeding its memory limit. */
+  oomKilled: boolean;
 }
+
+export type RestartPolicy = "NO" | "ON_FAILURE" | "UNLESS_STOPPED";
+
+export interface ContainerResources {
+  /** CPUs, e.g. 0.5; null = no limit. */
+  cpuLimit: number | null;
+  /** MB; null = no limit. Swap is disabled when set. */
+  memoryLimitMb: number | null;
+  restartPolicy: RestartPolicy;
+}
+
+const RESTART_POLICY: Record<RestartPolicy, { Name: string; MaximumRetryCount?: number }> = {
+  NO: { Name: "no" },
+  ON_FAILURE: { Name: "on-failure", MaximumRetryCount: 5 },
+  UNLESS_STOPPED: { Name: "unless-stopped" },
+};
 
 export interface ManagedContainer extends ContainerState {
   id: string;
@@ -63,6 +82,8 @@ export interface CreateContainerOptions {
   env?: Record<string, string>;
   /** A separate port to publish (loopback) for health checks. */
   healthCheckPort?: number | null;
+  /** Default: no limits, never restarted by Docker. */
+  resources?: ContainerResources;
 }
 
 export interface StartedContainer {
@@ -206,6 +227,7 @@ export class DockerService {
             ]),
           ),
           ...(options.network ? { NetworkMode: options.network } : {}),
+          ...resourceConfig(options.resources),
           LogConfig: RUNTIME_LOG_CONFIG,
           SecurityOpt: ["no-new-privileges:true"],
           PidsLimit: 512,
@@ -267,14 +289,16 @@ export class DockerService {
       healthCheck,
       healthHostPort: publishedPort(healthCheck.port ?? containerPort),
       networks: Object.keys(info.NetworkSettings.Networks ?? {}),
-      running: info.State.Running,
-      exitCode: info.State.Running ? null : info.State.ExitCode,
+      // A crash-looping container under a restart policy reports Running *and* Restarting.
+      running: info.State.Running && !info.State.Restarting,
+      exitCode: info.State.Running && !info.State.Restarting ? null : info.State.ExitCode,
+      oomKilled: info.State.OOMKilled === true,
     };
   }
 
   async getContainerState(containerId: string): Promise<ContainerState> {
-    const { running, exitCode } = await this.inspectManagedContainer(containerId);
-    return { running, exitCode };
+    const { running, exitCode, oomKilled } = await this.inspectManagedContainer(containerId);
+    return { running, exitCode, oomKilled };
   }
 
   async getLogs(containerId: string, tail: number = DEFAULT_LOG_TAIL): Promise<LogChunk[]> {
@@ -354,6 +378,18 @@ export class DockerService {
     this.logger.debug({ err: cause }, message);
     return new AppError(code, `${message}: ${errorMessage(cause)}`, { cause });
   }
+}
+
+/** Docker HostConfig for a container's limits. Values were validated when the project was saved. */
+export function resourceConfig(resources: ContainerResources | undefined): Partial<Docker.HostConfig> {
+  if (!resources) return { RestartPolicy: RESTART_POLICY.NO };
+  const memoryBytes = resources.memoryLimitMb === null ? undefined : resources.memoryLimitMb * 1024 * 1024;
+  return {
+    RestartPolicy: RESTART_POLICY[resources.restartPolicy],
+    ...(resources.cpuLimit !== null && { NanoCpus: Math.round(resources.cpuLimit * 1e9) }),
+    // MemorySwap = Memory: no swap, so the limit is the limit.
+    ...(memoryBytes !== undefined && { Memory: memoryBytes, MemorySwap: memoryBytes }),
+  };
 }
 
 function optionalNumber(value: string | undefined): number | null {

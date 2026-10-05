@@ -28,6 +28,17 @@ export const updateProjectSchema = z
     healthCheckPort: z.int().min(1).max(65535).nullable().optional(),
     /** null = the server default (SHIPYARD_HEALTHCHECK_TIMEOUT_MS). */
     healthCheckTimeoutSeconds: z.int().min(5).max(900).nullable().optional(),
+    /** CPUs, in steps of 0.01 (e.g. 0.5); null = no limit. */
+    cpuLimit: z
+      .number()
+      .min(0.1)
+      .max(64)
+      .multipleOf(0.01, "at most 2 decimals")
+      .nullable()
+      .optional(),
+    /** MB; null = no limit. Below 64 MB most runtimes can't even start. */
+    memoryLimitMb: z.int().min(64).max(262_144).nullable().optional(),
+    restartPolicy: z.enum(["NO", "ON_FAILURE", "UNLESS_STOPPED"]).optional(),
   })
   .refine((input) => Object.keys(input).length > 0, "Nothing to update.");
 

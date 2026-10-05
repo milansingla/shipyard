@@ -49,6 +49,8 @@ export interface Deployment {
   updatedAt: string;
 }
 
+export type RestartPolicy = "NO" | "ON_FAILURE" | "UNLESS_STOPPED";
+
 export interface Project {
   id: string;
   name: string;
@@ -63,6 +65,11 @@ export interface Project {
   healthCheckPort: number | null;
   /** null = the server default. */
   healthCheckTimeoutSeconds: number | null;
+  /** CPUs, e.g. 0.5; null = no limit. */
+  cpuLimit: number | null;
+  /** null = no limit. */
+  memoryLimitMb: number | null;
+  restartPolicy: RestartPolicy;
   createdAt: string;
   updatedAt: string;
 }

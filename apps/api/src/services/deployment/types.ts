@@ -1,4 +1,4 @@
-import type { HealthCheckSettings } from "../docker/DockerService.js";
+import type { ContainerResources, HealthCheckSettings } from "../docker/DockerService.js";
 import type { RepositoryRef } from "../git/repositoryUrl.js";
 import type { DeploymentStatus } from "./status.js";
 
@@ -14,6 +14,8 @@ export interface DeploymentJob {
   labels?: Record<string, string>;
   /** How to decide the app is healthy. Default: "/" on the app's port, server-default timeout. */
   healthCheck?: HealthCheckSettings;
+  /** CPU/memory limits and restart policy. Default: none, never restarted. */
+  resources?: ContainerResources;
   /** Decrypted variables: `runtime` goes into the container, `build` becomes build args. */
   env?: { runtime: Record<string, string>; build: Record<string, string> };
 }

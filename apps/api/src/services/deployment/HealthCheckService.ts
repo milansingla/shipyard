@@ -53,11 +53,14 @@ export class HealthCheckService {
     while (true) {
       const state = await target.getContainerState();
       if (!state.running) {
-        throw new AppError(
-          ErrorCode.HEALTH_CHECK_FAILED,
-          `Container exited${state.exitCode === null ? "" : ` with code ${state.exitCode}`} before becoming healthy.`,
-          { statusCode: 422 },
-        );
+        const how = state.oomKilled
+          ? " because it ran out of memory (raise the project's memory limit)"
+          : state.exitCode === null
+            ? ""
+            : ` with code ${state.exitCode}`;
+        throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, `Container exited${how} before becoming healthy.`, {
+          statusCode: 422,
+        });
       }
 
       attempts += 1;

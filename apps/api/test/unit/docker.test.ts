@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { resourceConfig } from "../../src/services/docker/DockerService.js";
+
 import { interpretBuildEvent } from "../../src/services/docker/buildOutput.js";
 import { demuxDockerLogs, formatLogChunks } from "../../src/services/docker/logs.js";
 import {
@@ -103,5 +105,26 @@ describe("demuxDockerLogs", () => {
       { stream: "stdout", text: "complete\n" },
       { stream: "stdout", text: "cut" },
     ]);
+  });
+});
+
+describe("resourceConfig", () => {
+  it("without settings: no limits, never restarted (the CLI and pre-V3 behaviour)", () => {
+    expect(resourceConfig(undefined)).toEqual({ RestartPolicy: { Name: "no" } });
+  });
+
+  it("maps CPUs to NanoCpus and MB to bytes, with swap disabled", () => {
+    expect(resourceConfig({ cpuLimit: 0.5, memoryLimitMb: 512, restartPolicy: "UNLESS_STOPPED" })).toEqual({
+      RestartPolicy: { Name: "unless-stopped" },
+      NanoCpus: 500_000_000,
+      Memory: 536_870_912,
+      MemorySwap: 536_870_912,
+    });
+  });
+
+  it("caps restarts after a crash at 5", () => {
+    expect(resourceConfig({ cpuLimit: null, memoryLimitMb: null, restartPolicy: "ON_FAILURE" })).toEqual({
+      RestartPolicy: { Name: "on-failure", MaximumRetryCount: 5 },
+    });
   });
 });

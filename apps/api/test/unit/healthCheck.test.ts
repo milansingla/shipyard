@@ -8,7 +8,7 @@ import { HealthCheckService } from "../../src/services/deployment/HealthCheckSer
 
 // These tests use a REAL HTTP server on a random local port — no mocked fetch.
 
-const running = async () => ({ running: true, exitCode: null });
+const running = async () => ({ running: true, exitCode: null, oomKilled: false });
 const fast = { timeoutMs: 2_000, intervalMs: 50, requestTimeoutMs: 500 };
 
 let servers: http.Server[] = [];
@@ -88,10 +88,22 @@ describe("HealthCheckService", () => {
     expect((error as AppError).message).toMatch(/within 300ms .*HTTP 404.*health check path/s);
   });
 
+  it("says when the app was killed for running out of memory", async () => {
+    const error = await new HealthCheckService(fast)
+      .waitUntilHealthy({
+        url: "http://127.0.0.1:9/",
+        getContainerState: async () => ({ running: false, exitCode: 137, oomKilled: true }),
+      })
+      .catch((e: unknown) => e);
+    expect((error as AppError).message).toBe(
+      "Container exited because it ran out of memory (raise the project's memory limit) before becoming healthy.",
+    );
+  });
+
   it("fails fast with the exit code when the container has crashed", async () => {
     const check = new HealthCheckService(fast).waitUntilHealthy({
       url: "http://127.0.0.1:1/",
-      getContainerState: async () => ({ running: false, exitCode: 137 }),
+      getContainerState: async () => ({ running: false, exitCode: 137, oomKilled: false }),
     });
     await expect(check).rejects.toMatchObject({
       code: ErrorCode.HEALTH_CHECK_FAILED,

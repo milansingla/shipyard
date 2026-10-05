@@ -2,6 +2,7 @@ import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { prepareBuild } from "../build/prepareBuild.js";
 import {
+  type ContainerResources,
   type DockerService,
   type HealthCheckSettings,
   type ManagedContainer,
@@ -132,6 +133,7 @@ export class DeploymentEngine {
 
       // 4. Start
       await moveTo(DeploymentStatus.STARTING);
+      if (job.resources) log("system", describeResources(job.resources));
       const container = await this.deps.docker.createAndStartContainer({
         imageName: state.imageName,
         containerName: state.containerName,
@@ -140,6 +142,7 @@ export class DeploymentEngine {
         network: this.deps.router.network,
         env: env.runtime,
         healthCheckPort: healthCheck.port,
+        resources: job.resources,
       });
       state.containerId = container.id;
       state.hostPort = container.hostPort;
@@ -326,6 +329,13 @@ export class DeploymentEngine {
       logger.warn({ err: logError }, "Could not read logs of failed container");
     }
   }
+}
+
+function describeResources(resources: ContainerResources): string {
+  const cpu = resources.cpuLimit === null ? "no CPU limit" : `${resources.cpuLimit} CPU`;
+  const memory = resources.memoryLimitMb === null ? "no memory limit" : `${resources.memoryLimitMb} MB memory`;
+  const restart = { NO: "never restarted", ON_FAILURE: "restarted after a crash (up to 5 times)", UNLESS_STOPPED: "always restarted" };
+  return `Resources: ${cpu}, ${memory}, ${restart[resources.restartPolicy]}\n`;
 }
 
 /** Names only — values never reach a log. */
