@@ -190,7 +190,22 @@ export function traefikConfig(routes: readonly RouteTarget[], domain: string, tl
       // One certificate per hostname, requested from Let's Encrypt on first use.
       ...(tls && { tls: { certResolver: CERT_RESOLVER } }),
     };
-    services[id] = { loadBalancer: { servers: [{ url: `http://${route.containerName}:${route.containerPort}` }] } };
+    const containers = [route.containerName, ...(route.replicaContainers ?? [])];
+    services[id] = {
+      loadBalancer: {
+        servers: containers.map((container) => ({ url: `http://${container}:${route.containerPort}` })),
+        // Several replicas: Traefik checks each and sends traffic only to those answering 2xx/3xx.
+        ...(containers.length > 1 &&
+          route.healthCheck && {
+            healthCheck: {
+              path: route.healthCheck.path,
+              ...(route.healthCheck.port !== null && { port: route.healthCheck.port }),
+              interval: "2s",
+              timeout: "2s",
+            },
+          }),
+      },
+    };
     middlewares[id] = { headers: { customResponseHeaders: { [DEPLOYMENT_HEADER]: route.deploymentId } } };
   }
   return { http: { routers, services, middlewares } };
@@ -242,6 +257,10 @@ function assertRoutable(target: RouteTarget): void {
     (target.aliases ?? []).every(isValidHostname) &&
     DEPLOYMENT_ID.test(target.deploymentId) &&
     DNS_LABEL.test(target.containerName) && // Traefik resolves it through Docker's DNS
+    (target.replicaContainers ?? []).every((name) => DNS_LABEL.test(name)) &&
+    (!target.healthCheck ||
+      (/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*$/.test(target.healthCheck.path) &&
+        (target.healthCheck.port === null || (Number.isInteger(target.healthCheck.port) && target.healthCheck.port > 0 && target.healthCheck.port <= 65535)))) &&
     Number.isInteger(target.containerPort) &&
     target.containerPort > 0 &&
     target.containerPort <= 65535;

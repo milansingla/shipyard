@@ -45,6 +45,8 @@ export interface DeploymentJob {
   healthCheck?: HealthCheckSettings;
   /** Custom hostnames routed to this deployment besides its generated one. */
   domains?: readonly string[];
+  /** Identical containers to run, load-balanced. Default 1. */
+  replicas?: number;
   /** Named volumes to mount; created on first use. */
   volumes?: ReadonlyArray<{ name: string; mountPath: string }>;
   /** CPU/memory limits and restart policy. Default: none, never restarted. */
@@ -66,7 +68,9 @@ export interface DeploymentState {
   containerName: string;
   containerId: string | null;
   containerPort: number | null;
+  /** Replica 1's published port. */
   hostPort: number | null;
+  replicas: number;
   deploymentUrl: string | null;
   errorMessage: string | null;
   /** The stage the run was in when it failed (set only when FAILED). */

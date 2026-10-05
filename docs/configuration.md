@@ -18,6 +18,7 @@ services:
       command: npm start
     port: 3000
     public: true            # web only; default true
+    replicas: 2             # identical containers, load-balanced; 1–10
     healthCheck:
       path: /healthz
       port: 9000

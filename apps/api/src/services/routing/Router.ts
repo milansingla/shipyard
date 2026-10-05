@@ -1,4 +1,4 @@
-/** Where a project's traffic should go: one deployment's container. */
+/** Where a project's traffic should go: one deployment's containers. */
 export interface RouteTarget {
   /** The project's slug. Becomes the first label of its hostname, e.g. <name>.localhost. */
   name: string;
@@ -8,6 +8,14 @@ export interface RouteTarget {
   containerPort: number;
   /** Custom hostnames (e.g. app.example.com) routed to the same deployment. */
   aliases?: readonly string[];
+  /** The deployment's other replicas (container names), load-balanced with `containerName`. */
+  replicaContainers?: readonly string[];
+  /**
+   * The proxy checks each replica itself and skips those failing, so one
+   * crashed replica doesn't fail a share of requests. Only set where a 2xx
+   * answer is expected (an explicitly configured health path).
+   */
+  healthCheck?: { path: string; port: number | null };
 }
 
 /** A DNS hostname with at least two labels, lower-case: "app.example.com". No IPs, ports or wildcards. */

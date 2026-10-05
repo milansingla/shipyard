@@ -41,6 +41,8 @@ export interface Deployment {
   containerId: string | null;
   containerPort: number | null;
   hostPort: number | null;
+  /** Identical containers this deployment runs; logs show the first. */
+  replicas: number;
   deploymentUrl: string | null;
   errorMessage: string | null;
   /** The stage a FAILED deployment failed in (null for deployments from before V3). */
@@ -114,6 +116,8 @@ export interface Service {
   startCommand: string | null;
   port: number | null;
   public: boolean;
+  /** Identical containers per deployment, load-balanced (1–10). */
+  replicas: number;
   /** The prebuilt image a database runs, e.g. postgres:17-alpine; null for services built from the repository. */
   image: string | null;
   /** Owns the project's own address. */

@@ -116,6 +116,22 @@ describe("traefikConfig", () => {
     });
   });
 
+  it("load-balances a deployment's replicas, checking each when a health path is set", () => {
+    const config = traefikConfig(
+      [{ ...target("web", "d1"), replicaContainers: ["shipyard-web-d1-r2"], healthCheck: { path: "/healthz", port: 9000 } }],
+      "localhost",
+    );
+    expect(config.http!.services["shipyard-web"]).toEqual({
+      loadBalancer: {
+        servers: [{ url: "http://shipyard-web-d1:3000" }, { url: "http://shipyard-web-d1-r2:3000" }],
+        healthCheck: { path: "/healthz", port: 9000, interval: "2s", timeout: "2s" },
+      },
+    });
+    // One container: nothing to fail over to, so no check.
+    const single = traefikConfig([{ ...target("web", "d1"), healthCheck: { path: "/healthz", port: null } }], "localhost");
+    expect(single.http!.services["shipyard-web"]).toEqual({ loadBalancer: { servers: [{ url: "http://shipyard-web-d1:3000" }] } });
+  });
+
   it("writes an empty table as {}: Traefik would ignore one with empty sections", () => {
     expect(traefikConfig([], "localhost")).toEqual({});
   });

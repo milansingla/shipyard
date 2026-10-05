@@ -16,6 +16,7 @@ type FileSetting =
   | "startCommand"
   | "port"
   | "public"
+  | "replicas"
   | "healthCheckPath"
   | "healthCheckPort"
   | "healthCheckTimeoutSeconds"
@@ -32,6 +33,7 @@ const FILE_DEFAULTS: FileSettings = {
   startCommand: null,
   port: null,
   public: true,
+  replicas: 1,
   healthCheckPath: null,
   healthCheckPort: null,
   healthCheckTimeoutSeconds: null,

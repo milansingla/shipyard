@@ -209,6 +209,32 @@ export function ServicesPanel({
                 </p>
               </div>
               <div className="flex items-center gap-3">
+                {service.type !== "POSTGRES" &&
+                  (canEdit ? (
+                    <label className="flex items-center gap-2 text-xs text-ink-soft" title="Identical copies sharing the traffic. Applies on the next deploy.">
+                      Replicas
+                      <select
+                        value={service.replicas}
+                        disabled={busy !== null}
+                        onChange={(event) => {
+                          const replicas = Number(event.target.value);
+                          void act(`replicas:${service.id}`, async () => {
+                            await api(`/services/${service.id}`, { method: "PATCH", body: { replicas } });
+                            setNotice(`${service.name} will run ${replicas} replica${replicas === 1 ? "" : "s"} from its next deploy.`);
+                          });
+                        }}
+                        className="h-10 border border-rivet bg-plate px-2 text-sm text-ink focus:border-ink"
+                      >
+                        {Array.from({ length: 10 }, (_, index) => index + 1).map((count) => (
+                          <option key={count} value={count}>
+                            {count}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : (
+                    service.replicas > 1 && <span className="text-xs text-ink-soft">{service.replicas} replicas</span>
+                  ))}
                 {canDeploy && (
                   <Button
                     variant="secondary"

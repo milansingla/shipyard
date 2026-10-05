@@ -60,7 +60,8 @@ function harness(
     dockerfile?: string | null;
     files?: Record<string, string>;
     buildFails?: boolean;
-    healthFails?: boolean;
+    /** true = every health check fails; a number = only the Nth one (1-based). */
+    healthFails?: boolean | number;
     /** Behave like the Traefik router (own network, hostname URLs) instead of plain ports. */
     routed?: boolean;
     routeFails?: boolean;
@@ -71,6 +72,7 @@ function harness(
 ): Harness {
   const calls: string[] = [];
   const statuses: DeploymentStatus[] = [];
+  let healthChecks = 0;
   const workspaceRoot = path.join(tmpRoot, "ws");
 
   const source: SourceProvider = {
@@ -117,12 +119,15 @@ function harness(
       if (opts.healthCommand) calls.push(`healthCommand:${opts.healthCommand.join(" ")}`);
       if (opts.labels["shipyard.health-kind"]) calls.push(`healthKind:${opts.labels["shipyard.health-kind"]}`);
       if (opts.volumes?.length) calls.push(`mounts:${opts.volumes.map((v) => `${v.name}=${v.mountPath}`).join(",")}`);
-      if (opts.containerPort === null) return { id: "container-id", hostPort: null, healthHostPort: null };
-      return { id: "container-id", hostPort: 49153, healthHostPort: opts.healthCheckPort ? 49154 : 49153 };
+      const replica = Number(opts.labels["shipyard.replica"] ?? 1);
+      const id = replica === 1 ? "container-id" : `container-id-r${replica}`;
+      if (opts.containerPort === null) return { id, hostPort: null, healthHostPort: null };
+      return { id, hostPort: 49153, healthHostPort: opts.healthCheckPort ? 49154 : 49153 };
     },
     async getContainerState() {
       return { running: true, exitCode: null, oomKilled: false, health: options.dockerHealth ?? "healthy" };
     },
+    deploymentContainers: unused,
     async ensureImage(name: string) {
       calls.push(`pull:${name}`);
     },
@@ -158,6 +163,8 @@ function harness(
     urlFor: (name, hostPort) => (options.routed ? `http://${name}.localhost` : `http://localhost:${hostPort}`),
     async activate(target) {
       calls.push(`route:${target.name}->${target.containerName}:${target.containerPort}`);
+      if (target.replicaContainers?.length) calls.push(`replicas:${target.replicaContainers.join(",")}`);
+      if (target.healthCheck) calls.push(`lbHealth:${target.healthCheck.path}:${target.healthCheck.port}`);
       if (options.routeFails) {
         throw new AppError(ErrorCode.ROUTING_FAILED, "Traefik did not start sending hello.localhost to this deployment.");
       }
@@ -173,7 +180,8 @@ function harness(
       async waitUntilHealthy({ url, strict, timeoutMs }) {
         calls.push(`health:${url}`);
         if (strict || timeoutMs) calls.push(`healthRule:${strict ? "strict" : "lenient"}:${timeoutMs ?? "default"}`);
-        if (options.healthFails) {
+        healthChecks += 1;
+        if (options.healthFails === true || options.healthFails === healthChecks) {
           throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, "Container exited with code 1 before becoming healthy.");
         }
         return { statusCode: 200, attempts: 1, durationMs: 5 };
@@ -444,6 +452,42 @@ describe("DeploymentEngine.run", () => {
     expect(h.calls).toContain("start:shipyard-hello-3f2a9c1e77b4:null:bridge"); // not on the proxy network
     expect(h.calls).toContain("private:shipyard-p-test=jobs");
     expect(h.calls.some((c) => c.startsWith("health:") || c.startsWith("route:"))).toBe(false);
+  });
+
+  it("rolls out replicas one at a time, each health-checked, then routes to all of them", async () => {
+    const h = harness({ routed: true });
+    const state = await h.engine.run(job({ replicas: 3, healthCheck: { path: "/healthz", port: null, timeoutMs: null } }));
+
+    expect(state).toMatchObject({ status: S.RUNNING, replicas: 3, containerId: "container-id" });
+    const order = h.calls.filter((c) => c.startsWith("start:") || c.startsWith("health:") || c.startsWith("route:"));
+    expect(order).toEqual([
+      "start:shipyard-hello-3f2a9c1e77b4:8080:shipyard-edge",
+      "health:http://127.0.0.1:49153/healthz",
+      "start:shipyard-hello-3f2a9c1e77b4-r2:8080:shipyard-edge",
+      "health:http://127.0.0.1:49153/healthz",
+      "start:shipyard-hello-3f2a9c1e77b4-r3:8080:shipyard-edge",
+      "health:http://127.0.0.1:49153/healthz",
+      "route:hello->shipyard-hello-3f2a9c1e77b4:8080",
+    ]);
+    expect(h.calls).toContain("replicas:shipyard-hello-3f2a9c1e77b4-r2,shipyard-hello-3f2a9c1e77b4-r3");
+    expect(h.calls).toContain("lbHealth:/healthz:null"); // Traefik checks each replica: a configured path
+  });
+
+  it("a failing replica stops the rollout: the started ones are stopped and nothing is routed", async () => {
+    const h = harness({ routed: true, healthFails: 2 });
+    const error = (await h.engine.run(job({ replicas: 3 })).catch((e: unknown) => e)) as DeploymentFailedError;
+
+    expect(error.deployment.failedStage).toBe(S.HEALTH_CHECKING);
+    expect(h.calls.filter((c) => c.startsWith("start:"))).toHaveLength(2); // replica 3 never started
+    expect(h.calls).toEqual(expect.arrayContaining(["stop:container-id", "stop:container-id-r2"]));
+    expect(h.calls.some((c) => c.startsWith("route:"))).toBe(false);
+  });
+
+  it("doesn't ask the proxy to check \"/\": many apps answer it with 404", async () => {
+    const h = harness({ routed: true });
+    await h.engine.run(job({ replicas: 2 }));
+    expect(h.calls).toContain("replicas:shipyard-hello-3f2a9c1e77b4-r2");
+    expect(h.calls.some((c) => c.startsWith("lbHealth:"))).toBe(false);
   });
 
   it("runs a prebuilt database image: no clone or build, nothing published, ready when Docker's check passes", async () => {

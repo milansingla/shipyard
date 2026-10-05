@@ -179,6 +179,7 @@ const fakeEngine: EngineLike = {
       containerId: `container-${job.id}`,
       containerPort: 3000,
       hostPort: 49_999,
+      replicas: job.replicas ?? 1,
       deploymentUrl: null,
       errorMessage: null,
       failedStage: null,
@@ -2020,5 +2021,37 @@ describe("PostgreSQL services", () => {
     const res = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
     expect(res.body!.data).toMatchObject({ status: "FAILED" });
     expect(res.body!.data.errorMessage).toContain(`"db" is a database here; it can't become a web service`);
+  });
+});
+
+describe("replicas", () => {
+  it("runs the number of replicas a service asks for, from the next deploy; never for a database", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/scaled" })).body!.data.id as string;
+    const [web] = (await call(alice, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    expect(web!.replicas).toBe(1);
+
+    for (const replicas of [0, 11, 2.5]) {
+      expect((await call(alice, "PATCH", `/api/services/${web!.id}`, { replicas })).status).toBe(400);
+    }
+    expect((await call(alice, "PATCH", `/api/services/${web!.id}`, { replicas: 3 })).status).toBe(200);
+    const deployed = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    expect(lastJob?.replicas).toBe(3);
+    expect((await call(alice, "GET", `/api/deployments/${deployed}`)).body!.data).toMatchObject({ status: "RUNNING", replicas: 3 });
+
+    const db = (await call(alice, "POST", `/api/projects/${projectId}/services`, { name: "db", type: "POSTGRES" })).body!.data;
+    expect((await call(alice, "PATCH", `/api/services/${db.id}`, { replicas: 2 })).status).toBe(400);
+    // The database itself refuses it too.
+    await expect(prisma.service.update({ where: { id: db.id }, data: { replicas: 2 } })).rejects.toThrow();
+  });
+
+  it("shipyard.yaml sets replicas like any other setting", async () => {
+    const alice = await sessionFor(ALICE);
+    repoFiles.set("yaml-replicas", "version: 1\nservices:\n  web:\n    replicas: 2\n");
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/yaml-replicas" })).body!.data.id;
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(lastJob?.replicas).toBe(2);
   });
 });

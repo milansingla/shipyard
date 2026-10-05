@@ -10,9 +10,10 @@ import {
   type HealthCheckSettings,
   type ManagedContainer,
   ShipyardLabel,
+  type StartedContainer,
 } from "../docker/DockerService.js";
 import type { LogChunk } from "../docker/logs.js";
-import { buildContainerName } from "../docker/naming.js";
+import { buildContainerName, replicaContainerName } from "../docker/naming.js";
 import type { ImageRegistry } from "../registry/ImageRegistry.js";
 import type { SourceProvider } from "../git/GitService.js";
 import type { Router } from "../routing/Router.js";
@@ -41,6 +42,7 @@ export type EngineDocker = Pick<
   | "connectToNetwork"
   | "ensureNetwork"
   | "ensureVolume"
+  | "deploymentContainers"
   | "ensureImage"
   | "prepareVolumeOwnership"
   | "removeVolume"
@@ -105,6 +107,7 @@ export class DeploymentEngine {
       containerId: null,
       containerPort: null,
       hostPort: null,
+      replicas: 1,
       deploymentUrl: null,
       errorMessage: null,
       failedStage: null,
@@ -117,6 +120,8 @@ export class DeploymentEngine {
     const logger = this.deps.logger.child({ deploymentId: job.id });
 
     let workspacePath: string | null = null;
+    /** Containers started for this run, to stop if it fails. */
+    const startedContainers: string[] = [];
 
     try {
       const service = job.service;
@@ -188,38 +193,57 @@ export class DeploymentEngine {
           log("system", `Created volume ${volume.name} at ${volume.mountPath}\n`);
         }
       }
-      const container = await this.deps.docker.createAndStartContainer({
-        volumes: job.volumes,
-        imageName: state.imageName,
-        containerName: state.containerName,
-        // A prebuilt service is reached by name on the project network only: nothing is published.
-        containerPort: prebuilt ? null : state.containerPort,
-        labels,
-        network: routed ? this.deps.router.network : null,
-        privateNetwork: service ? { name: service.network, alias: service.alias } : null,
-        command,
-        env: { ...env.runtime, ...service?.environment },
-        healthCheckPort: prebuilt ? null : healthCheck.port,
-        resources: job.resources,
-        ...(prebuilt && { healthCommand: prebuilt.healthCommand }),
-      });
-      state.containerId = container.id;
-      state.hostPort = container.hostPort;
+      // Every replica is the same container under its own name; replica 1 is the deployment's own.
+      const replicas = job.replicas ?? 1;
+      state.replicas = replicas;
+      const startReplica = async (replica: number) => {
+        const container = await this.deps.docker.createAndStartContainer({
+          volumes: job.volumes,
+          imageName: state.imageName,
+          containerName: replicaContainerName(state.containerName, replica),
+          // A prebuilt service is reached by name on the project network only: nothing is published.
+          containerPort: prebuilt ? null : state.containerPort,
+          labels: { ...labels, [ShipyardLabel.REPLICA]: String(replica) },
+          network: routed ? this.deps.router.network : null,
+          privateNetwork: service ? { name: service.network, alias: service.alias } : null,
+          command,
+          env: { ...env.runtime, ...service?.environment },
+          healthCheckPort: prebuilt ? null : healthCheck.port,
+          resources: job.resources,
+          ...(prebuilt && { healthCommand: prebuilt.healthCommand }),
+        });
+        startedContainers.push(container.id);
+        return container;
+      };
+      const checkReplica = async (container: StartedContainer, replica: number) => {
+        const which = replicas > 1 ? ` (replica ${replica}/${replicas})` : "";
+        if (prebuilt) {
+          const seconds = await this.waitDockerHealthy(container.id, healthCheck.timeoutMs);
+          log("system", `Ready: ${prebuilt.healthCommand[0]} succeeded after ${seconds}s${which}\n`);
+        } else if (worker) {
+          await this.waitWorkerSettles(container.id);
+          log("system", `Worker kept running for ${Math.round(this.workerSettleMs / 1000)}s${which}\n`);
+        } else {
+          const health = await this.deps.healthCheck.waitUntilHealthy({
+            ...healthCheckTarget(container.healthHostPort!, healthCheck),
+            getContainerState: () => this.deps.docker.getContainerState(container.id),
+          });
+          log("system", `Health check passed (HTTP ${health.statusCode} after ${health.attempts} attempt(s))${which}\n`);
+        }
+      };
+
+      const first = await startReplica(1);
+      state.containerId = first.id;
+      state.hostPort = first.hostPort;
 
       // 5. Health check: HTTP for web services; for workers, that the process keeps running.
+      //    Replicas are started and checked one at a time: a bad version fails at the first
+      //    one, before the rest are started, and never receives traffic.
       await moveTo(DeploymentStatus.HEALTH_CHECKING);
-      if (prebuilt) {
-        const seconds = await this.waitDockerHealthy(container.id, healthCheck.timeoutMs);
-        log("system", `Ready: ${prebuilt.healthCommand[0]} succeeded after ${seconds}s\n`);
-      } else if (worker) {
-        await this.waitWorkerSettles(container.id);
-        log("system", `Worker kept running for ${Math.round(this.workerSettleMs / 1000)}s\n`);
-      } else {
-        const health = await this.deps.healthCheck.waitUntilHealthy({
-          ...healthCheckTarget(container.healthHostPort!, healthCheck),
-          getContainerState: () => this.deps.docker.getContainerState(container.id),
-        });
-        log("system", `Health check passed (HTTP ${health.statusCode} after ${health.attempts} attempt(s))\n`);
+      await checkReplica(first, 1);
+      for (let replica = 2; replica <= replicas; replica += 1) {
+        log("system", `Starting replica ${replica}/${replicas}\n`);
+        await checkReplica(await startReplica(replica), replica);
       }
       await moveTo(DeploymentStatus.HEALTHY);
 
@@ -228,13 +252,14 @@ export class DeploymentEngine {
       await moveTo(DeploymentStatus.ROUTING);
       const routeName = job.routeName ?? job.name;
       if (routed) {
-        const url = this.deps.router.urlFor(routeName, container.hostPort!);
+        const url = this.deps.router.urlFor(routeName, first.hostPort!);
         await this.deps.router.activate({
           name: routeName,
           aliases: job.domains,
           deploymentId: job.id,
           containerName: state.containerName,
           containerPort: state.containerPort!,
+          ...replicaRouting(state.containerName, replicas, healthCheck),
         });
         state.deploymentUrl = url;
         log("system", `Live at ${url}\n`);
@@ -262,12 +287,15 @@ export class DeploymentEngine {
       }
       log("system", `ERROR: ${state.errorMessage}\n`);
 
-      if (state.containerId) {
-        await this.reportRuntimeLogs(state.containerId, log, logger);
-        // Stop — but keep — the broken container so its logs remain inspectable.
-        await this.deps.docker
-          .stopContainer(state.containerId)
-          .catch((stopError: unknown) => logger.warn({ err: stopError }, "Could not stop failed container"));
+      if (startedContainers.length > 0) {
+        // The last one started is the one that failed (or the only one).
+        await this.reportRuntimeLogs(startedContainers.at(-1)!, log, logger);
+        // Stop — but keep — the broken containers so their logs remain inspectable.
+        for (const id of startedContainers) {
+          await this.deps.docker
+            .stopContainer(id)
+            .catch((stopError: unknown) => logger.warn({ err: stopError }, "Could not stop failed container"));
+        }
       }
 
       state.failedStage = state.status;
@@ -298,10 +326,14 @@ export class DeploymentEngine {
     await this.deps.docker.followLogs(container.id, tail, onChunk, signal);
   }
 
-  /** Idempotent: stopping an already-stopped container succeeds. */
+  /** Stops every replica of the deployment. Idempotent: stopping an already-stopped container succeeds. */
   async stop(containerReference: string): Promise<ContainerActionResult> {
     const container = await this.deps.docker.inspectManagedContainer(containerReference);
-    if (container.running) await this.deps.docker.stopContainer(container.id);
+    const ids = container.deploymentId ? await this.deps.docker.deploymentContainers(container.deploymentId) : [];
+    for (const id of ids.length > 0 ? ids : [container.id]) {
+      const replica = id === container.id ? container : await this.deps.docker.inspectManagedContainer(id);
+      if (replica.running) await this.deps.docker.stopContainer(replica.id);
+    }
     return { containerName: container.name, status: DeploymentStatus.STOPPED, hostPort: null, deploymentUrl: null };
   }
 
@@ -318,66 +350,90 @@ export class DeploymentEngine {
     onStage: (status: DeploymentStatus) => Promise<void> = async () => {},
   ): Promise<ContainerActionResult> {
     const before = await this.deps.docker.inspectManagedContainer(containerReference);
+    // Every replica, in order: one at a time, each checked before the next.
+    const ids = before.deploymentId ? await this.deps.docker.deploymentContainers(before.deploymentId) : [];
+    const replicaIds = ids.length > 0 ? ids : [before.id];
+
+    const first = await this.restartReplica(replicaIds[0]!);
+    // Checked the way it was when deployed (its labels), not with today's project settings.
+    await onStage(DeploymentStatus.HEALTH_CHECKING);
+    await this.checkRestarted(first);
+    const containers = [first];
+    for (const id of replicaIds.slice(1)) {
+      const replica = await this.restartReplica(id);
+      await this.checkRestarted(replica);
+      containers.push(replica);
+    }
+    await onStage(DeploymentStatus.HEALTHY);
+
+    await onStage(DeploymentStatus.ROUTING);
+    if (route) {
+      for (const container of containers) await this.joinRouterNetwork(container);
+      await this.deps.router.activate({
+        name: route.name,
+        aliases: route.aliases,
+        deploymentId: first.deploymentId ?? first.id,
+        containerName: first.name,
+        containerPort: first.containerPort,
+        ...replicaRouting(first.name, containers.length, first.healthCheck),
+      });
+    }
+
+    return {
+      containerName: first.name,
+      status: DeploymentStatus.RUNNING,
+      hostPort: first.hostPort,
+      deploymentUrl: route && first.hostPort !== null ? this.deps.router.urlFor(route.name, first.hostPort) : null,
+    };
+  }
+
+  /** `docker restart`, then waits for its published port to come back. */
+  private async restartReplica(containerId: string): Promise<ManagedContainer> {
+    const before = await this.deps.docker.inspectManagedContainer(containerId);
     await this.deps.docker.restartContainer(before.id);
     // Workers and Docker-checked services publish nothing.
-    const worker = before.containerPort === 0 || before.dockerHealthCheck;
+    const unpublished = before.containerPort === 0 || before.dockerHealthCheck;
 
     // Docker may assign a different ephemeral host port after a restart, and
     // can report no port at all for a moment while it re-publishes them.
     let after = await this.deps.docker.inspectManagedContainer(before.id);
     for (
       let attempt = 0;
-      !worker && attempt < 20 && after.running && (after.hostPort === null || after.healthHostPort === null);
+      !unpublished && attempt < 20 && after.running && (after.hostPort === null || after.healthHostPort === null);
       attempt += 1
     ) {
       await new Promise((resolve) => setTimeout(resolve, 150));
       after = await this.deps.docker.inspectManagedContainer(before.id);
     }
-    if (!worker && (after.hostPort === null || after.healthHostPort === null)) {
+    if (!unpublished && (after.hostPort === null || after.healthHostPort === null)) {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Container restarted without a published port.");
     }
-
-    // Checked the way it was when deployed (its labels), not with today's project settings.
-    await onStage(DeploymentStatus.HEALTH_CHECKING);
-    if (before.dockerHealthCheck) {
-      await this.waitDockerHealthy(after.id, after.healthCheck.timeoutMs);
-    } else if (worker) {
-      await this.waitWorkerSettles(after.id);
-    } else {
-      await this.deps.healthCheck.waitUntilHealthy({
-        ...healthCheckTarget(after.healthHostPort!, after.healthCheck),
-        getContainerState: () => this.deps.docker.getContainerState(after.id),
-      });
-    }
-    await onStage(DeploymentStatus.HEALTHY);
-
-    await onStage(DeploymentStatus.ROUTING);
-    if (route) {
-      await this.joinRouterNetwork(after);
-      await this.deps.router.activate({
-        name: route.name,
-        aliases: route.aliases,
-        deploymentId: after.deploymentId ?? after.id,
-        containerName: after.name,
-        containerPort: after.containerPort,
-      });
-    }
-
-    return {
-      containerName: after.name,
-      status: DeploymentStatus.RUNNING,
-      hostPort: after.hostPort,
-      deploymentUrl: route && after.hostPort !== null ? this.deps.router.urlFor(route.name, after.hostPort) : null,
-    };
+    return after;
   }
 
+  private async checkRestarted(container: ManagedContainer): Promise<void> {
+    if (container.dockerHealthCheck) {
+      await this.waitDockerHealthy(container.id, container.healthCheck.timeoutMs);
+    } else if (container.containerPort === 0) {
+      await this.waitWorkerSettles(container.id);
+    } else {
+      await this.deps.healthCheck.waitUntilHealthy({
+        ...healthCheckTarget(container.healthHostPort!, container.healthCheck),
+        getContainerState: () => this.deps.docker.getContainerState(container.id),
+      });
+    }
+  }
 
   /**
    * Makes sure the router can reach an existing container. Containers started
    * before routing was turned on are not on its network yet.
    */
   async ensureRoutable(containerReference: string): Promise<void> {
-    await this.joinRouterNetwork(await this.deps.docker.inspectManagedContainer(containerReference));
+    const container = await this.deps.docker.inspectManagedContainer(containerReference);
+    const ids = container.deploymentId ? await this.deps.docker.deploymentContainers(container.deploymentId) : [];
+    for (const id of ids.length > 0 ? ids : [container.id]) {
+      await this.joinRouterNetwork(id === container.id ? container : await this.deps.docker.inspectManagedContainer(id));
+    }
   }
 
   /** Current container state, for reconciling stored status with reality. */
@@ -399,8 +455,11 @@ export class DeploymentEngine {
   }
 
   /** Removes a deployment's container and image. Missing artifacts are ignored. */
-  async destroy(artifacts: { containerId: string | null; imageName: string | null }): Promise<void> {
-    if (artifacts.containerId) await this.deps.docker.removeContainer(artifacts.containerId);
+  async destroy(artifacts: { deploymentId?: string; containerId: string | null; imageName: string | null }): Promise<void> {
+    const replicas = artifacts.deploymentId ? await this.deps.docker.deploymentContainers(artifacts.deploymentId) : [];
+    for (const id of new Set([...(artifacts.containerId ? [artifacts.containerId] : []), ...replicas])) {
+      await this.deps.docker.removeContainer(id);
+    }
     if (artifacts.imageName) await this.deps.docker.removeImage(artifacts.imageName);
   }
 
@@ -546,4 +605,22 @@ function healthCheckTarget(hostPort: number, health: HealthCheckSettings) {
     throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, `Invalid health check path: ${health.path}`, { statusCode: 422 });
   }
   return { url: url.href, timeoutMs: health.timeoutMs ?? undefined, strict: health.path !== "/" };
+}
+
+/**
+ * The other replicas' container names, and, with several replicas and an
+ * explicitly configured health path, a check the proxy runs on each replica.
+ * ("/" is not checked by the proxy: many apps answer it with 404, which the
+ * proxy would count as down.)
+ */
+export function replicaRouting(
+  containerName: string,
+  replicas: number,
+  health: HealthCheckSettings,
+): { replicaContainers: string[]; healthCheck?: { path: string; port: number | null } } {
+  const replicaContainers = Array.from({ length: replicas - 1 }, (_, index) => replicaContainerName(containerName, index + 2));
+  return {
+    replicaContainers,
+    ...(replicas > 1 && health.path !== "/" && { healthCheck: { path: health.path, port: health.port } }),
+  };
 }

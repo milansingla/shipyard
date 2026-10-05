@@ -21,7 +21,16 @@ export function shortId(deploymentId: string): string {
 }
 
 export function buildContainerName(repositoryName: string, deploymentId: string): string {
-  return `shipyard-${toDockerSlug(repositoryName)}-${shortId(deploymentId)}`;
+  // Slug cut to 36 so a replica suffix (-r10) still fits a 63-character DNS label.
+  const slug = toDockerSlug(repositoryName).slice(0, 36).replace(/-+$/g, "");
+  return `shipyard-${slug}-${shortId(deploymentId)}`;
+}
+
+export const MAX_REPLICAS = 10;
+
+/** Replica 1 is the deployment's container itself; the others are <name>-r2 … <name>-r10. */
+export function replicaContainerName(containerName: string, replica: number): string {
+  return replica === 1 ? containerName : `${containerName}-r${replica}`;
 }
 
 /** Docker's own container name/id rule. Used to validate user-supplied references. */

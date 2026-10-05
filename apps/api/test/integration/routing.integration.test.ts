@@ -30,6 +30,7 @@ import { silentLogger } from "../helpers/silentLogger.js";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const HELLO_APP = path.resolve(here, "../../../../examples/hello-node");
 const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
+const REPLICA_APP = path.resolve(here, "../fixtures/replica-app");
 const COMPOSE_FILE = path.resolve(here, "../../../../docker-compose.yml");
 
 const suffix = randomUUID().slice(0, 8);
@@ -173,6 +174,7 @@ beforeAll(async () => {
 afterAll(async () => {
   for (const record of created) {
     if (record.containerId) await docker.removeContainer(record.containerId);
+    for (const id of await docker.deploymentContainers(record.id)) await docker.removeContainer(id); // other replicas
     await docker.removeImage(record.imageName);
   }
   await traefik?.remove({ force: true });
@@ -248,5 +250,78 @@ describe("Traefik routing against real Docker", () => {
       last = await visit();
     }
     expect(last).toEqual({ status: 404, servedBy: null });
+  });
+});
+
+describe("replicas behind Traefik", () => {
+  const ROUTE_R = "replicas";
+  const replicaJob = (): DeploymentJob => ({
+    ...job(),
+    name: ROUTE_R,
+    replicas: 2,
+    healthCheck: { path: "/healthz", port: null, timeoutMs: null },
+  });
+
+  /** One request to replicas.localhost; the body is the serving container's hostname. */
+  function ask(): Promise<{ status: number; body: string }> {
+    return new Promise((resolve, reject) => {
+      const request = http.get(
+        { host: "127.0.0.1", port: traefikPort, path: "/", headers: { host: `${ROUTE_R}.localhost` }, agent: false, timeout: 5_000 },
+        (response) => {
+          let body = "";
+          response.on("data", (chunk) => (body += chunk));
+          response.on("end", () => resolve({ status: response.statusCode ?? 0, body }));
+        },
+      );
+      request.on("timeout", () => request.destroy(new Error("timed out")));
+      request.on("error", reject);
+    });
+  }
+
+  let first: DeploymentState;
+
+  it("spreads requests across every replica", async () => {
+    first = await engine(REPLICA_APP).run(replicaJob());
+    created.push(first);
+    expect(first.replicas).toBe(2);
+    const answers = await Promise.all(Array.from({ length: 20 }, () => ask()));
+    expect(answers.every((a) => a.status === 200)).toBe(true);
+    expect(new Set(answers.map((a) => a.body)).size).toBe(2);
+  });
+
+  it("a rolling redeploy of all replicas fails no request", async () => {
+    let running = true;
+    const results: number[] = [];
+    const visitors = Array.from({ length: 4 }, async () => {
+      while (running) results.push(await ask().then((a) => a.status, () => 0));
+    });
+    const second = await engine(REPLICA_APP).run(replicaJob());
+    created.push(second);
+    // What DeploymentService does next: retire the old replicas (drained by docker stop's grace period).
+    await engine(REPLICA_APP).stop(first.containerId!);
+    await sleep(500);
+    running = false;
+    await Promise.all(visitors);
+
+    expect(results.filter((status) => status !== 200)).toEqual([]);
+    expect(results.length).toBeGreaterThan(20);
+    for (const id of await docker.deploymentContainers(first.id)) {
+      expect((await dockerode.getContainer(id).inspect()).State.Running).toBe(false); // both old replicas stopped
+    }
+    first = second;
+  });
+
+  it("Traefik stops sending traffic to a replica that dies", async () => {
+    const [, replica2] = await docker.deploymentContainers(first.id);
+    await dockerode.getContainer(replica2!).kill();
+    // Traefik notices within a few of its 2s checks; until then some requests may fail.
+    let answers: Array<{ status: number; body: string }> = [];
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await sleep(1_000);
+      answers = await Promise.all(Array.from({ length: 10 }, () => ask().catch(() => ({ status: 0, body: "" }))));
+      if (answers.every((a) => a.status === 200)) break;
+    }
+    expect(answers.map((a) => a.status)).toEqual(Array(10).fill(200));
+    expect(new Set(answers.map((a) => a.body)).size).toBe(1); // only the surviving replica
   });
 });

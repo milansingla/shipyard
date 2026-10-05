@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { healthCheckPathSchema } from "../projects/project.schemas.js";
+import { MAX_REPLICAS } from "../../services/docker/naming.js";
 import { DEFAULT_POSTGRES_VERSION, POSTGRES_VERSIONS } from "./postgres.js";
 
 /** A DNS label (its name on the project network), short enough to prefix a project's hostname. */
@@ -37,6 +38,8 @@ const settings = {
   healthCheckTimeoutSeconds: z.int().min(5).max(900).nullable().optional(),
   cpuLimit: z.number().min(0.1).max(64).multipleOf(0.01, "at most 2 decimals").nullable().optional(),
   memoryLimitMb: z.int().min(64).max(262_144).nullable().optional(),
+  /** Identical containers, load-balanced. Applied on the next deploy. */
+  replicas: z.int().min(1).max(MAX_REPLICAS).optional(),
 };
 
 export const createServiceSchema = z

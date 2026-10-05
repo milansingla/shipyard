@@ -310,6 +310,8 @@ model Service {
   public       Boolean     @default(true)
   /// Prebuilt image it runs instead of building the repository (POSTGRES: postgres:<major>-alpine).
   image        String?
+  /// Identical containers per deployment, load-balanced; 1–10. Always 1 for databases.
+  replicas     Int         @default(1)
   /// Per-service overrides of the project's settings; null = the project's.
   healthCheckPath String?
   healthCheckPort Int?
@@ -380,6 +382,8 @@ model Deployment {
   containerId   String?
   containerPort Int?
   hostPort      Int?
+  /// Identical containers this deployment runs (load-balanced). The first is containerName/containerId.
+  replicas      Int       @default(1)
   deploymentUrl String?
   errorMessage  String?
   /// The stage a FAILED deployment was in when it failed.

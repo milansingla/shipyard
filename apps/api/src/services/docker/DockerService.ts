@@ -31,6 +31,8 @@ export const ShipyardLabel = {
   SERVICE: "shipyard.service",
   /** "docker": healthy when the image's own check (Docker HEALTHCHECK) says so, e.g. pg_isready. */
   HEALTH_KIND: "shipyard.health-kind",
+  /** 1-based replica number within its deployment. */
+  REPLICA: "shipyard.replica",
 } as const;
 
 /** How a container is health-checked. */
@@ -561,6 +563,21 @@ export class DockerService {
       if (dockerStatusCode(error) === 304) return;
       throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not stop container", error);
     }
+  }
+
+  /** Ids of every container of a deployment (its replicas), in replica order. */
+  async deploymentContainers(deploymentId: string): Promise<string[]> {
+    let containers: Docker.ContainerInfo[];
+    try {
+      containers = await this.docker.listContainers({
+        all: true,
+        filters: { label: [`${ShipyardLabel.MANAGED}=true`, `${ShipyardLabel.DEPLOYMENT_ID}=${deploymentId}`] },
+      });
+    } catch (error) {
+      throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not list containers", error);
+    }
+    const replica = (container: Docker.ContainerInfo) => Number(container.Labels?.[ShipyardLabel.REPLICA] ?? 1);
+    return containers.sort((a, b) => replica(a) - replica(b)).map((container) => container.Id);
   }
 
   /** Attaches a running or stopped container to a network. */

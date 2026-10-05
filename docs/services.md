@@ -56,6 +56,38 @@ sets a variable for one service only, overriding a project-wide one with
 the same name for that service. Each ciphertext is bound to its project,
 scope and key.
 
+## Replicas and rolling deployments
+
+A service can run 1–10 identical containers (**Replicas** on the project
+page, `PATCH /api/services/:id {"replicas": 3}`, or `replicas: 3` in
+shipyard.yaml). Applied on the next deploy. Databases always run one.
+
+- **Public web services**: Traefik load-balances requests across the
+  replicas (round robin). With an explicitly configured health path
+  (not `/`), Traefik also checks every replica every 2s and skips those not
+  answering 2xx/3xx, so one crashed replica stops getting traffic. `/` isn't
+  used for that: many apps answer it with 404, which Traefik would count as down.
+- **Private web services and workers**: every replica joins the project
+  network under the service's name; Docker's DNS spreads connections across them.
+- Replica 1 is the deployment's container (`shipyard-<name>-<id>`), the
+  others are `…-r2` … `…-r10`, labelled `shipyard.replica`. Stop, restart,
+  rollback and delete act on all of them; **logs show replica 1**.
+
+A deploy is a **rolling deployment**:
+
+```
+old: A1 A2 (serving)
+new: B1 start → health check ✓ → B2 start → health check ✓   (one at a time; a failure stops here)
+     route → B1 B2 (confirmed via X-Shipyard-Deployment)
+     drain → A1 A2 (SIGTERM, 10s grace for in-flight requests) → stopped
+```
+
+If any new replica fails its health check, the replicas started so far are
+stopped, the route never moves and the old ones keep serving. During a
+deploy the service briefly runs twice its replicas, so leave room for that
+in CPU and memory. With volumes, every replica mounts the same volume:
+fine for uploads, not for an SQLite file written by several processes.
+
 ## Persistent volumes
 
 A container's files are thrown away with it, at every deploy. A **volume**

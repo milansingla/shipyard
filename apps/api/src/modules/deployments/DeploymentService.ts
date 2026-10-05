@@ -11,7 +11,7 @@ import {
 } from "../../db/prisma.js";
 import { AppError, ConflictError, ErrorCode, NotFoundError, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
-import { DeploymentEngine, DeploymentFailedError } from "../../services/deployment/DeploymentEngine.js";
+import { DeploymentEngine, DeploymentFailedError, replicaRouting } from "../../services/deployment/DeploymentEngine.js";
 import { DeploymentStatus, IN_PROGRESS_STATUSES, assertTransition } from "../../services/deployment/status.js";
 import type { DeploymentJob, DeploymentState } from "../../services/deployment/types.js";
 import { ShipyardLabel } from "../../services/docker/DockerService.js";
@@ -517,7 +517,7 @@ export class DeploymentService {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { serviceId } });
       for (const deployment of deployments) {
         await this.deactivateRoute(deployment);
-        await this.deps.engine.destroy({ containerId: deployment.containerId, imageName: deployment.imageName });
+        await this.deps.engine.destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
         await this.deps.buildLogs.remove(deployment.id);
       }
       await finalize();
@@ -539,7 +539,7 @@ export class DeploymentService {
         await this.deactivateRoute(deployment);
         // If Docker is unreachable this throws and the project is NOT deleted,
         // so no containers are orphaned. The user can simply retry.
-        await this.deps.engine.destroy({ containerId: deployment.containerId, imageName: deployment.imageName });
+        await this.deps.engine.destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
         await this.deps.buildLogs.remove(deployment.id);
       }
       await this.deps.engine.removeNetwork(projectNetworkName(projectId));
@@ -654,6 +654,7 @@ export class DeploymentService {
         domains: await this.serviceDomains(project.id, service.id, primaryId),
         resources: effectiveResources(project, service),
         healthCheck: effectiveHealthCheck(project, service),
+        replicas: service.type === "POSTGRES" ? 1 : service.replicas,
         volumes: (await this.deps.prisma.volume.findMany({ where: { serviceId: service.id } })).map((volume) => ({
           name: volume.dockerName,
           mountPath: volume.mountPath,
@@ -718,6 +719,7 @@ export class DeploymentService {
           containerId: state.containerId,
           containerPort: state.containerPort,
           hostPort: state.hostPort,
+          replicas: state.replicas,
           deploymentUrl: state.deploymentUrl,
           errorMessage: state.errorMessage,
           failedStage: state.failedStage,
@@ -943,7 +945,7 @@ export class DeploymentService {
   private async syncRoutes(): Promise<void> {
     const running = await this.deps.prisma.deployment.findMany({
       where: { status: DeploymentStatus.RUNNING, service: { type: "WEB", public: true } },
-      include: { project: true },
+      include: { project: true, service: true },
       orderBy: { finishedAt: "asc" },
     });
     const targets = new Map<string, RouteTarget>();
@@ -956,6 +958,7 @@ export class DeploymentService {
         deploymentId: deployment.id,
         containerName: deployment.containerName,
         containerPort: deployment.containerPort,
+        ...replicaRouting(deployment.containerName, deployment.replicas, effectiveHealthCheck(deployment.project, deployment.service)),
       });
     }
     await this.deps.router.sync([...targets.values()]);
@@ -970,7 +973,7 @@ export class DeploymentService {
   async refreshRoute(projectId: string): Promise<void> {
     const live = await this.deps.prisma.deployment.findMany({
       where: { projectId, status: DeploymentStatus.RUNNING, service: { type: "WEB", public: true } },
-      include: { project: true },
+      include: { project: true, service: true },
     });
     for (const deployment of live) {
       const route = await this.routeFor(deployment.project, deployment.serviceId);
@@ -980,6 +983,7 @@ export class DeploymentService {
         deploymentId: deployment.id,
         containerName: deployment.containerName,
         containerPort: deployment.containerPort,
+        ...replicaRouting(deployment.containerName, deployment.replicas, effectiveHealthCheck(deployment.project, deployment.service)),
       });
     }
   }

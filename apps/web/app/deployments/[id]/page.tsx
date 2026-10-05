@@ -162,6 +162,11 @@ export default function DeploymentPage() {
             <Fact label="Port">
               <Mono>{d.containerPort ?? "—"}</Mono>
             </Fact>
+            {d.replicas > 1 && (
+              <Fact label="Replicas">
+                <span className="tabular-nums">{d.replicas}</span>
+              </Fact>
+            )}
           </dl>
 
           <LogPanel deploymentId={d.id} status={d.status} />

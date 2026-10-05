@@ -134,6 +134,12 @@ A database service runs a prebuilt `image` (`postgres:<major>-alpine`)
 instead of building the repository; its password and URL are ordinary
 encrypted environment variables ([databases.md](databases.md)).
 
+### Replicas (`services.replicas`, `deployments.replicas`)
+
+What a service asks for, and what each deployment started. Check
+constraints keep it in 1–10 and at 1 for databases. Replica containers aren't
+rows: they are found by their `shipyard.deployment-id` label.
+
 ### Volume (`volumes`)
 
 A service's persistent directory: `name`, `mountPath` (each unique per

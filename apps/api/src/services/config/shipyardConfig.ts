@@ -5,6 +5,7 @@ import { AppError, ErrorCode } from "../../lib/errors.js";
 import { healthCheckPathSchema } from "../../modules/projects/project.schemas.js";
 import { mountPathSchema, serviceNameSchema, sourceDirSchema, volumeNameSchema } from "../../modules/services/service.schemas.js";
 import { MAX_VOLUMES_PER_SERVICE } from "../../modules/services/VolumeService.js";
+import { MAX_REPLICAS } from "../docker/naming.js";
 import { DEFAULT_POSTGRES_VERSION, POSTGRES_VERSIONS, type PostgresVersion } from "../../modules/services/postgres.js";
 
 /** File names Shipyard looks for at the repository root, in order. */
@@ -23,6 +24,7 @@ const serviceSchema = z.strictObject({
   start: command.optional(),
   port: z.int().min(1).max(65535).optional(),
   public: z.boolean().optional(),
+  replicas: z.int().min(1).max(MAX_REPLICAS).optional(),
   healthCheck: z
     .strictObject({
       path: healthCheckPathSchema.optional(),
@@ -61,6 +63,7 @@ export interface ConfiguredService {
     startCommand?: string;
     port?: number;
     public?: boolean;
+    replicas?: number;
     healthCheckPath?: string;
     healthCheckPort?: number;
     healthCheckTimeoutSeconds?: number;
@@ -96,7 +99,7 @@ export function parseShipyardConfig(source: string, fileName = "shipyard.yaml"):
   return Object.entries(result.data.services).map(([name, service]) => {
     if (service.type === "postgres") {
       const extra =
-        (["build", "start", "port", "public", "healthCheck", "volumes"] as const).find((key) => service[key] !== undefined) ??
+        (["build", "start", "port", "public", "replicas", "healthCheck", "volumes"] as const).find((key) => service[key] !== undefined) ??
         (service.source !== "." ? "source" : undefined);
       if (extra) throw invalid(fileName, `is invalid at services.${name}.${extra}: a postgres service only takes version and resources`);
       return {
@@ -120,6 +123,7 @@ export function parseShipyardConfig(source: string, fileName = "shipyard.yaml"):
       ...(service.start && { startCommand: service.start.command }),
       ...(service.port !== undefined && { port: service.port }),
       ...(service.public !== undefined && { public: service.public }),
+      ...(service.replicas !== undefined && { replicas: service.replicas }),
       ...(service.healthCheck?.path !== undefined && { healthCheckPath: service.healthCheck.path }),
       ...(service.healthCheck?.port !== undefined && { healthCheckPort: service.healthCheck.port }),
       ...(service.healthCheck?.timeoutSeconds !== undefined && { healthCheckTimeoutSeconds: service.healthCheck.timeoutSeconds }),

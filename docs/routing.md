@@ -217,7 +217,8 @@ curl -v http://127.0.0.1:<hostPort>/               # 6. Does the app itself answ
 - Custom domains aren't verified as yours: on a server only trusted people
   can sign in to, unique ownership per hostname is the guard. A domain does
   nothing until its DNS points here.
-- One container per project; no load balancing across replicas.
+- Load balancing is round robin across a deployment's replicas (see
+  [services.md](services.md#replicas-and-rolling-deployments)); no sticky sessions.
 - Request-level zero downtime depends on the app finishing in-flight requests
   on SIGTERM within 10s, which most HTTP servers do (see `examples/hello-node`).
 - One Shipyard process: the route table's lock is in memory, like the deploy lock.

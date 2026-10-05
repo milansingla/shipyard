@@ -627,3 +627,20 @@ on demand and labelled, so Shipyard can find and remove only its own.
 `postgres:17-alpine` moves when a new image is published. Pulling only when
 missing means every deploy of a service runs the same image; upgrading is a
 deliberate act, not a surprise during a restart.
+
+## Replicas and rolling deployments
+
+- **Find containers by label, not by bookkeeping**: replicas carry the
+  deployment id as a Docker label, so stop/restart/delete ask Docker for
+  "every container of deployment X" instead of keeping a second list that
+  could drift from reality.
+- **Roll out one at a time**: starting and checking replicas one by one means
+  a bad version fails at its first replica, before the rest are started.
+- **Active health checks need a meaningful endpoint**: a load balancer
+  removing "unhealthy" backends is only as good as the check. Checking `/` on
+  apps that answer 404 there would take every replica out.
+
+**Interview: what does "drain" mean here?** The route moves to the new
+replicas first (and is confirmed), so no new requests reach the old ones;
+then `docker stop` sends SIGTERM and waits 10s, letting requests already in
+flight finish before the process exits.
