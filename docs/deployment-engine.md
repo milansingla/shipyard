@@ -239,6 +239,28 @@ the current one — the V2 rollback mechanism. With routing on, both redeploys
 and rollbacks switch traffic without downtime; restarting the *live*
 deployment does not (it is the same container).
 
+## Rollback
+
+`POST /api/deployments/:id/rollback`, or **Roll back** on a RUNNING or FAILED
+deployment:
+
+1. Ownership is checked (others' deployments: 404).
+2. **Target**: the newest *earlier* deployment of the project that reached
+   RUNNING (from its history; pre-V3 deployments that were stopped normally
+   count too) and is STOPPED with its container still present. Containers
+   removed outside Shipyard are skipped. None left → 409 `NO_ROLLBACK_TARGET`.
+3. Target: `STOPPED → ROLLING_BACK → HEALTH_CHECKING → HEALTHY → ROUTING →
+   RUNNING`, using the same container, image, environment and health
+   settings it had. Its container is restarted, checked and given the traffic
+   exactly like a deploy, so the switch has no downtime.
+4. Whatever was live is retired (`Rolled back to deployment …`).
+5. A `ROLLBACK` event is recorded on both deployments, each pointing at the other.
+
+If the rollback fails (e.g. the old version no longer passes its health
+check), the target is marked FAILED, its container stopped, and the current
+deployment keeps serving. Asking again for the same deployment returns the
+deployment it was rolled back to (while that is live) and changes nothing.
+
 ## Debugging
 
 Follow the layers, in order:

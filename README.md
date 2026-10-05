@@ -124,7 +124,8 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `GET /api/deployments/:id/events`          | its history: created by whom, every status change, why |
 | `GET /api/deployments/:id/logs?type=build\|runtime&tail=` | logs                              |
 | `POST /api/deployments/:id/stop`           | stop (idempotent)                                 |
-| `POST /api/deployments/:id/restart`        | restart + health check; on an old deployment = rollback |
+| `POST /api/deployments/:id/restart`        | restart + health check; on an old deployment = rollback to it |
+| `POST /api/deployments/:id/rollback`       | bring back the previous working deployment (idempotent) |
 | `POST /api/deployments/:id/redeploy`       | new deployment of the same project (202)          |
 | `POST /api/webhooks/github`                | GitHub push webhook (HMAC-signed; no session)     |
 

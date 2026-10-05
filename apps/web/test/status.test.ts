@@ -16,13 +16,14 @@ const ALL: DeploymentStatus[] = [
   "FAILED",
   "STOPPING",
   "STOPPED",
+  "ROLLING_BACK",
 ];
 
 const none = { commitSha: null, containerId: null, failedStage: null };
 
 describe("status model", () => {
   it("covers every API status, with a tone that drives polling", () => {
-    expect(ALL.filter(isInProgress)).toEqual([...PIPELINE.filter((s) => s !== "RUNNING"), "STOPPING"]);
+    expect(ALL.filter(isInProgress)).toEqual([...PIPELINE.filter((s) => s !== "RUNNING"), "STOPPING", "ROLLING_BACK"]);
     expect(statusInfo("RUNNING").tone).toBe("live");
     expect(statusInfo("FAILED").tone).toBe("failed");
     expect(statusInfo("STOPPED").tone).toBe("idle");
@@ -49,6 +50,13 @@ describe("status model", () => {
     expect(stageProgress({ status: "FAILED", commitSha, containerId, failedStage: null })).toEqual({
       reached: failedAt - 1,
       failedAt,
+    });
+  });
+
+  it("a deployment being rolled back to is starting again", () => {
+    expect(stageProgress({ status: "ROLLING_BACK", commitSha: "a", containerId: "c", failedStage: null })).toEqual({
+      reached: PIPELINE.indexOf("STARTING"),
+      failedAt: null,
     });
   });
 

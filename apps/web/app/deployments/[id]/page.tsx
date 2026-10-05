@@ -14,7 +14,7 @@ import { isInProgress } from "@/lib/status";
 import type { Deployment, Project } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
 
-type Action = "stop" | "restart" | "redeploy";
+type Action = "stop" | "restart" | "redeploy" | "rollback";
 
 export default function DeploymentPage() {
   const { id } = useParams<{ id: string }>();
@@ -32,8 +32,10 @@ export default function DeploymentPage() {
     setActionError(null);
     try {
       const result = await api<Deployment>(`/deployments/${id}/${action}`, { method: "POST" });
-      // Redeploy creates a NEW deployment; follow it.
-      if (action === "redeploy") return router.push(`/deployments/${result.id}`);
+      // Redeploy creates a new deployment, rollback brings back an older one: follow it.
+      if (action === "redeploy" || (action === "rollback" && result.id !== id)) {
+        return router.push(`/deployments/${result.id}`);
+      }
       await deployment.reload();
     } catch (caught) {
       setActionError(caught instanceof ApiError ? caught : new ApiError(0, "UNKNOWN", String(caught)));
@@ -56,6 +58,12 @@ export default function DeploymentPage() {
   const url = d.status === "RUNNING" ? safeHttpUrl(d.deploymentUrl) : null;
   const canStop = d.status === "RUNNING" || d.status === "HEALTHY";
   const canRestart = (d.status === "RUNNING" || d.status === "STOPPED") && d.containerId !== null;
+  const canRollBack = d.status === "RUNNING" || d.status === "FAILED";
+  const rollBack = () => {
+    if (window.confirm("Roll back to the previous version that worked? It takes over once healthy; this one is stopped.")) {
+      void act("rollback");
+    }
+  };
 
   return (
     <div className="pt-12">
@@ -74,6 +82,17 @@ export default function DeploymentPage() {
           </div>
         </div>
         <div className="flex flex-wrap gap-3">
+          {canRollBack && (
+            <Button
+              variant="secondary"
+              busy={busy === "rollback"}
+              disabled={busy !== null}
+              onClick={rollBack}
+              title="Brings back the newest earlier deployment that ran successfully."
+            >
+              {busy === "rollback" ? "Rolling back…" : "Roll back"}
+            </Button>
+          )}
           {canStop && (
             <Button variant="secondary" busy={busy === "stop"} disabled={busy !== null} onClick={() => void act("stop")}>
               Stop

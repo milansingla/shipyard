@@ -20,6 +20,8 @@ export const DeploymentStatus = {
   FAILED: "FAILED",
   STOPPING: "STOPPING",
   STOPPED: "STOPPED",
+  /** An earlier deployment being brought back; then health check → routing → RUNNING. */
+  ROLLING_BACK: "ROLLING_BACK",
 } as const;
 
 export type DeploymentStatus = (typeof DeploymentStatus)[keyof typeof DeploymentStatus];
@@ -41,7 +43,8 @@ const TRANSITIONS: Readonly<Record<DeploymentStatus, readonly DeploymentStatus[]
   [S.ROUTING]: [S.RUNNING, S.FAILED],
   [S.RUNNING]: [S.STOPPING, S.STARTING, S.FAILED], // RUNNING → STARTING = restart
   [S.STOPPING]: [S.STOPPED, S.FAILED],
-  [S.STOPPED]: [S.STARTING], // restart a stopped deployment
+  [S.STOPPED]: [S.STARTING, S.ROLLING_BACK], // restart, or bring back as a rollback
+  [S.ROLLING_BACK]: [S.HEALTH_CHECKING, S.FAILED],
   [S.FAILED]: [], // terminal: recover by redeploying (a new deployment)
 };
 
@@ -55,6 +58,7 @@ export const IN_PROGRESS_STATUSES: readonly DeploymentStatus[] = [
   S.HEALTH_CHECKING,
   S.HEALTHY,
   S.ROUTING,
+  S.ROLLING_BACK,
 ];
 
 export function canTransition(from: DeploymentStatus, to: DeploymentStatus): boolean {

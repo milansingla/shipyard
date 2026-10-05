@@ -14,7 +14,8 @@ export type DeploymentStatus =
   | "RUNNING"
   | "FAILED"
   | "STOPPING"
-  | "STOPPED";
+  | "STOPPED"
+  | "ROLLING_BACK";
 
 export interface User {
   id: string;
@@ -92,12 +93,14 @@ export interface EnvironmentVariable {
 
 export interface DeploymentEvent {
   id: number;
-  type: "CREATED" | "STATUS_CHANGED";
+  type: "CREATED" | "STATUS_CHANGED" | "ROLLBACK";
   fromStatus: DeploymentStatus | null;
   toStatus: DeploymentStatus | null;
   /** Login of the person who caused it; null when Shipyard acted on its own. */
   actor: string | null;
   message: string | null;
+  /** ROLLBACK: the deployment rolled back to / from. */
+  relatedDeploymentId: string | null;
   createdAt: string;
 }
 

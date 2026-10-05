@@ -260,6 +260,79 @@ export class DeploymentService {
   }
 
   /**
+   * Brings back the newest earlier deployment that ran successfully and still
+   * has its container, through the same health check and traffic switch as a
+   * deploy, then retires whatever was live. If the rollback fails, the current
+   * deployment keeps serving. Idempotent: rolling back the same deployment
+   * again returns the deployment it was rolled back to, while that is live.
+   */
+  async rollback(id: string, ownerId: string): Promise<Deployment> {
+    const source = await this.get(id, ownerId);
+    const project = await this.getProject(source.projectId, ownerId);
+    const { prisma } = this.deps;
+
+    const done = await prisma.deploymentEvent.findFirst({
+      where: { deploymentId: id, type: DeploymentEventType.ROLLBACK, relatedDeploymentId: { not: null } },
+      orderBy: { id: "desc" },
+    });
+    if (done?.relatedDeploymentId) {
+      const restored = await prisma.deployment.findUnique({ where: { id: done.relatedDeploymentId } });
+      if (restored?.status === DeploymentStatus.RUNNING) return restored;
+    }
+    if (IN_PROGRESS_STATUSES.includes(source.status)) {
+      throw new ConflictError(ErrorCode.DEPLOYMENT_IN_PROGRESS, "This deployment is still in progress. Wait for it to finish.");
+    }
+
+    this.lockProject(project.id);
+    try {
+      const target = await this.findRollbackTarget(source);
+      let current = await this.moveTo(target, DeploymentStatus.ROLLING_BACK, {}, {
+        actorId: ownerId,
+        message: `Rolling back from deployment ${displayId(source.id)}`,
+      });
+      let result;
+      try {
+        result = await this.deps.engine.restart(target.containerId!, project.slug, async (stage) => {
+          current = await this.moveTo(current, stage);
+        });
+      } catch (error) {
+        await this.markFailed(target.id, error, current.status);
+        // Don't leave a half-started old version running next to the live one.
+        await this.deps.engine.stop(target.containerId!).catch(() => {});
+        throw error;
+      }
+      const running = await this.moveTo(current, DeploymentStatus.RUNNING, {
+        hostPort: result.hostPort,
+        deploymentUrl: result.deploymentUrl,
+        errorMessage: null,
+      });
+      await this.retireOthers(project.id, target.id, `Rolled back to deployment ${displayId(target.id)}`);
+      await prisma.deploymentEvent.createMany({
+        data: [
+          {
+            deploymentId: source.id,
+            type: DeploymentEventType.ROLLBACK,
+            actorId: ownerId,
+            relatedDeploymentId: target.id,
+            message: `Rolled back to deployment ${displayId(target.id)}`,
+          },
+          {
+            deploymentId: target.id,
+            type: DeploymentEventType.ROLLBACK,
+            actorId: ownerId,
+            relatedDeploymentId: source.id,
+            message: `Restored in place of deployment ${displayId(source.id)}`,
+          },
+        ],
+      });
+      this.deps.logger.info({ projectId: project.id, from: source.id, to: target.id }, "Rolled back");
+      return running;
+    } finally {
+      this.unlockProject(project.id);
+    }
+  }
+
+  /**
    * Removes every container, image and log of a project, then runs `finalize`
    * (deleting the project row) while still holding the project lock, so no new
    * deployment can sneak in between.
@@ -422,8 +495,40 @@ export class DeploymentService {
   }
 
 
+  /**
+   * Newest earlier deployment that reached RUNNING (deployments from before
+   * event history count if they were stopped normally) and whose container
+   * still exists. Containers removed outside Shipyard are skipped.
+   */
+  private async findRollbackTarget(source: Deployment): Promise<Deployment> {
+    const candidates = await this.deps.prisma.deployment.findMany({
+      where: {
+        projectId: source.projectId,
+        id: { not: source.id },
+        createdAt: { lt: source.createdAt },
+        status: DeploymentStatus.STOPPED,
+        containerId: { not: null },
+        OR: [{ events: { some: { toStatus: DeploymentStatus.RUNNING } } }, { events: { none: {} } }],
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10,
+    });
+    for (const candidate of candidates) {
+      try {
+        await this.deps.engine.inspect(candidate.containerId!);
+        return candidate;
+      } catch (error) {
+        if (!(error instanceof NotFoundError)) throw error;
+      }
+    }
+    throw new ConflictError(
+      ErrorCode.NO_ROLLBACK_TARGET,
+      "There is no earlier deployment to roll back to: none that ran successfully still has its container.",
+    );
+  }
+
   /** Stops every other healthy deployment of the project, keeping containers for rollback. */
-  private async retireOthers(projectId: string, keepId: string): Promise<void> {
+  private async retireOthers(projectId: string, keepId: string, reason?: string): Promise<void> {
     const others = await this.deps.prisma.deployment.findMany({
       where: {
         projectId,
@@ -432,7 +537,7 @@ export class DeploymentService {
       },
     });
     for (const other of others) {
-      await this.stopDeployment(other, { message: `Replaced by deployment ${displayId(keepId)}` }).catch((error: unknown) =>
+      await this.stopDeployment(other, { message: reason ?? `Replaced by deployment ${displayId(keepId)}` }).catch((error: unknown) =>
         this.deps.logger.warn({ err: error, deploymentId: other.id }, "Could not retire previous deployment"),
       );
     }

@@ -110,7 +110,10 @@ would not be enough: Traefik's reload delay varies.
   Traefik's 404), then the container stops. Removing a route only happens if
   it still points at that deployment, so retiring an old one never takes the
   hostname away from the new one.
-- **Rollback** = restart an older, STOPPED deployment. It is health-checked,
+- **Rollback**: `POST /api/deployments/:id/rollback` (the **Roll back**
+  button) brings back the newest earlier deployment that ran successfully
+  and still has its container. Or restart a specific older, STOPPED
+  deployment. It is health-checked,
   takes over the hostname the same way, and then the current one is retired.
   This is zero-downtime too.
 - **Restart** of the *live* deployment is not zero-downtime: it is the same

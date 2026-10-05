@@ -9,6 +9,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createApp } from "../../src/app.js";
 import type { PrismaClient } from "../../src/db/prisma.js";
+import { NotFoundError } from "../../src/lib/errors.js";
 import { SecretBox } from "../../src/lib/secretBox.js";
 import { sessionCookieName } from "../../src/middleware/authenticate.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
@@ -121,9 +122,13 @@ const fakeRouter: Router = {
   },
   async sync(targets) {
     liveRoutes.clear();
+  removedContainers.clear();
     for (const target of targets) liveRoutes.set(target.name, target.deploymentId);
   },
 };
+
+/** Containers "removed outside Shipyard": the fake engine reports them as gone. */
+const removedContainers = new Set<string>();
 
 /** The last job the fake engine was asked to run (to see what it would hand to Docker). */
 let lastJob: DeploymentJob | null = null;
@@ -173,7 +178,8 @@ const fakeEngine: EngineLike = {
     return [{ stream: "stdout" as const, text: "hello\n" }];
   },
   async destroy() {},
-  async inspect() {
+  async inspect(containerId) {
+    if (removedContainers.has(containerId)) throw new NotFoundError(`Container not found: ${containerId}`);
     return { running: true, exitCode: null, hostPort: 49_999 };
   },
   async ensureRoutable() {},
@@ -944,3 +950,73 @@ describe("deployment history (events)", () => {
     });
   });
 });
+
+describe("rollback", () => {
+  async function deployed(cookie: string, projectId: string): Promise<string> {
+    const id = (await call(cookie, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    return id;
+  }
+
+  it("brings back the previous working deployment, retires the current one, and records it on both", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/roll" })).body!.data.id;
+    const a = await deployed(alice, projectId);
+    const b = await deployed(alice, projectId);
+    expect(liveRoutes.get("roll")).toBe(b);
+
+    const res = await call(alice, "POST", `/api/deployments/${b}/rollback`);
+    expect(res.status).toBe(200);
+    expect(res.body!.data).toMatchObject({ id: a, status: S.RUNNING });
+    expect(liveRoutes.get("roll")).toBe(a);
+    expect((await call(alice, "GET", `/api/deployments/${b}`)).body!.data.status).toBe(S.STOPPED);
+
+    const aEvents = (await call(alice, "GET", `/api/deployments/${a}/events`)).body!.data as Array<Record<string, unknown>>;
+    const tail = aEvents.slice(-6).map((e) => (e.type === "ROLLBACK" ? "ROLLBACK" : `${e.fromStatus}→${e.toStatus}`));
+    expect(tail).toEqual([
+      "STOPPED→ROLLING_BACK",
+      "ROLLING_BACK→HEALTH_CHECKING",
+      "HEALTH_CHECKING→HEALTHY",
+      "HEALTHY→ROUTING",
+      "ROUTING→RUNNING",
+      "ROLLBACK",
+    ]);
+    expect(aEvents.find((e) => e.toStatus === "ROLLING_BACK")).toMatchObject({ actor: "alice" });
+    const bEvents = (await call(alice, "GET", `/api/deployments/${b}/events`)).body!.data as Array<Record<string, unknown>>;
+    expect(bEvents.at(-1)).toMatchObject({ type: "ROLLBACK", relatedDeploymentId: a, actor: "alice" });
+    expect(bEvents.find((e) => e.toStatus === "STOPPING")).toMatchObject({ message: expect.stringContaining("Rolled back to") });
+
+    // Asking again is harmless: same answer, nothing new happens.
+    const eventCount = await prisma.deploymentEvent.count();
+    const again = await call(alice, "POST", `/api/deployments/${b}/rollback`);
+    expect(again.body!.data).toMatchObject({ id: a, status: S.RUNNING });
+    expect(await prisma.deploymentEvent.count()).toBe(eventCount);
+  });
+
+  it("skips deployments whose container is gone, and says so when nothing is left", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/roll2" })).body!.data.id;
+    const a = await deployed(alice, projectId);
+    const b = await deployed(alice, projectId);
+    const c = await deployed(alice, projectId);
+    removedContainers.add(`container-${b}`);
+
+    expect((await call(alice, "POST", `/api/deployments/${c}/rollback`)).body!.data.id).toBe(a);
+
+    removedContainers.add(`container-${a}`);
+    const d = await deployed(alice, projectId);
+    const none = await call(alice, "POST", `/api/deployments/${a}/rollback`);
+    expect(none.status).toBe(409);
+    expect(none.body!.error).toMatchObject({ code: "NO_ROLLBACK_TARGET" });
+    expect(liveRoutes.get("roll2")).toBe(d); // nothing changed
+  });
+
+  it("is owner-only", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/roll3" })).body!.data.id;
+    await deployed(alice, projectId);
+    const b = await deployed(alice, projectId);
+    expect((await call(await sessionFor(BOB), "POST", `/api/deployments/${b}/rollback`)).status).toBe(404);
+  });
+});
+

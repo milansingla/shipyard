@@ -40,6 +40,7 @@ const STATUS: Record<DeploymentStatus, StatusInfo> = {
   FAILED: { label: "Failed", tone: "failed" },
   STOPPING: { label: "Stopping", tone: "working" },
   STOPPED: { label: "Stopped", tone: "idle" },
+  ROLLING_BACK: { label: "Rolling back", tone: "working" },
 };
 
 export const STAGE_LABEL: Record<PipelineStage, string> = {
@@ -85,6 +86,8 @@ export function stageProgress(
   const { status } = deployment;
   const index = PIPELINE.indexOf(status as PipelineStage);
   if (index !== -1) return { reached: index, failedAt: null };
+  // Being brought back: its container is starting again.
+  if (status === "ROLLING_BACK") return { reached: PIPELINE.indexOf("STARTING"), failedAt: null };
 
   if (status === "FAILED") {
     const recorded = PIPELINE.indexOf(deployment.failedStage as PipelineStage);

@@ -21,6 +21,13 @@ export function createDeploymentRouter(deployments: DeploymentService): Router {
   });
 
   /** ?type=build (default): stored build log. ?type=runtime&tail=200: live container output. */
+  /** Brings back the previous working deployment. Responds once traffic has moved. */
+  router.post("/deployments/:id/rollback", async (req, res) => {
+    const user = requireUser(req);
+    const { id } = parseInput(idParamsSchema, req.params, "deployment id");
+    sendData(res, await deployments.rollback(id, user.id));
+  });
+
   /** The deployment's history: creation, every status change, who caused it. Oldest first. */
   router.get("/deployments/:id/events", async (req, res) => {
     const user = requireUser(req);

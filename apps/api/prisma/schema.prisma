@@ -27,6 +27,8 @@ enum DeploymentStatus {
   FAILED
   STOPPING
   STOPPED
+  /// An earlier deployment being brought back (rollback).
+  ROLLING_BACK
 }
 
 /// What started a deployment.
@@ -181,6 +183,8 @@ enum DeploymentEventType {
   /// The deployment was created (by a person, or by a push).
   CREATED
   STATUS_CHANGED
+  /// Traffic moved back to an earlier deployment (recorded on both deployments).
+  ROLLBACK
 }
 
 /// A deployment's history: written in the same transaction as each change,
@@ -198,6 +202,8 @@ model DeploymentEvent {
   actorId      String?             @db.Uuid
   actor        User?               @relation(fields: [actorId], references: [id], onDelete: SetNull)
   message      String?
+  /// ROLLBACK: the other deployment (rolled back to / from).
+  relatedDeploymentId String?      @db.Uuid
   createdAt    DateTime            @default(now())
 
   @@index([deploymentId, id])
