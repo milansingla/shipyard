@@ -1,37 +1,43 @@
 # Architecture
 
-## Current shape (V2 · Milestone 1)
+## Current shape (V2 · Milestone 3)
 
 ```
-            ┌──────────── apps/api ─────────────────────────────────────────┐
- CLI ──────►│ cli.ts ─┐                                                     │
-            │         ├─► bootstrap.ts (composition root)                   │
- HTTP ─────►│ server.ts ─► app.ts ─► routes/health                          │
-            │                                                               │
-            │   DeploymentService  ── owns statuses & step order            │
-            │     ├─ GitService          clone (git CLI, hardened)          │
-            │     ├─ detectDockerfile    inspect source                     │
-            │     ├─ DockerService       build / run / logs (Dockerode)     │
-            │     ├─ HealthCheckService  HTTP probe                         │
-            │     └─ WorkspaceService    temp clone dirs                    │
-            └──────────────────────────────┬────────────────────────────────┘
-                                           │ Docker Engine API (unix socket)
-                                           ▼
-                                     Docker daemon ──► app containers
+            ┌──────────── apps/api ──────────────────────────────────────────────┐
+ CLI ──────►│ cli.ts ─────────┐                                                  │
+            │                 ├─► bootstrap.ts (composition root)                │
+ HTTP ─────►│ server.ts ─► app.ts ─► routes: health, projects, deployments      │
+            │                                                                    │
+            │  modules/  ProjectService ─┐                                       │
+            │            DeploymentService ── persists status, 1 deploy/project, │
+            │              │   │              retires old deployment, reconciles │
+            │              │   └─ BuildLogStore     build logs as files          │
+            │              ▼                                                     │
+            │  services/ DeploymentEngine ── step order for ONE run             │
+            │              ├─ GitService          clone (git CLI, hardened)      │
+            │              ├─ prepareBuild        own Dockerfile or generate one │
+            │              ├─ DockerService       build / run / logs (Dockerode) │
+            │              ├─ HealthCheckService  HTTP probe                     │
+            │              └─ WorkspaceService    temp clone dirs                │
+            └────────────┬──────────────────────────────────┬────────────────────┘
+                         │ Prisma (pg adapter)              │ Docker Engine API (unix socket)
+                         ▼                                  ▼
+                    PostgreSQL                        Docker daemon ──► app containers
 ```
 
 ## Responsibilities
 
 | Component            | Knows about                         | Does NOT know about        |
 | -------------------- | ----------------------------------- | -------------------------- |
-| `DeploymentService`  | step order, statuses, failure policy | git flags, Docker API      |
+| `DeploymentService`  | database, project lock, retiring old deployments | git flags, Docker API |
+| `DeploymentEngine`   | step order, statuses, failure policy for one run | database, other deployments |
+| `prepareBuild` + `detection/` | Dockerfile vs Node.js detection, generation | Docker API, database |
 | `GitService`         | `git` CLI, hardening flags          | deployments, Docker        |
 | `DockerService`      | images, containers, labels, logs    | deployments, statuses      |
 | `HealthCheckService` | HTTP probing, timeouts              | Docker internals           |
 | `WorkspaceService`   | safe temp directories               | git, Docker                |
-| `detection/`         | reading a source tree               | anything with side effects |
 
-**Why split `DeploymentService` and `DockerService`?** The deployment is a
+**Why split `DeploymentEngine` and `DockerService`?** The deployment is a
 *business process* (statuses, rules like "don't mark RUNNING before healthy");
 Docker is an *infrastructure detail*. Keeping them apart means the process can
 be tested with a fake Docker, and Docker code never needs to change when the
@@ -67,11 +73,12 @@ carry a `deploymentId` field. Authorization headers/cookies/tokens are redacted.
 ESM + TypeScript `NodeNext` resolution — imports use explicit `.js` extensions
 because that's what Node resolves at runtime after compilation.
 
-## Why no database yet?
-Milestone 1 is a behaviour-preserving port. Until PostgreSQL arrives (M2),
-Docker labels (`shipyard.managed`, `shipyard.deployment-id`,
-`shipyard.container-port`) carry the minimum metadata needed for
-logs/stop/restart. `DeploymentRecord` already mirrors the planned Prisma model.
+## Persistence
+PostgreSQL via Prisma holds projects and deployment history; build logs are
+files. Docker labels (`shipyard.managed`, `shipyard.deployment-id`,
+`shipyard.project-id`, `shipyard.container-port`) remain the link from a
+container back to its records, and the guard that stops Shipyard touching
+containers it didn't create. Details: [database.md](database.md).
 
 ## Technologies deliberately NOT used (yet)
 

@@ -7,10 +7,10 @@ Render/Railway you can read end to end.
 GitHub repo → clone → detect → docker build → container → health check → URL
 ```
 
-> **Status: V2, Milestone 1 — TypeScript foundation.**
-> The V0.1 engine (clone → build → run → logs → stop → restart) has been
-> ported to TypeScript with explicit deployment states, real health checks and
-> tests. Database, GitHub OAuth, webhooks, Traefik and the dashboard are next.
+> **Status: V2, Milestone 3.** Projects and deployment history in PostgreSQL,
+> a REST API with background deployments and logs, and Dockerfile generation
+> for Node.js apps. GitHub OAuth, the dashboard, webhooks and Traefik are next.
+> ⚠️ The API has **no authentication yet** (M4) — keep it on `127.0.0.1`.
 > See [the roadmap](#roadmap).
 
 ## Requirements
@@ -27,6 +27,8 @@ GitHub repo → clone → detect → docker build → container → health check
 ```bash
 npm install
 cp .env.example .env      # optional — every variable has a safe default
+npm run db:up             # PostgreSQL in Docker on 127.0.0.1:5433
+npm run db:deploy         # apply migrations
 ```
 
 ## Deploy something (CLI)
@@ -56,11 +58,42 @@ npm run dev:api                       # http://localhost:4000, auto-reload
 curl http://localhost:4000/api/health # {"data":{"status":"ok","docker":"reachable"}}
 ```
 
+Deploy through the API:
+
+```bash
+# 1. Create a project (repository + branch are checked against GitHub now, not at deploy time)
+curl -X POST localhost:4000/api/projects -H 'content-type: application/json' \
+  -d '{"repositoryUrl":"https://github.com/<owner>/<repo>","branch":"main"}'
+
+# 2. Deploy — returns 202 immediately; the pipeline runs in the background
+curl -X POST localhost:4000/api/projects/<projectId>/deploy
+
+# 3. Watch it: status goes PENDING → CLONING → BUILDING → STARTING → HEALTHY → RUNNING
+curl localhost:4000/api/deployments/<deploymentId>
+curl 'localhost:4000/api/deployments/<deploymentId>/logs?type=build'
+curl 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
+```
+
+| Endpoint                                   | Does                                              |
+| ------------------------------------------ | ------------------------------------------------- |
+| `POST /api/projects`                       | create (`repositoryUrl`, optional `branch`, `name`) |
+| `GET /api/projects` · `GET /api/projects/:id` | list / get, with latest deployment             |
+| `DELETE /api/projects/:id`                 | remove project, its containers, images and logs   |
+| `POST /api/projects/:id/deploy`            | new deployment (202)                              |
+| `GET /api/projects/:id/deployments?limit=` | deployment history, newest first                  |
+| `GET /api/deployments/:id`                 | one deployment                                    |
+| `GET /api/deployments/:id/logs?type=build\|runtime&tail=` | logs                              |
+| `POST /api/deployments/:id/stop`           | stop (idempotent)                                 |
+| `POST /api/deployments/:id/restart`        | restart + health check; on an old deployment = rollback |
+| `POST /api/deployments/:id/redeploy`       | new deployment of the same project (202)          |
+
+Responses are `{ "data": … }` or `{ "error": { "code", "message", "details?" } }`.
+
 ## Tests
 
 ```bash
 npm test                  # unit tests — fast, no Docker or network needed
-npm run test:integration  # real Docker builds + real GitHub clone (Docker must be running)
+npm run test:integration  # real Docker, PostgreSQL (shipyard_test, reset each run) and GitHub clone
 npm run typecheck
 ```
 
@@ -68,11 +101,13 @@ npm run typecheck
 
 ```
 apps/api/            Express API + CLI + deployment engine (TypeScript)
-  src/services/      git, docker, detection, deployment, workspace
+  prisma/            schema + migrations
+  src/modules/       projects, deployments (HTTP routes + database rules)
+  src/services/      git, docker, detection, build, deployment engine, workspace
   test/unit/         fast tests
   test/integration/  real Docker / network tests
 examples/hello-node/ sample deployable app
-docs/                architecture, engine, security, learning notes
+docs/                architecture, engine, database, security, learning notes
 phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 ```
 
@@ -80,13 +115,14 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 
 - [Architecture](docs/architecture.md) — components and why they are split this way
 - [Deployment engine](docs/deployment-engine.md) — pipeline, statuses, health checks, debugging
+- [Database](docs/database.md) — schema and persistence decisions
 - [Security](docs/security.md) — threat model and what is (not yet) safe
 - [Learning notes](docs/learning-notes.md) — concepts + interview prep per milestone
 
 ## Roadmap
 
 - [x] **M1** TypeScript foundation, status model, health checks, tests
-- [ ] **M2** PostgreSQL + Prisma, REST deployment API, deployment history
+- [x] **M2** PostgreSQL + Prisma, REST deployment API, deployment history
 - [x] **M3** Node.js project detection + Dockerfile generation
 - [ ] **M4** GitHub OAuth, repository & branch selection
 - [ ] **M5** Next.js dashboard

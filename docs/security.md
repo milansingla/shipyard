@@ -61,11 +61,12 @@ scanning.
 
 ## Known gaps (tracked)
 
-- **No authentication on the API yet** — it only exposes `/api/health` in M1.
-  Every deployment endpoint (M2+) must require an authenticated session (M4).
-  Until then, keep the API bound to localhost.
-- **No build timeout** — a hung `docker build` blocks its deployment forever, and a killed
-  build leaves unlabelled intermediate layers. Planned for M2 (build deadline + cleanup).
+- **No authentication on the API yet.** Every `/api/projects` and
+  `/api/deployments` endpoint is open: anyone who can reach the API can deploy
+  repositories and stop containers. GitHub OAuth + per-user ownership (M4) fix
+  this. Until then, **keep the API bound to 127.0.0.1** (`HOST`, the default).
+- A cancelled build (timeout, `SHIPYARD_BUILD_TIMEOUT_MS`) may leave dangling
+  image layers; reclaim with `docker image prune`.
 - No memory/CPU limits on containers (would break some apps without per-project config).
 - No egress restrictions for deployed containers.
 - Webhook signature verification arrives with webhooks (M6) — HMAC-SHA256,

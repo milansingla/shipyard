@@ -1,6 +1,9 @@
 # Deployment engine
 
-Code: [`apps/api/src/services/deployment/DeploymentService.ts`](../apps/api/src/services/deployment/DeploymentService.ts)
+Code: [`services/deployment/DeploymentEngine.ts`](../apps/api/src/services/deployment/DeploymentEngine.ts)
+(mechanics of one run) and
+[`modules/deployments/DeploymentService.ts`](../apps/api/src/modules/deployments/DeploymentService.ts)
+(persistence, one-at-a-time per project, retiring the previous deployment).
 
 ## Pipeline
 
@@ -58,7 +61,7 @@ Rule: poll `http://127.0.0.1:<hostPort>/` every 1s, up to
 - 5xx, connection refused, timeout → retry.
 - Container no longer running → fail immediately with its exit code.
 
-Planned: configurable health path per project (M2/M3).
+Planned: configurable health path, port, timeout and retries per project (V3).
 
 ## Build detection & Dockerfile generation
 
@@ -118,21 +121,28 @@ server bound to `localhost` inside a container is unreachable from outside it.
 
 ## Logs
 
-| Source    | What                               | Where today                              |
-| --------- | ---------------------------------- | ---------------------------------------- |
-| `build`   | `docker build` output              | streamed to the observer (CLI prints it) |
-| `runtime` | app stdout/stderr                  | Docker's log driver, read on demand      |
-| `system`  | Shipyard's own progress messages   | observer                                 |
+| Source    | What                               | Stored                                                  |
+| --------- | ---------------------------------- | ------------------------------------------------------- |
+| `build`   | `docker build` output              | build log file `<SHIPYARD_DATA_DIR>/logs/<id>.log`      |
+| `system`  | Shipyard's own progress messages   | same build log file                                     |
+| `runtime` | app stdout/stderr                  | Docker's json-file driver (3 × 10 MB), read on demand; a failed start's last 50 lines are copied into the build log, prefixed `[app]` |
 
-Runtime logs are read from Docker (`docker logs` equivalent) and demultiplexed.
-Persisting build logs is part of M2 — they will be stored outside PostgreSQL
-rows or capped, not appended forever to the database.
+`GET /api/deployments/:id/logs?type=build` returns the build log;
+`?type=runtime&tail=200` reads the container's output. Build logs stop growing
+at 20 MB and are trimmed to their last 2 MB when the build ends (the error is
+at the end). See [database.md](database.md#decisions) for why logs are files.
 
 ## Restart & stop
 
-Without a database (M1), the current status is derived from Docker state.
 Restart = `docker restart` → re-read the host port (Docker may assign a new
-ephemeral one) → health check. Stop is idempotent.
+ephemeral one) → health check → RUNNING. It responds only after the health
+check, unlike deploy (202, background). Stop is idempotent.
+
+Only one deploy/restart per project runs at a time (409 `DEPLOYMENT_IN_PROGRESS`).
+A new deployment retires the previous one only **after** it is RUNNING, so a
+failed deploy leaves the old version serving. Retired containers are stopped,
+not removed: restarting an older STOPPED deployment brings it back and retires
+the current one — the V2 rollback mechanism.
 
 ## Debugging
 
