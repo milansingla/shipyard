@@ -17,6 +17,7 @@ import { isValidContainerReference } from "./naming.js";
 export const ShipyardLabel = {
   MANAGED: "shipyard.managed",
   DEPLOYMENT_ID: "shipyard.deployment-id",
+  PROJECT_ID: "shipyard.project-id",
   REPOSITORY: "shipyard.repository",
   CONTAINER_PORT: "shipyard.container-port",
 } as const;
@@ -49,9 +50,13 @@ export interface StartedContainer {
 interface DockerServiceOptions {
   /** Interface the container's port is published on (127.0.0.1 = local only). */
   publishHost: string;
+  /** A build running longer than this is cancelled. */
+  buildTimeoutMs: number;
 }
 
 const STOP_TIMEOUT_SECONDS = 10;
+// Runtime logs live in Docker's json-file driver; cap them at 3 × 10 MB per container.
+const RUNTIME_LOG_CONFIG = { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } };
 const DEFAULT_LOG_TAIL = 200;
 
 /**
@@ -77,6 +82,7 @@ export class DockerService {
   /**
    * Builds an image from `contextDir`. Resolves only if Docker reports no error.
    * `onLog` receives raw build output as it streams.
+   * Cancelled after `buildTimeoutMs`: closing the connection makes Docker abort the build.
    */
   async buildImage(
     contextDir: string,
@@ -89,6 +95,7 @@ export class DockerService {
       ignore: (name) => path.relative(contextDir, name).split(path.sep)[0] === ".git",
     });
 
+    const abort = new AbortController();
     let stream: NodeJS.ReadableStream;
     try {
       // tar-fs returns a streamx stream: pipe-compatible at runtime, but not typed as a Node ReadableStream.
@@ -96,15 +103,31 @@ export class DockerService {
         t: imageName,
         labels,
         rm: true,
-        forcerm: true,
+        forcerm: true, // remove intermediate containers even when the build fails
+        abortSignal: abort.signal,
       });
     } catch (error) {
       throw this.dockerError(ErrorCode.DOCKER_BUILD_FAILED, "Docker refused the build request", error);
     }
 
     let buildError: string | null = null;
+    let timer: NodeJS.Timeout | undefined;
 
-    await new Promise<void>((resolve, reject) => {
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        abort.abort();
+        (stream as NodeJS.ReadableStream & { destroy?: () => void }).destroy?.();
+        reject(
+          new AppError(
+            ErrorCode.DOCKER_BUILD_FAILED,
+            `Docker build timed out after ${Math.round(this.options.buildTimeoutMs / 1000)}s and was cancelled.`,
+            { statusCode: 422 },
+          ),
+        );
+      }, this.options.buildTimeoutMs);
+    });
+
+    const progress = new Promise<void>((resolve, reject) => {
       this.docker.modem.followProgress(
         stream,
         (error: Error | null) => (error ? reject(error) : resolve()),
@@ -120,6 +143,13 @@ export class DockerService {
     }).catch((error: unknown) => {
       throw this.dockerError(ErrorCode.DOCKER_BUILD_FAILED, "Docker build stream failed", error);
     });
+
+    try {
+      await Promise.race([progress, timeout]);
+    } finally {
+      clearTimeout(timer);
+      progress.catch(() => {}); // after a timeout, the aborted stream's error is expected
+    }
 
     if (buildError !== null) {
       throw new AppError(ErrorCode.DOCKER_BUILD_FAILED, `Docker build failed: ${buildError}`, { statusCode: 422 });
@@ -140,6 +170,7 @@ export class DockerService {
         HostConfig: {
           // HostPort "" = let Docker pick a free ephemeral port.
           PortBindings: { [portKey]: [{ HostIp: this.options.publishHost, HostPort: "" }] },
+          LogConfig: RUNTIME_LOG_CONFIG,
           SecurityOpt: ["no-new-privileges:true"],
           PidsLimit: 512,
         },

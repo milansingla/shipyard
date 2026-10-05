@@ -1,0 +1,26 @@
+# Local development infrastructure for Shipyard.
+#   docker compose up -d      start
+#   docker compose down       stop (data is kept in the named volume)
+#   docker compose down -v    stop AND delete the database
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: shipyard-postgres
+    environment:
+      POSTGRES_USER: shipyard
+      POSTGRES_PASSWORD: shipyard # local development only
+      POSTGRES_DB: shipyard
+    ports:
+      # 5433 on the host, so it doesn't clash with a locally installed Postgres on 5432.
+      # Bound to 127.0.0.1: the database is not reachable from your network.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - shipyard-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shipyard -d shipyard"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  shipyard-postgres:

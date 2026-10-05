@@ -5,10 +5,13 @@
 export const ErrorCode = {
   VALIDATION_ERROR: "VALIDATION_ERROR",
   NOT_FOUND: "NOT_FOUND",
+  PROJECT_ALREADY_EXISTS: "PROJECT_ALREADY_EXISTS",
+  DEPLOYMENT_IN_PROGRESS: "DEPLOYMENT_IN_PROGRESS",
   CONFIG_INVALID: "CONFIG_INVALID",
   INVALID_STATUS_TRANSITION: "INVALID_STATUS_TRANSITION",
   COMMAND_FAILED: "COMMAND_FAILED",
   GIT_CLONE_FAILED: "GIT_CLONE_FAILED",
+  GIT_REF_NOT_FOUND: "GIT_REF_NOT_FOUND",
   DOCKERFILE_NOT_FOUND: "DOCKERFILE_NOT_FOUND",
   DOCKER_BUILD_FAILED: "DOCKER_BUILD_FAILED",
   DOCKER_UNAVAILABLE: "DOCKER_UNAVAILABLE",
@@ -52,6 +55,13 @@ export class ValidationError extends AppError {
 export class NotFoundError extends AppError {
   constructor(message: string) {
     super(ErrorCode.NOT_FOUND, message, { statusCode: 404 });
+  }
+}
+
+/** The request is valid but conflicts with the current state (HTTP 409). */
+export class ConflictError extends AppError {
+  constructor(code: ErrorCode, message: string) {
+    super(code, message, { statusCode: 409 });
   }
 }
 

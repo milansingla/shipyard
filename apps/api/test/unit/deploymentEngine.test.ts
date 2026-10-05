@@ -4,15 +4,17 @@ import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AppError, ErrorCode, ValidationError } from "../../src/lib/errors.js";
+import { AppError, ErrorCode } from "../../src/lib/errors.js";
 import {
-  type DeploymentDocker,
+  DeploymentEngine,
   DeploymentFailedError,
-  DeploymentService,
-} from "../../src/services/deployment/DeploymentService.js";
+  type EngineDocker,
+} from "../../src/services/deployment/DeploymentEngine.js";
 import { DeploymentStatus as S } from "../../src/services/deployment/status.js";
 import type { DeploymentStatus } from "../../src/services/deployment/status.js";
+import type { DeploymentJob, DeploymentObserver } from "../../src/services/deployment/types.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
+import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
@@ -21,30 +23,36 @@ import { silentLogger } from "../helpers/silentLogger.js";
 // is covered by test/integration/deployment.integration.test.ts.
 
 const COMMIT = "a".repeat(40);
-const REPO_URL = "https://github.com/octocat/hello";
+const JOB_ID = "3f2a9c1e-77b4-4d0e-9a11-5c6d7e8f9012";
+
+function job(overrides: Partial<DeploymentJob> = {}): DeploymentJob {
+  return {
+    id: JOB_ID,
+    repository: parseRepositoryUrl("https://github.com/octocat/hello", ["github.com"]),
+    branch: "main",
+    name: "hello",
+    ...overrides,
+  };
+}
 
 interface Harness {
-  service: DeploymentService;
+  engine: DeploymentEngine;
   calls: string[];
   statuses: DeploymentStatus[];
-  observer: { onStatusChange: (r: { status: DeploymentStatus }) => void; onLog: () => void };
+  observer: DeploymentObserver;
   workspaceRoot: string;
 }
 
 let tmpRoot: string;
 
 beforeEach(async () => {
-  tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "shipyard-deploy-"));
+  tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "shipyard-engine-"));
 });
 afterEach(async () => {
   await fs.rm(tmpRoot, { recursive: true, force: true });
 });
 
-function harness(options: {
-  dockerfile?: string | null;
-  buildFails?: boolean;
-  healthFails?: boolean;
-} = {}): Harness {
+function harness(options: { dockerfile?: string | null; buildFails?: boolean; healthFails?: boolean } = {}): Harness {
   const calls: string[] = [];
   const statuses: DeploymentStatus[] = [];
   const workspaceRoot = path.join(tmpRoot, "ws");
@@ -59,9 +67,13 @@ function harness(options: {
     },
   };
 
-  const docker: DeploymentDocker = {
-    async buildImage(_ctx, imageName, labels) {
-      calls.push(`build:${imageName}:${labels["shipyard.container-port"]}`);
+  const unused = async (): Promise<never> => {
+    throw new Error("not used in this test");
+  };
+
+  const docker: EngineDocker = {
+    async buildImage(_ctx: string, imageName: string, labels: Record<string, string>) {
+      calls.push(`build:${imageName}:${labels["shipyard.container-port"]}:${labels["shipyard.project-id"]}`);
       if (options.buildFails) {
         throw new AppError(ErrorCode.DOCKER_BUILD_FAILED, "Docker build failed: npm ci exited 1");
       }
@@ -77,18 +89,16 @@ function harness(options: {
       calls.push("logs");
       return [{ stream: "stderr" as const, text: "Error: listen EADDRINUSE\n" }];
     },
-    async stopContainer(id) {
+    async stopContainer(id: string) {
       calls.push(`stop:${id}`);
     },
-    async inspectManagedContainer() {
-      throw new Error("not used");
-    },
-    async restartContainer() {
-      throw new Error("not used");
-    },
+    inspectManagedContainer: unused,
+    restartContainer: unused,
+    removeContainer: unused,
+    removeImage: unused,
   };
 
-  const service = new DeploymentService({
+  const engine = new DeploymentEngine({
     source,
     docker,
     healthCheck: {
@@ -102,14 +112,13 @@ function harness(options: {
     },
     workspace: new WorkspaceService(workspaceRoot),
     logger: silentLogger,
-    allowedGitHosts: ["github.com"],
   });
 
   return {
-    service,
+    engine,
     calls,
     statuses,
-    observer: { onStatusChange: (r) => statuses.push(r.status), onLog: () => {} },
+    observer: { onStatusChange: (state) => void statuses.push(state.status) },
     workspaceRoot,
   };
 }
@@ -118,59 +127,60 @@ async function workspaceEntries(root: string): Promise<string[]> {
   return fs.readdir(root).catch(() => []);
 }
 
-describe("DeploymentService.deploy", () => {
+describe("DeploymentEngine.run", () => {
   it("runs the full pipeline and ends RUNNING", async () => {
     const h = harness();
-    const record = await h.service.deploy({ repositoryUrl: REPO_URL, branch: "main" }, h.observer);
+    const state = await h.engine.run(job({ labels: { "shipyard.project-id": "p1" } }), h.observer);
 
     expect(h.statuses).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]);
     expect(h.calls).toEqual([
       "clone:main",
-      `build:${record.imageName}:8080`,
-      `start:${record.containerName}:8080`,
+      "build:shipyard/hello:3f2a9c1e77b4:8080:p1",
+      "start:shipyard-hello-3f2a9c1e77b4:8080",
       "health:http://127.0.0.1:49153/",
     ]);
-    expect(record).toMatchObject({
+    expect(state).toMatchObject({
+      id: JOB_ID,
       status: S.RUNNING,
-      repositoryUrl: "https://github.com/octocat/hello.git",
-      repositoryOwner: "octocat",
-      repositoryName: "hello",
       branch: "main",
       commitSha: COMMIT,
+      imageName: "shipyard/hello:3f2a9c1e77b4",
+      containerName: "shipyard-hello-3f2a9c1e77b4",
       containerId: "container-id",
       containerPort: 8080,
       hostPort: 49153,
       deploymentUrl: "http://localhost:49153",
       errorMessage: null,
     });
-    expect(record.imageName).toMatch(/^shipyard\/hello:[0-9a-f]{12}$/);
-    expect(record.startedAt).toBeInstanceOf(Date);
-    expect(record.finishedAt).toBeInstanceOf(Date);
+    expect(state.startedAt).toBeInstanceOf(Date);
+    expect(state.finishedAt).toBeInstanceOf(Date);
     // Clone is deleted once the image is built.
     expect(await workspaceEntries(h.workspaceRoot)).toEqual([]);
   });
 
-  it("defaults to port 3000 and the default branch", async () => {
-    const h = harness({ dockerfile: "FROM node\nCMD node index.js\n" });
-    const record = await h.service.deploy({ repositoryUrl: REPO_URL }, h.observer);
-    expect(record.containerPort).toBe(3000);
-    expect(record.branch).toBeNull();
-    expect(h.calls[0]).toBe("clone:default");
+  it("awaits async observers so persisted statuses stay in order", async () => {
+    const h = harness();
+    const order: string[] = [];
+    await h.engine.run(job(), {
+      onStatusChange: async (state) => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        order.push(state.status);
+      },
+    });
+    expect(order).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]);
   });
 
-  it("rejects invalid input before creating a deployment", async () => {
-    const h = harness();
-    await expect(h.service.deploy({ repositoryUrl: "file:///etc" }, h.observer)).rejects.toThrow(ValidationError);
-    await expect(h.service.deploy({ repositoryUrl: REPO_URL, branch: "--evil" }, h.observer)).rejects.toThrow(
-      ValidationError,
-    );
-    expect(h.statuses).toEqual([]);
-    expect(h.calls).toEqual([]);
+  it("defaults to port 3000 and the default branch", async () => {
+    const h = harness({ dockerfile: "FROM node\nCMD node index.js\n" });
+    const state = await h.engine.run(job({ branch: null }), h.observer);
+    expect(state.containerPort).toBe(3000);
+    expect(state.branch).toBeNull();
+    expect(h.calls[0]).toBe("clone:default");
   });
 
   it("fails with DOCKERFILE_NOT_FOUND and cleans up the clone", async () => {
     const h = harness({ dockerfile: null });
-    const error = await h.service.deploy({ repositoryUrl: REPO_URL }, h.observer).catch((e: unknown) => e);
+    const error = await h.engine.run(job(), h.observer).catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(DeploymentFailedError);
     expect((error as DeploymentFailedError).code).toBe(ErrorCode.DOCKERFILE_NOT_FOUND);
@@ -181,8 +191,7 @@ describe("DeploymentService.deploy", () => {
 
   it("records build failures and never starts a container", async () => {
     const h = harness({ buildFails: true });
-    const error = (await h.service.deploy({ repositoryUrl: REPO_URL }, h.observer).catch((e: unknown) => e)) as
-      DeploymentFailedError;
+    const error = (await h.engine.run(job(), h.observer).catch((e: unknown) => e)) as DeploymentFailedError;
 
     expect(error.code).toBe(ErrorCode.DOCKER_BUILD_FAILED);
     expect(error.deployment.errorMessage).toContain("npm ci exited 1");
@@ -194,11 +203,8 @@ describe("DeploymentService.deploy", () => {
   it("on health-check failure: collects runtime logs, stops the container, ends FAILED", async () => {
     const h = harness({ healthFails: true });
     const logs: string[] = [];
-    const error = (await h.service
-      .deploy(
-        { repositoryUrl: REPO_URL },
-        { ...h.observer, onLog: (source, text) => source === "runtime" && logs.push(text) },
-      )
+    const error = (await h.engine
+      .run(job(), { ...h.observer, onLog: (source, text) => void (source === "runtime" && logs.push(text)) })
       .catch((e: unknown) => e)) as DeploymentFailedError;
 
     expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
@@ -206,5 +212,20 @@ describe("DeploymentService.deploy", () => {
     expect(h.calls.slice(-2)).toEqual(["logs", "stop:container-id"]);
     expect(logs).toEqual(["Error: listen EADDRINUSE\n"]);
     expect(error.deployment).toMatchObject({ containerId: "container-id", deploymentUrl: null });
+  });
+
+  it("a failing observer fails the deployment instead of being ignored", async () => {
+    const h = harness();
+    let calls = 0;
+    const error = await h.engine
+      .run(job(), {
+        onStatusChange: () => {
+          calls += 1;
+          if (calls === 2) throw new Error("database unavailable");
+        },
+      })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(DeploymentFailedError);
+    expect((error as DeploymentFailedError).deployment.errorMessage).toBe("database unavailable");
   });
 });

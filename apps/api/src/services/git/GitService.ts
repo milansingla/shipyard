@@ -37,6 +37,44 @@ export class GitService implements SourceProvider {
   ) {}
 
   /**
+   * Confirms the repository is reachable and returns a concrete branch name:
+   * `branch` itself if it exists, or the repository's default branch when null.
+   * Uses `git ls-remote`, which downloads refs only — no objects.
+   */
+  async resolveBranch(repository: RepositoryRef, branch: string | null): Promise<string> {
+    const args =
+      branch === null
+        ? [...GIT_HARDENING_ARGS, "ls-remote", "--symref", "--", repository.cloneUrl, "HEAD"]
+        : [...GIT_HARDENING_ARGS, "ls-remote", "--heads", "--", repository.cloneUrl, `refs/heads/${branch}`];
+
+    let stdout: string;
+    try {
+      ({ stdout } = await runCommand("git", args, {
+        timeoutMs: 30_000,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      }));
+    } catch (error) {
+      throw new AppError(
+        ErrorCode.GIT_CLONE_FAILED,
+        `Repository ${repository.cloneUrl} is not reachable. It may be private or not exist. (${errorMessage(error)})`,
+        { statusCode: 422, cause: error },
+      );
+    }
+
+    const resolved = branch === null ? parseSymrefHead(stdout) : stdout.trim() ? branch : null;
+    if (resolved === null) {
+      throw new AppError(
+        ErrorCode.GIT_REF_NOT_FOUND,
+        branch === null
+          ? `Could not determine the default branch of ${repository.cloneUrl}.`
+          : `Branch "${branch}" does not exist in ${repository.cloneUrl}.`,
+        { statusCode: 422 },
+      );
+    }
+    return resolved;
+  }
+
+  /**
    * Shallow-clones a single branch (or the default branch when `branch` is null).
    * `repository` and `branch` must already be validated by the caller.
    */
@@ -66,4 +104,13 @@ export class GitService implements SourceProvider {
       );
     }
   }
+}
+
+/**
+ * Parses `git ls-remote --symref <url> HEAD`, whose first line looks like:
+ *   ref: refs/heads/main<TAB>HEAD
+ */
+export function parseSymrefHead(output: string): string | null {
+  const match = /^ref: refs\/heads\/(\S+)\tHEAD$/m.exec(output);
+  return match?.[1] ?? null;
 }

@@ -1,20 +1,26 @@
 /**
  * Shipyard CLI — V0.1 command parity on top of the V2 engine.
  *
+ * Talks to Docker directly and does NOT use the database: CLI deployments
+ * don't appear in the API's project history. Use the API for that.
+ *
  *   npm run shipyard -- deploy <repo-url> [--branch <name>]
  *   npm run shipyard -- logs <container-name> [--tail <n>]
  *   npm run shipyard -- stop <container-name>
  *   npm run shipyard -- restart <container-name>
  */
+import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 
-import { createServices } from "./bootstrap.js";
+import { createEngineServices } from "./bootstrap.js";
 import { loadConfig } from "./config/env.js";
 import { AppError, ValidationError, errorMessage } from "./lib/errors.js";
 import { createLogger } from "./lib/logger.js";
-import { DeploymentFailedError } from "./services/deployment/DeploymentService.js";
+import { DeploymentFailedError } from "./services/deployment/DeploymentEngine.js";
 import type { DeploymentObserver } from "./services/deployment/types.js";
 import { formatLogChunks } from "./services/docker/logs.js";
+import { validateBranchName } from "./services/git/branchName.js";
+import { parseRepositoryUrl } from "./services/git/repositoryUrl.js";
 
 const USAGE = `
 Shipyard V2 (CLI)
@@ -51,7 +57,7 @@ async function main(): Promise<void> {
     level: config.logLevelExplicit ? config.logLevel : "error",
     pretty: config.env !== "production",
   });
-  const { deployments } = createServices(config, logger);
+  const { engine } = createEngineServices(config, logger);
 
   switch (command) {
     case "deploy": {
@@ -59,13 +65,12 @@ async function main(): Promise<void> {
         onStatusChange: (record) => console.log(`\n▶ ${record.status}`),
         onLog: (source, text) => process.stdout.write(source === "runtime" ? `[app] ${text}` : text),
       };
-      const record = await deployments.deploy(
-        { repositoryUrl: target, ...(values.branch !== undefined && { branch: values.branch }) },
-        observer,
-      );
-      console.log(`\n✅ Deployed ${record.repositoryOwner}/${record.repositoryName} → ${record.deploymentUrl}`);
-      console.log(`   container: ${record.containerName}\n`);
-      console.log(JSON.stringify(record, null, 2));
+      const repository = parseRepositoryUrl(target, config.allowedGitHosts);
+      const branch = values.branch === undefined ? null : validateBranchName(values.branch);
+      const state = await engine.run({ id: randomUUID(), repository, branch, name: repository.name }, observer);
+      console.log(`\n✅ Deployed ${repository.owner}/${repository.name} → ${state.deploymentUrl}`);
+      console.log(`   container: ${state.containerName}\n`);
+      console.log(JSON.stringify(state, null, 2));
       return;
     }
     case "logs": {
@@ -73,14 +78,14 @@ async function main(): Promise<void> {
       if (tail !== undefined && (!Number.isInteger(tail) || tail <= 0)) {
         throw new ValidationError("--tail must be a positive integer.");
       }
-      process.stdout.write(formatLogChunks(await deployments.getLogs(target, tail)));
+      process.stdout.write(formatLogChunks(await engine.getLogs(target, tail)));
       return;
     }
     case "stop":
-      console.log(JSON.stringify(await deployments.stop(target), null, 2));
+      console.log(JSON.stringify(await engine.stop(target), null, 2));
       return;
     case "restart":
-      console.log(JSON.stringify(await deployments.restart(target), null, 2));
+      console.log(JSON.stringify(await engine.restart(target), null, 2));
       return;
     default:
       throw new ValidationError(`Unknown command "${command}".\n${USAGE}`);

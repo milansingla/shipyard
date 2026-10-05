@@ -1,0 +1,73 @@
+// Shipyard database schema. See docs/database.md for the reasoning behind each model.
+//
+//   npm run db:migrate   create + apply a migration after editing this file
+//   npm run db:studio    browse the data
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/// Must stay identical to DeploymentStatus in src/services/deployment/status.ts
+/// (a unit test enforces this). The legal transitions live in that file, not here.
+enum DeploymentStatus {
+  PENDING
+  CLONING
+  BUILDING
+  STARTING
+  HEALTHY
+  RUNNING
+  FAILED
+  STOPPING
+  STOPPED
+}
+
+/// A repository + branch that Shipyard knows how to deploy.
+model Project {
+  id              String       @id @default(uuid()) @db.Uuid
+  name            String
+  /// URL/Docker-safe identifier derived from `name`. Used for container names
+  /// now and for the project's hostname once Traefik routing exists.
+  slug            String       @unique
+  repositoryUrl   String
+  repositoryOwner String
+  repositoryName  String
+  branch          String
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  deployments     Deployment[]
+
+  @@map("projects")
+}
+
+/// One attempt to build and run a project at a specific commit. Never updated
+/// to point at a different commit: a redeploy creates a new row, which is
+/// what makes history and rollback possible.
+model Deployment {
+  id            String           @id @default(uuid()) @db.Uuid
+  projectId     String           @db.Uuid
+  project       Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status        DeploymentStatus @default(PENDING)
+  /// Branch at the time of deployment (the project's branch may change later).
+  branch        String
+  commitSha     String?
+  imageName     String?
+  containerName String?
+  containerId   String?
+  containerPort Int?
+  hostPort      Int?
+  deploymentUrl String?
+  errorMessage  String?
+  createdAt     DateTime         @default(now())
+  startedAt     DateTime?
+  finishedAt    DateTime?
+  updatedAt     DateTime         @updatedAt
+
+  @@index([projectId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("deployments")
+}

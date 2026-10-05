@@ -1,49 +1,54 @@
+import type { RepositoryRef } from "../git/repositoryUrl.js";
 import type { DeploymentStatus } from "./status.js";
 
-/**
- * Everything Shipyard knows about one deployment. Field names deliberately
- * match the planned Prisma `Deployment` model so Milestone 2 can persist it as-is.
- */
-export interface DeploymentRecord {
+/** What to deploy. Built by the caller from already-validated input. */
+export interface DeploymentJob {
   id: string;
-  repositoryUrl: string;
-  repositoryOwner: string;
-  repositoryName: string;
+  repository: RepositoryRef;
   /** null = the repository's default branch. */
   branch: string | null;
-  commitSha: string | null;
+  /** Human-readable base for image/container names (project slug or repo name). */
+  name: string;
+  /** Extra Docker labels, e.g. the owning project's id. */
+  labels?: Record<string, string>;
+}
+
+/**
+ * Everything the engine learns while running a job. Field names match the
+ * Prisma `Deployment` model so a persisting observer can store it as-is.
+ */
+export interface DeploymentState {
+  id: string;
   status: DeploymentStatus;
+  branch: string | null;
+  commitSha: string | null;
   imageName: string;
-  containerId: string | null;
   containerName: string;
+  containerId: string | null;
   containerPort: number | null;
   hostPort: number | null;
   deploymentUrl: string | null;
   errorMessage: string | null;
-  createdAt: Date;
   startedAt: Date | null;
   finishedAt: Date | null;
-}
-
-export interface DeployRequest {
-  repositoryUrl: string;
-  branch?: string;
 }
 
 /** build = `docker build` output, runtime = app stdout/stderr, system = Shipyard's own messages. */
 export type DeploymentLogSource = "system" | "build" | "runtime";
 
 /**
- * Hooks for whoever started the deployment (CLI today; database + API in
- * Milestone 2). Called synchronously — observers must not throw.
+ * Hooks for whoever started the deployment (the CLI prints; the API persists).
+ * `onStatusChange` is awaited, so a persisting observer's writes happen in order
+ * and a failed write fails the deployment instead of being silently lost.
  */
 export interface DeploymentObserver {
-  onStatusChange?(record: Readonly<DeploymentRecord>, previous: DeploymentStatus): void;
+  onStatusChange?(state: Readonly<DeploymentState>, previous: DeploymentStatus): void | Promise<void>;
   onLog?(source: DeploymentLogSource, text: string): void;
 }
 
 export interface ContainerActionResult {
   containerName: string;
   status: DeploymentStatus;
+  hostPort: number | null;
   deploymentUrl: string | null;
 }

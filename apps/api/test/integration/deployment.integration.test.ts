@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,13 +8,14 @@ import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { ErrorCode } from "../../src/lib/errors.js";
-import { DeploymentFailedError, DeploymentService } from "../../src/services/deployment/DeploymentService.js";
+import { DeploymentEngine, DeploymentFailedError } from "../../src/services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "../../src/services/deployment/HealthCheckService.js";
 import { DeploymentStatus as S } from "../../src/services/deployment/status.js";
-import type { DeploymentRecord } from "../../src/services/deployment/types.js";
+import type { DeploymentJob, DeploymentState } from "../../src/services/deployment/types.js";
 import { DockerService } from "../../src/services/docker/DockerService.js";
 import { formatLogChunks } from "../../src/services/docker/logs.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
+import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
@@ -36,19 +38,27 @@ function localSource(sourceDir: string): SourceProvider {
 }
 
 const dockerode = new Docker();
-const docker = new DockerService(dockerode, { publishHost: "127.0.0.1" }, silentLogger);
-const created: DeploymentRecord[] = [];
+const docker = new DockerService(dockerode, { publishHost: "127.0.0.1", buildTimeoutMs: 300_000 }, silentLogger);
+const created: DeploymentState[] = [];
 let workspaceRoot: string;
 
-function engine(sourceDir: string): DeploymentService {
-  return new DeploymentService({
+function engine(sourceDir: string): DeploymentEngine {
+  return new DeploymentEngine({
     source: localSource(sourceDir),
     docker,
     healthCheck: new HealthCheckService({ timeoutMs: 30_000, intervalMs: 500, requestTimeoutMs: 2_000 }),
     workspace: new WorkspaceService(workspaceRoot),
     logger: silentLogger,
-    allowedGitHosts: ["github.com"],
   });
+}
+
+function job(name: string): DeploymentJob {
+  return {
+    id: randomUUID(),
+    repository: parseRepositoryUrl(`https://github.com/shipyard-test/${name}`, ["github.com"]),
+    branch: null,
+    name,
+  };
 }
 
 beforeAll(async () => {
@@ -72,15 +82,12 @@ describe("deployment engine against real Docker", () => {
     const statuses: string[] = [];
     let buildOutput = "";
 
-    const record = await service.deploy(
-      { repositoryUrl: "https://github.com/shipyard-test/hello-node" },
-      {
-        onStatusChange: (r) => statuses.push(r.status),
+    const record = await service.run(job("hello-node"), {
+        onStatusChange: (r) => void statuses.push(r.status),
         onLog: (source, text) => {
           if (source === "build") buildOutput += text;
         },
-      },
-    );
+    });
     created.push(record);
 
     expect(statuses).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]);
@@ -116,10 +123,7 @@ describe("deployment engine against real Docker", () => {
     const runtimeLogs: string[] = [];
 
     const error = (await service
-      .deploy(
-        { repositoryUrl: "https://github.com/shipyard-test/crashing-app" },
-        { onLog: (source, text) => source === "runtime" && runtimeLogs.push(text) },
-      )
+      .run(job("crashing-app"), { onLog: (source, text) => void (source === "runtime" && runtimeLogs.push(text)) })
       .catch((e: unknown) => e)) as DeploymentFailedError;
 
     expect(error).toBeInstanceOf(DeploymentFailedError);

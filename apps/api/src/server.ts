@@ -1,27 +1,36 @@
 import { createApp } from "./app.js";
-import { createServices } from "./bootstrap.js";
-import { loadConfig } from "./config/env.js";
+import { createApiServices } from "./bootstrap.js";
+import { loadConfig, requireDatabaseUrl } from "./config/env.js";
 import { createLogger } from "./lib/logger.js";
 
 const config = loadConfig();
 const logger = createLogger({ level: config.logLevel, pretty: config.env === "development" });
-const services = createServices(config, logger);
+const services = createApiServices(config, requireDatabaseUrl(config), logger);
+
+// Fail fast if the database is unreachable, then repair statuses left behind
+// by a previous run (e.g. a deploy that was BUILDING when the process died).
+await services.prisma.$connect();
+await services.deployments.reconcileOnStartup();
 
 const app = createApp({
   docker: services.docker,
+  projects: services.projects,
+  deployments: services.deployments,
   logger: logger.child({ component: "http" }),
   exposeInternalErrors: config.env !== "production",
 });
 
-const server = app.listen(config.port, () => {
-  logger.info({ port: config.port, env: config.env }, `Shipyard API listening on http://localhost:${config.port}`);
+const server = app.listen(config.port, config.host, () => {
+  logger.info({ host: config.host, port: config.port, env: config.env }, `Shipyard API listening on http://${config.host}:${config.port}`);
 });
 
 function shutdown(signal: NodeJS.Signals): void {
   logger.info({ signal }, "Shutting down");
+  // In-flight deploys are not awaited (a build can take minutes); they are
+  // marked FAILED by reconcileOnStartup() on the next start.
   server.close((error) => {
     if (error) logger.error({ err: error }, "Error while closing HTTP server");
-    process.exit(error ? 1 : 0);
+    void services.prisma.$disconnect().finally(() => process.exit(error ? 1 : 0));
   });
   // Don't hang forever on keep-alive connections.
   setTimeout(() => process.exit(1), 10_000).unref();
