@@ -1,6 +1,6 @@
 # Architecture
 
-## Current shape (V2 · Milestone 7)
+## Current shape (V3)
 
 ```
  Browser ──► apps/web (Next.js, :3000) ── pages + rewrite /api/* ──┐
@@ -48,6 +48,10 @@
 | `DockerService`      | images, containers, labels, logs    | deployments, statuses      |
 | `HealthCheckService` | HTTP probing, timeouts              | Docker internals           |
 | `TraefikRouter`      | route table file, confirming a cutover through Traefik | database, Docker API |
+| `EnvironmentService` | encrypted per-project variables, decrypting them for a deploy | Docker, routing |
+| `DomainService`      | custom hostnames, refreshing the live route | Docker, certificates |
+| `rateLimit`          | per-IP / per-user request budgets | what the routes do |
+| `sse.ts`             | Server-Sent Events framing, keep-alive, max age | logs, deployments |
 | `WorkspaceService`   | safe temp directories               | git, Docker                |
 
 **Why split `DeploymentEngine` and `DockerService`?** The deployment is a

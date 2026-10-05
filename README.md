@@ -7,14 +7,14 @@ Render/Railway you can read end to end.
 GitHub repo → clone → detect → docker build → container → health check → http://<project>.localhost
 ```
 
-> **Status: V2 complete (Milestone 7).** A dashboard to sign in with GitHub,
-> pick a repository and branch, deploy, and follow each deployment's stages and
-> logs. Behind it: a REST API with background deployments, per-user projects,
-> deployment history in PostgreSQL, and Dockerfile generation for Node.js apps.
-> Pushes to a project's branch deploy automatically via GitHub webhooks. Each
-> project lives at a stable address like `http://shop.localhost` behind
-> Traefik, and redeploys switch over with zero downtime.
-> See [the roadmap](#roadmap).
+> **Status: V3 — a single-server production deployment platform.** Sign in
+> with GitHub, pick a repository and branch, deploy. Each project lives at a
+> stable address (`http://shop.localhost`, or your own domain over HTTPS) and
+> redeploys and rollbacks switch traffic with zero downtime, only once the new
+> version passes its health check. Projects carry encrypted environment
+> variables and secrets, health-check settings, CPU/memory limits and a full
+> deployment history; logs stream live; pushes deploy automatically; the API
+> is rate limited. See [the roadmap](#roadmap).
 
 ## Requirements
 
@@ -178,4 +178,21 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [x] **M4** GitHub OAuth, repository & branch selection
 - [x] **M5** Next.js dashboard
 - [x] **M6** GitHub webhooks (auto-deploy on push)
-- [x] **M7** Traefik routing, zero-downtime redeploy
+- [x] **M7** Traefik routing, zero-downtime redeploy — **V2 released (v2.0.0)**
+
+### V3 — production deployment platform (v3.0.0)
+
+- [x] Deployment state machine: QUEUED → CLONING → DETECTING → BUILDING →
+      STARTING → HEALTH_CHECKING → HEALTHY → ROUTING → RUNNING, ROLLING_BACK,
+      recorded failure stage
+- [x] Environment variables & secrets (encrypted, runtime/build, never shown or baked into images)
+- [x] Health checks per project (path, port, timeout)
+- [x] CPU/memory limits and restart policy per project
+- [x] Deployment history: who started it, every status, why
+- [x] One-click rollback to the previous working deployment
+- [x] Live build and runtime logs (Server-Sent Events)
+- [x] Custom domains, HTTPS via Let's Encrypt (production compose override)
+- [x] Rate limiting
+
+Next: **V4**, a multi-service developer platform (services, preview
+deployments, databases, teams).
