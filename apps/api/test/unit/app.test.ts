@@ -2,6 +2,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import express from "express";
+import { pino } from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createApp } from "../../src/app.js";
@@ -94,6 +95,27 @@ describe("error handler", () => {
     const res = await fetch(`${base}/boom`);
     expect(res.status).toBe(422);
     expect(await res.json()).toEqual({ error: { code: "DOCKERFILE_NOT_FOUND", message: "No Dockerfile" } });
+  });
+
+  it("logs an unconfigured feature (503) as a one-line warning, real failures with their stack", async () => {
+    const lines: Array<{ level: number; err?: { stack?: string } }> = [];
+    const logger = pino({ level: "info" }, { write: (line: string) => void lines.push(JSON.parse(line)) });
+    const app = express();
+    app.get("/off", () => {
+      throw new AppError(ErrorCode.AUTH_NOT_CONFIGURED, "Sign-in is not configured", { statusCode: 503 });
+    });
+    app.get("/down", () => {
+      throw new AppError(ErrorCode.DOCKER_UNAVAILABLE, "Docker is down");
+    });
+    app.use(createErrorHandler(logger, false));
+    const base = await start(app);
+
+    expect((await fetch(`${base}/off`)).status).toBe(503);
+    expect((await fetch(`${base}/down`)).status).toBe(500);
+    expect(lines.map((l) => [l.level, l.err?.stack !== undefined])).toEqual([
+      [40, false],
+      [50, true],
+    ]);
   });
 
   it("hides unexpected error details in production", async () => {

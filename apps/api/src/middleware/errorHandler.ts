@@ -19,7 +19,12 @@ export const notFoundHandler: RequestHandler = (req, res) => {
 export function createErrorHandler(logger: Logger, exposeInternalErrors: boolean): ErrorRequestHandler {
   return (error: unknown, req, res, _next) => {
     if (error instanceof AppError) {
-      if (error.statusCode >= 500) logger.error({ err: error, path: req.path }, error.message);
+      if (error.statusCode === 503) {
+        // A feature that isn't configured (sign-in, webhooks): already reported at startup, no stack needed.
+        logger.warn({ code: error.code, path: req.path }, error.message);
+      } else if (error.statusCode >= 500) {
+        logger.error({ err: error, path: req.path }, error.message);
+      }
       const body: ErrorBody = {
         error: {
           code: error.code,
