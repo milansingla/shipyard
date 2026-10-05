@@ -1,20 +1,22 @@
-import { type Deployment, type PrismaClient, type Project, isUniqueViolation } from "../../db/prisma.js";
-import { ConflictError, ErrorCode, NotFoundError } from "../../lib/errors.js";
+import { type Deployment, OrgRole, type PrismaClient, type Project, isUniqueViolation } from "../../db/prisma.js";
+import { ConflictError, ErrorCode } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { toDockerSlug } from "../../services/docker/naming.js";
 import { validateBranchName } from "../../services/git/branchName.js";
 import type { GitService } from "../../services/git/GitService.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
+import type { AccessService, ProjectWithRole } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
 import type { CreateProjectInput, UpdateProjectInput } from "./project.schemas.js";
 
-export interface ProjectWithLatestDeployment extends Project {
+export interface ProjectWithLatestDeployment extends ProjectWithRole {
   latestDeployment: Deployment | null;
 }
 
 export interface ProjectServiceDeps {
   prisma: PrismaClient;
+  access: AccessService;
   git: Pick<GitService, "resolveBranch">;
   deployments: Pick<DeploymentService, "destroyProjectDeployments">;
   allowedGitHosts: readonly string[];
@@ -23,9 +25,11 @@ export interface ProjectServiceDeps {
 }
 
 /**
- * Every method takes the acting user's id and only ever sees that user's
- * projects. Another user's project is reported as "not found" (404), not
- * "forbidden", so ids of other people's projects can't be probed.
+ * Projects belong to organizations; every method takes the acting user's id
+ * and checks their role there (see AccessService). Projects of organizations
+ * the user isn't in are reported as "not found" (404), so their ids can't be
+ * probed. Responses carry the user's `role`, so clients can hide what it
+ * doesn't allow (the API enforces it regardless).
  */
 export class ProjectService {
   constructor(private readonly deps: ProjectServiceDeps) {}
@@ -35,7 +39,10 @@ export class ProjectService {
    * remote that the repository is reachable and the branch exists — so a typo
    * fails now with a clear 422 instead of later as a FAILED deployment.
    */
-  async create(input: CreateProjectInput, ownerId: string): Promise<Project> {
+  async create(input: CreateProjectInput, userId: string): Promise<Project> {
+    const organization = input.organizationId
+      ? await this.deps.access.organization(input.organizationId, userId, OrgRole.DEVELOPER)
+      : await this.deps.access.personalOrganization(userId);
     const repository = parseRepositoryUrl(input.repositoryUrl, this.deps.allowedGitHosts);
     const requestedBranch = input.branch === undefined ? null : validateBranchName(input.branch);
     const branch = await this.deps.git.resolveBranch(repository, requestedBranch);
@@ -46,7 +53,8 @@ export class ProjectService {
     try {
       const project = await this.deps.prisma.project.create({
         data: {
-          ownerId,
+          organizationId: organization.id,
+          createdById: userId,
           name,
           slug,
           repositoryUrl: repository.cloneUrl,
@@ -55,10 +63,10 @@ export class ProjectService {
           branch,
         },
       });
-      this.deps.logger.info({ projectId: project.id, ownerId, slug, branch }, "Project created");
+      this.deps.logger.info({ projectId: project.id, organizationId: organization.id, slug, branch }, "Project created");
       await this.deps.audit.record({
         action: "PROJECT_CREATED",
-        actorId: ownerId,
+        actorId: userId,
         project,
         metadata: { repository: `${repository.owner}/${repository.name}`, branch },
       });
@@ -74,47 +82,54 @@ export class ProjectService {
     }
   }
 
-  /** All projects, newest first, each with its most recent deployment (for the dashboard). */
-  async list(ownerId: string): Promise<ProjectWithLatestDeployment[]> {
+  /** All projects of the user's organizations, newest first, each with its most recent deployment. */
+  async list(userId: string): Promise<ProjectWithLatestDeployment[]> {
     const projects = await this.deps.prisma.project.findMany({
-      where: { ownerId },
+      where: this.deps.access.visibleProjects(userId),
       orderBy: { createdAt: "desc" },
-      include: { deployments: { orderBy: { createdAt: "desc" }, take: 1 } },
+      include: {
+        deployments: { orderBy: { createdAt: "desc" }, take: 1 },
+        organization: { select: { id: true, name: true, personal: true, memberships: { where: { userId }, select: { role: true } } } },
+      },
     });
-    return projects.map(({ deployments, ...project }) => ({ ...project, latestDeployment: deployments[0] ?? null }));
+    return projects.map(({ deployments, organization: { memberships, ...organization }, ...project }) => ({
+      ...project,
+      organization,
+      role: memberships[0]!.role,
+      latestDeployment: deployments[0] ?? null,
+    }));
   }
 
-  async get(id: string, ownerId: string): Promise<ProjectWithLatestDeployment> {
-    const project = await this.deps.prisma.project.findFirst({
-      where: { id, ownerId },
-      include: { deployments: { orderBy: { createdAt: "desc" }, take: 1 } },
-    });
-    if (!project) throw new NotFoundError(`Project not found: ${id}`);
-    const { deployments, ...rest } = project;
-    return { ...rest, latestDeployment: deployments[0] ?? null };
+  async get(id: string, userId: string): Promise<ProjectWithLatestDeployment> {
+    const project = await this.deps.access.project(id, userId);
+    return { ...project, latestDeployment: await this.latestDeployment(id) };
   }
 
-  /** Removes the project, all its containers/images/logs, and its deployment history. */
-  /** Updates settings; they apply to the next deployment. */
-  async update(id: string, ownerId: string, input: UpdateProjectInput): Promise<ProjectWithLatestDeployment> {
-    await this.get(id, ownerId); // 404 for other users' projects
+  /** Updates settings; they apply to the next deployment. Needs ADMIN. */
+  async update(id: string, userId: string, input: UpdateProjectInput): Promise<ProjectWithLatestDeployment> {
+    await this.deps.access.project(id, userId, OrgRole.ADMIN);
     const project = await this.deps.prisma.project.update({ where: { id }, data: input });
     this.deps.logger.info({ projectId: id, settings: Object.keys(input) }, "Project settings updated");
     await this.deps.audit.record({
       action: "PROJECT_SETTINGS_CHANGED",
-      actorId: ownerId,
+      actorId: userId,
       project,
       metadata: { settings: Object.keys(input).sort().join(",") },
     });
-    return this.get(id, ownerId);
+    return this.get(id, userId);
   }
 
-  async delete(id: string, ownerId: string): Promise<void> {
-    const project = await this.get(id, ownerId); // 404 (also for other users' projects) before touching anything
+  /** Removes the project, all its containers/images/logs, and its deployment history. Needs ADMIN. */
+  async delete(id: string, userId: string): Promise<void> {
+    const project = await this.deps.access.project(id, userId, OrgRole.ADMIN);
     await this.deps.deployments.destroyProjectDeployments(id, async () => {
       await this.deps.prisma.project.delete({ where: { id } }); // cascades to deployments
     });
     this.deps.logger.info({ projectId: id }, "Project deleted");
-    await this.deps.audit.record({ action: "PROJECT_DELETED", actorId: ownerId, project });
+    await this.deps.audit.record({ action: "PROJECT_DELETED", actorId: userId, project });
+  }
+
+  private async latestDeployment(projectId: string): Promise<Deployment | null> {
+    return this.deps.prisma.deployment.findFirst({ where: { projectId }, orderBy: { createdAt: "desc" } });
   }
 }

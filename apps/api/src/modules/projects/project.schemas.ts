@@ -6,6 +6,8 @@ export const createProjectSchema = z.object({
   branch: z.string().trim().min(1).max(255).optional(),
   /** Display name. Defaults to the repository name. */
   name: z.string().trim().min(1).max(64).optional(),
+  /** The team to create it in (needs DEVELOPER there). Default: the user's personal organization. */
+  organizationId: z.uuid().optional(),
 });
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;

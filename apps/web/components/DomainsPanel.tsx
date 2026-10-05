@@ -9,7 +9,7 @@ import type { ProjectDomain } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
 
 /** Custom hostnames for a project. They go live on the running deployment right away. */
-export function DomainsPanel({ projectId }: { projectId: string }) {
+export function DomainsPanel({ projectId, canEdit }: { projectId: string; canEdit: boolean }) {
   const domains = useApi<ProjectDomain[]>(`/projects/${projectId}/domains`);
   const [hostname, setHostname] = useState("");
   const [busy, setBusy] = useState(false);
@@ -65,38 +65,43 @@ export function DomainsPanel({ projectId }: { projectId: string }) {
                 ) : (
                   <Mono>{domain.hostname}</Mono>
                 )}
-                <button
-                  type="button"
-                  onClick={() => remove(domain.hostname)}
-                  disabled={busy}
-                  className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
-                >
-                  Remove<span className="sr-only"> {domain.hostname}</span>
-                </button>
+                {canEdit && (
+                  <button
+                    type="button"
+                    onClick={() => remove(domain.hostname)}
+                    disabled={busy}
+                    className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                  >
+                    Remove<span className="sr-only"> {domain.hostname}</span>
+                  </button>
+                )}
               </li>
             );
           })}
         </ul>
       )}
 
-      <form onSubmit={add} className="mt-4 flex flex-wrap items-end gap-3">
-        <label className="flex min-w-0 flex-1 flex-col gap-2">
-          <Label>Add a domain</Label>
-          <input
-            value={hostname}
-            onChange={(event) => setHostname(event.target.value)}
-            required
-            maxLength={253}
-            placeholder="app.example.com"
-            autoComplete="off"
-            spellCheck={false}
-            className="h-10 border border-rivet bg-plate px-3 font-mono text-sm focus:border-ink"
-          />
-        </label>
-        <Button type="submit" busy={busy}>
-          Add domain
-        </Button>
-      </form>
+      {!canEdit && list.length === 0 && <p className="mt-4 text-ink-soft">No custom domains.</p>}
+      {canEdit && (
+        <form onSubmit={add} className="mt-4 flex flex-wrap items-end gap-3">
+          <label className="flex min-w-0 flex-1 flex-col gap-2">
+            <Label>Add a domain</Label>
+            <input
+              value={hostname}
+              onChange={(event) => setHostname(event.target.value)}
+              required
+              maxLength={253}
+              placeholder="app.example.com"
+              autoComplete="off"
+              spellCheck={false}
+              className="h-10 border border-rivet bg-plate px-3 font-mono text-sm focus:border-ink"
+            />
+          </label>
+          <Button type="submit" busy={busy}>
+            Add domain
+          </Button>
+        </form>
+      )}
 
       {error && (
         <div className="mt-4">

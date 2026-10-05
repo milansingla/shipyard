@@ -46,6 +46,11 @@ export default function ProjectsPage() {
                   <Link href={`/projects/${project.id}`} className="text-3xl hover:text-sea">
                     <HullName>{project.name}</HullName>
                   </Link>
+                  {!project.organization.personal && (
+                    <span className="ml-3 rounded-sm border border-rivet px-1.5 py-0.5 align-middle text-xs font-semibold text-ink-soft">
+                      {project.organization.name}
+                    </span>
+                  )}
                   <p className="mt-2 truncate text-ink-soft">
                     <Mono>
                       {project.repositoryOwner}/{project.repositoryName} · {project.branch}

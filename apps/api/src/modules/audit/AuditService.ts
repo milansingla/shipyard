@@ -5,8 +5,10 @@ export interface AuditEntry {
   action: AuditAction;
   /** null = Shipyard acting on its own (push, background completion). */
   actorId: string | null;
-  /** ownerId: the project's owner, who can see the entry (also after the project is deleted). */
-  project?: { id: string; name: string; ownerId: string } | null;
+  /** Its organization's members can see the entry, also after the project is deleted. */
+  project?: { id: string; name: string; organizationId: string } | null;
+  /** For entries without a project (team changes); default: the actor's personal organization. */
+  organizationId?: string;
   /** Identifiers and names only — never secret values. */
   metadata?: Record<string, string | number | boolean | null>;
 }
@@ -30,13 +32,15 @@ export class AuditService {
 
   async record(entry: AuditEntry): Promise<void> {
     try {
+      const organizationId =
+        entry.project?.organizationId ?? entry.organizationId ?? (await this.personalOrganizationId(entry.actorId));
       await this.deps.prisma.auditLog.create({
         data: {
           action: entry.action,
           actorId: entry.actorId,
           projectId: entry.project?.id ?? null,
           projectName: entry.project?.name ?? null,
-          ownerId: entry.project?.ownerId ?? entry.actorId,
+          organizationId,
           metadata: entry.metadata ?? {},
         },
       });
@@ -45,9 +49,15 @@ export class AuditService {
     }
   }
 
-  /** What a user may see: activity on their projects (also deleted ones), and their own actions. Newest first. */
+  /**
+   * What a user may see: activity in their organizations (including deleted
+   * projects), and their own actions anywhere. Newest first.
+   */
   async list(userId: string, options: { projectId?: string; limit: number; before?: number }): Promise<AuditLogView[]> {
-    const visible: Prisma.AuditLogWhereInput = { OR: [{ ownerId: userId }, { actorId: userId }] };
+    const memberships = await this.deps.prisma.membership.findMany({ where: { userId }, select: { organizationId: true } });
+    const visible: Prisma.AuditLogWhereInput = {
+      OR: [{ organizationId: { in: memberships.map((m) => m.organizationId) } }, { actorId: userId }],
+    };
     const entries = await this.deps.prisma.auditLog.findMany({
       where: {
         AND: [
@@ -60,6 +70,18 @@ export class AuditService {
       take: options.limit,
       include: { actor: { select: { login: true } } },
     });
-    return entries.map(({ actor, actorId: _actorId, ownerId: _ownerId, ...entry }) => ({ ...entry, actor: actor?.login ?? null }));
+    return entries.map(({ actor, actorId: _actorId, organizationId: _organizationId, ...entry }) => ({
+      ...entry,
+      actor: actor?.login ?? null,
+    }));
+  }
+
+  private async personalOrganizationId(userId: string | null): Promise<string | null> {
+    if (!userId) return null;
+    const membership = await this.deps.prisma.membership.findFirst({
+      where: { userId, organization: { personal: true } },
+      select: { organizationId: true },
+    });
+    return membership?.organizationId ?? null;
   }
 }

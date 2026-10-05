@@ -61,7 +61,8 @@ scanning.
 | Oversized request bodies           | `express.json({ limit: "100kb" })`                                          | `app.ts` |
 | Strangers signing in               | `SHIPYARD_ALLOWED_GITHUB_USERS` required; re-checked on every request      | `AuthService` |
 | Unauthenticated access             | Every project/deployment/GitHub route calls `requireUser`                  | `middleware/authenticate.ts` |
-| Users acting on others' resources  | Services scope every query to the owner; others' ids → 404                  | `ProjectService`, `DeploymentService` |
+| Users acting on others' resources  | One `AccessService` decides every access from organization membership; non-members get 404, too-low roles 403 | `modules/access/AccessService.ts` |
+| Privilege escalation inside a team | Only OWNERs grant/change/remove ADMIN and OWNER; at least one OWNER always; VIEWERs never see variable values | `OrganizationService`, `EnvironmentService` |
 | Login CSRF / code interception     | OAuth `state` bound to an httpOnly cookie; PKCE S256                         | `AuthService` |
 | CSRF on API calls                  | `SameSite=Lax` session cookie + `Origin`/`Sec-Fetch-Site` check on POST/DELETE | `middleware/originCheck.ts` |
 | Session theft via XSS / DB leak    | `HttpOnly` cookie; DB stores sha256(token); server-side logout              | `AuthService` |

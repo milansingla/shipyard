@@ -74,7 +74,7 @@ export class WebhookService {
     const results: string[] = [];
     for (const project of projects) {
       try {
-        const result = await this.deps.deployments.deployOnPush(project.id, project.ownerId);
+        const result = await this.deps.deployments.deployOnPush(project.id);
         results.push(`${result.outcome === "started" ? "deploying" : "queued"} ${project.slug}`);
       } catch (error) {
         // One project's problem must not stop the others from deploying.

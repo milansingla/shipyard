@@ -27,7 +27,7 @@ interface Draft {
 const EMPTY: Draft = { key: "", value: "", secret: false, target: "RUNTIME", existing: false };
 
 /** A project's environment variables and secrets. Values apply on the next deploy. */
-export function EnvironmentPanel({ projectId }: { projectId: string }) {
+export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; canEdit: boolean }) {
   const variables = useApi<EnvironmentVariable[]>(`/projects/${projectId}/env`);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [busy, setBusy] = useState(false);
@@ -119,7 +119,9 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
                     <Mono className="font-semibold">{variable.key}</Mono>
                   </td>
                   <td className="max-w-[22rem] py-3 pr-4">
-                    {variable.secret ? (
+                    {variable.value === null && !variable.secret ? (
+                      <span className="text-xs text-ink-soft">hidden for your role</span>
+                    ) : variable.secret ? (
                       <span className="text-ink-soft">
                         <Mono aria-hidden>••••••••</Mono> <span className="text-xs">secret, hidden</span>
                       </span>
@@ -129,21 +131,25 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
                   </td>
                   <td className="py-3 pr-4 text-ink-soft">{TARGET_LABEL[variable.target]}</td>
                   <td className="py-3 text-right whitespace-nowrap">
-                    <button
-                      type="button"
-                      onClick={() => edit(variable)}
-                      className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink"
-                    >
-                      Edit<span className="sr-only"> {variable.key}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => remove(variable.key)}
-                      disabled={busy}
-                      className="ml-4 text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
-                    >
-                      Delete<span className="sr-only"> {variable.key}</span>
-                    </button>
+                    {canEdit && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => edit(variable)}
+                          className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink"
+                        >
+                          Edit<span className="sr-only"> {variable.key}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => remove(variable.key)}
+                          disabled={busy}
+                          className="ml-4 text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                        >
+                          Delete<span className="sr-only"> {variable.key}</span>
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -152,77 +158,79 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
         </div>
       )}
 
-      <form onSubmit={save} className="mt-6 grid gap-4 border-t border-rivet pt-6 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_minmax(0,11rem)]">
-        <label className="flex flex-col gap-2">
-          <Label>Name</Label>
-          <input
-            value={draft.key}
-            onChange={(event) => setDraft({ ...draft, key: event.target.value })}
-            readOnly={draft.existing}
-            required
-            maxLength={128}
-            placeholder="e.g. REDIS_URL"
-            autoComplete="off"
-            spellCheck={false}
-            className={`${FIELD} font-mono read-only:bg-primer`}
-          />
-        </label>
-        <label className="flex flex-col gap-2">
-          <Label>Value</Label>
-          <input
-            type={draft.secret ? "password" : "text"}
-            value={draft.value}
-            onChange={(event) => setDraft({ ...draft, value: event.target.value })}
-            placeholder={draft.existing && draft.secret ? "Type a new value to replace the secret" : ""}
-            required={draft.secret}
-            autoComplete="off"
-            spellCheck={false}
-            className={`${FIELD} font-mono`}
-          />
-        </label>
-        <label className="flex flex-col gap-2">
-          <Label>Available at</Label>
-          <select
-            value={draft.secret ? "RUNTIME" : draft.target}
-            onChange={(event) => setDraft({ ...draft, target: event.target.value as EnvironmentTarget })}
-            disabled={draft.secret}
-            className={FIELD}
-          >
-            {(Object.keys(TARGET_LABEL) as EnvironmentTarget[]).map((target) => (
-              <option key={target} value={target}>
-                {TARGET_LABEL[target]}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div className="flex flex-wrap items-center justify-between gap-4 sm:col-span-3">
-          <label className="flex items-start gap-3 text-sm">
+      {canEdit && (
+        <form onSubmit={save} className="mt-6 grid gap-4 border-t border-rivet pt-6 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_minmax(0,11rem)]">
+          <label className="flex flex-col gap-2">
+            <Label>Name</Label>
             <input
-              type="checkbox"
-              checked={draft.secret}
-              onChange={(event) => setDraft({ ...draft, secret: event.target.checked })}
-              className="mt-0.5 size-4 accent-ink"
+              value={draft.key}
+              onChange={(event) => setDraft({ ...draft, key: event.target.value })}
+              readOnly={draft.existing}
+              required
+              maxLength={128}
+              placeholder="e.g. REDIS_URL"
+              autoComplete="off"
+              spellCheck={false}
+              className={`${FIELD} font-mono read-only:bg-primer`}
             />
-            <span>
-              <span className="font-semibold">Secret</span>
-              <span className="block text-ink-soft">
-                Hidden after saving and only given to the running app, never to the build.
-              </span>
-            </span>
           </label>
-          <div className="flex gap-3">
-            {draft.existing && (
-              <Button variant="secondary" onClick={() => setDraft(EMPTY)} disabled={busy}>
-                Cancel
+          <label className="flex flex-col gap-2">
+            <Label>Value</Label>
+            <input
+              type={draft.secret ? "password" : "text"}
+              value={draft.value}
+              onChange={(event) => setDraft({ ...draft, value: event.target.value })}
+              placeholder={draft.existing && draft.secret ? "Type a new value to replace the secret" : ""}
+              required={draft.secret}
+              autoComplete="off"
+              spellCheck={false}
+              className={`${FIELD} font-mono`}
+            />
+          </label>
+          <label className="flex flex-col gap-2">
+            <Label>Available at</Label>
+            <select
+              value={draft.secret ? "RUNTIME" : draft.target}
+              onChange={(event) => setDraft({ ...draft, target: event.target.value as EnvironmentTarget })}
+              disabled={draft.secret}
+              className={FIELD}
+            >
+              {(Object.keys(TARGET_LABEL) as EnvironmentTarget[]).map((target) => (
+                <option key={target} value={target}>
+                  {TARGET_LABEL[target]}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="flex flex-wrap items-center justify-between gap-4 sm:col-span-3">
+            <label className="flex items-start gap-3 text-sm">
+              <input
+                type="checkbox"
+                checked={draft.secret}
+                onChange={(event) => setDraft({ ...draft, secret: event.target.checked })}
+                className="mt-0.5 size-4 accent-ink"
+              />
+              <span>
+                <span className="font-semibold">Secret</span>
+                <span className="block text-ink-soft">
+                  Hidden after saving and only given to the running app, never to the build.
+                </span>
+              </span>
+            </label>
+            <div className="flex gap-3">
+              {draft.existing && (
+                <Button variant="secondary" onClick={() => setDraft(EMPTY)} disabled={busy}>
+                  Cancel
+                </Button>
+              )}
+              <Button type="submit" busy={busy}>
+                {draft.existing ? `Save ${draft.key}` : "Add variable"}
               </Button>
-            )}
-            <Button type="submit" busy={busy}>
-              {draft.existing ? `Save ${draft.key}` : "Add variable"}
-            </Button>
+            </div>
           </div>
-        </div>
-      </form>
+        </form>
+      )}
 
       {error && (
         <div className="mt-4">

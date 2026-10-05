@@ -7,7 +7,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, ErrorNote, Label, Mono } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { relativeTime } from "@/lib/format";
-import type { Deployment, GitHubRepository, Page, Project } from "@/lib/types";
+import type { Deployment, GitHubRepository, Organization, Page, Project } from "@/lib/types";
+import { can } from "@/lib/roles";
 import { useApi } from "@/lib/useApi";
 
 export default function NewProjectPage() {
@@ -135,6 +136,10 @@ function CreateForm({ repo }: { repo: GitHubRepository }) {
   const branches = useApi<Page<string>>(`/github/repos/${repo.owner}/${repo.name}/branches`);
   const [branch, setBranch] = useState(repo.defaultBranch);
   const [name, setName] = useState(repo.name);
+  const organizations = useApi<Organization[]>("/organizations");
+  const [organizationId, setOrganizationId] = useState("");
+  // Where you may create projects: organizations where you are at least a DEVELOPER.
+  const targets = (organizations.data ?? []).filter((org) => can(org.role, "DEVELOPER"));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
 
@@ -145,7 +150,12 @@ function CreateForm({ repo }: { repo: GitHubRepository }) {
     try {
       project = await api<Project>("/projects", {
         method: "POST",
-        body: { repositoryUrl: repo.repositoryUrl, branch, name: name.trim() || undefined },
+        body: {
+          repositoryUrl: repo.repositoryUrl,
+          branch,
+          name: name.trim() || undefined,
+          organizationId: organizationId || undefined,
+        },
       });
       const deployment = await api<Deployment>(`/projects/${project.id}/deploy`, { method: "POST" });
       router.push(`/deployments/${deployment.id}`);
@@ -188,6 +198,23 @@ function CreateForm({ repo }: { repo: GitHubRepository }) {
         </select>
         {branches.error && <span className="text-xs text-oxide">{branches.error.message}</span>}
       </label>
+
+      {targets.length > 1 && (
+        <label className="flex flex-col gap-2">
+          <Label>Owner</Label>
+          <select
+            value={organizationId}
+            onChange={(event) => setOrganizationId(event.target.value)}
+            className="h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink"
+          >
+            {targets.map((org) => (
+              <option key={org.id} value={org.personal ? "" : org.id}>
+                {org.personal ? `${org.name} (personal)` : org.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
 
       <label className="flex flex-col gap-2">
         <Label>Project name</Label>

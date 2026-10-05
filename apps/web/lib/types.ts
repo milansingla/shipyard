@@ -52,8 +52,34 @@ export interface Deployment {
 
 export type RestartPolicy = "NO" | "ON_FAILURE" | "UNLESS_STOPPED";
 
+/** Higher roles can do everything lower ones can. The API enforces them; the dashboard just hides what you can't do. */
+export type OrgRole = "OWNER" | "ADMIN" | "DEVELOPER" | "VIEWER";
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  personal: boolean;
+  /** Your role in it. */
+  role: OrgRole;
+  members: number;
+}
+
+export interface Member {
+  userId: string;
+  login: string;
+  name: string | null;
+  avatarUrl: string | null;
+  role: OrgRole;
+  since: string;
+}
+
 export interface Project {
   id: string;
+  organizationId: string;
+  organization: { id: string; name: string; personal: boolean };
+  /** Your role in the project's organization. */
+  role: OrgRole;
   name: string;
   slug: string;
   repositoryUrl: string;

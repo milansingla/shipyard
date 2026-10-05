@@ -103,6 +103,8 @@ export class AuthService {
       update: { ...profile, githubAccessToken },
     });
 
+    await this.ensurePersonalOrganization(user);
+
     const sessionToken = randomToken();
     const expiresAt = new Date(this.now().getTime() + this.deps.sessionTtlMs);
     await this.deps.prisma.session.create({ data: { id: hashToken(sessionToken), userId: user.id, expiresAt } });
@@ -163,6 +165,23 @@ export class AuthService {
       // Typically SHIPYARD_SECRET_KEY changed. Signing in again stores a fresh token.
       throw new UnauthenticatedError("Your stored GitHub sign-in can no longer be read. Sign in again.");
     }
+  }
+
+  /** Every user owns a personal organization; created at their first sign-in. */
+  private async ensurePersonalOrganization(user: User): Promise<void> {
+    const existing = await this.deps.prisma.membership.findFirst({
+      where: { userId: user.id, organization: { personal: true } },
+      select: { organizationId: true },
+    });
+    if (existing) return;
+    await this.deps.prisma.organization.create({
+      data: {
+        name: user.login,
+        slug: `user-${user.login.toLowerCase()}`,
+        personal: true,
+        memberships: { create: { userId: user.id, role: "OWNER" } },
+      },
+    });
   }
 
   private isAllowed(login: string): boolean {

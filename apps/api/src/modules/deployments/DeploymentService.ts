@@ -4,6 +4,7 @@ import {
   type Deployment,
   DeploymentEventType,
   DeploymentTrigger,
+  OrgRole,
   type Prisma,
   type PrismaClient,
   type Project,
@@ -17,6 +18,7 @@ import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
+import type { AccessService } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import type { EnvironmentService } from "../environment/EnvironmentService.js";
 import type { BuildLogStore, BuildLogWriter } from "./BuildLogStore.js";
@@ -29,6 +31,7 @@ export type EngineLike = Pick<
 export interface DeploymentServiceDeps {
   prisma: PrismaClient;
   engine: EngineLike;
+  access: AccessService;
   /** Decrypts the project's variables for each deployment; null = no variables (no secret key). */
   environment: Pick<EnvironmentService, "forDeployment"> | null;
   /** The same router the engine uses: stopping takes a deployment out of it, startup rebuilds it. */
@@ -104,14 +107,12 @@ export class DeploymentService {
 
   // ───────────────────────── queries ─────────────────────────
 
-  async get(id: string, ownerId: string): Promise<Deployment> {
-    const deployment = await this.deps.prisma.deployment.findFirst({ where: { id, project: { ownerId } } });
-    if (!deployment) throw new NotFoundError(`Deployment not found: ${id}`);
-    return deployment;
+  async get(id: string, userId: string): Promise<Deployment> {
+    return (await this.deps.access.deployment(id, userId)).deployment;
   }
 
-  async listForProject(projectId: string, ownerId: string, limit: number): Promise<Deployment[]> {
-    await this.getProject(projectId, ownerId);
+  async listForProject(projectId: string, userId: string, limit: number): Promise<Deployment[]> {
+    await this.deps.access.project(projectId, userId);
     return this.deps.prisma.deployment.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },
@@ -120,8 +121,8 @@ export class DeploymentService {
   }
 
   /** The deployment's history, oldest first. */
-  async listEvents(id: string, ownerId: string): Promise<DeploymentEventView[]> {
-    await this.get(id, ownerId);
+  async listEvents(id: string, userId: string): Promise<DeploymentEventView[]> {
+    await this.get(id, userId);
     const events = await this.deps.prisma.deploymentEvent.findMany({
       where: { deploymentId: id },
       orderBy: { id: "asc" },
@@ -133,8 +134,8 @@ export class DeploymentService {
     }));
   }
 
-  async getLogs(id: string, ownerId: string, type: LogType, tail: number): Promise<DeploymentLogs> {
-    const deployment = await this.get(id, ownerId);
+  async getLogs(id: string, userId: string, type: LogType, tail: number): Promise<DeploymentLogs> {
+    const deployment = await this.get(id, userId);
 
     if (type === "build") {
       return { type, content: await this.deps.buildLogs.read(id) };
@@ -159,13 +160,13 @@ export class DeploymentService {
    */
   async followLogs(
     id: string,
-    ownerId: string,
+    userId: string,
     type: LogType,
     tail: number,
     onText: (text: string) => void,
     signal: AbortSignal,
   ): Promise<{ message?: string }> {
-    const deployment = await this.get(id, ownerId);
+    const deployment = await this.get(id, userId);
     if (type === "build") {
       await this.deps.buildLogs.follow(id, onText, signal);
       return {};
@@ -186,12 +187,19 @@ export class DeploymentService {
    * Creates a QUEUED deployment for the project's configured branch and starts
    * the pipeline in the background. Returns immediately; poll GET /deployments/:id.
    */
+  /**
+   * `actorId` null = Shipyard itself (a verified push): no person's role is
+   * checked. Otherwise the person needs DEVELOPER in the project's organization.
+   */
   async deploy(
     projectId: string,
-    ownerId: string,
+    actorId: string | null,
     trigger: DeploymentTrigger = DeploymentTrigger.MANUAL,
   ): Promise<Deployment> {
-    const project = await this.getProject(projectId, ownerId);
+    const project =
+      actorId === null
+        ? await this.loadProject(projectId)
+        : await this.deps.access.project(projectId, actorId, OrgRole.DEVELOPER);
     this.lockProject(projectId);
 
     let deployment: Deployment;
@@ -213,7 +221,7 @@ export class DeploymentService {
             type: DeploymentEventType.CREATED,
             toStatus: DeploymentStatus.QUEUED,
             // A push is Shipyard acting on GitHub's behalf, not the owner clicking "Deploy".
-            actorId: trigger === DeploymentTrigger.MANUAL ? ownerId : null,
+            actorId,
             message: trigger === DeploymentTrigger.PUSH ? `Push to ${project.branch}` : null,
           },
         });
@@ -226,7 +234,7 @@ export class DeploymentService {
 
     await this.deps.audit.record({
       action: "DEPLOYMENT_STARTED",
-      actorId: trigger === DeploymentTrigger.MANUAL ? ownerId : null,
+      actorId,
       project,
       metadata: { deploymentId: deployment.id, trigger, branch: project.branch },
     });
@@ -235,27 +243,28 @@ export class DeploymentService {
   }
 
   /**
-   * Deploys after a GitHub push. Unlike deploy(), a busy project is not an
-   * error: the push is remembered and deployed when the current work ends.
+   * Deploys after a GitHub push, as Shipyard (the push's signature was
+   * verified). Unlike deploy(), a busy project is not an error: the push is
+   * remembered and deployed when the current work ends.
    */
-  async deployOnPush(projectId: string, ownerId: string): Promise<PushDeployResult> {
+  async deployOnPush(projectId: string): Promise<PushDeployResult> {
     if (this.busyProjects.has(projectId)) {
       this.pushWhileBusy.add(projectId);
       return { outcome: "queued" };
     }
-    return { outcome: "started", deployment: await this.deploy(projectId, ownerId, DeploymentTrigger.PUSH) };
+    return { outcome: "started", deployment: await this.deploy(projectId, null, DeploymentTrigger.PUSH) };
   }
 
   /** Deploys the latest commit of the same project/branch as an existing deployment. */
-  async redeploy(id: string, ownerId: string): Promise<Deployment> {
-    const deployment = await this.get(id, ownerId);
-    return this.deploy(deployment.projectId, ownerId);
+  async redeploy(id: string, userId: string): Promise<Deployment> {
+    const deployment = await this.get(id, userId);
+    return this.deploy(deployment.projectId, userId);
   }
 
-  async stop(id: string, ownerId: string): Promise<Deployment> {
-    const deployment = await this.get(id, ownerId);
+  async stop(id: string, userId: string): Promise<Deployment> {
+    const { deployment } = await this.deps.access.deployment(id, userId, OrgRole.DEVELOPER);
     if (deployment.status === DeploymentStatus.STOPPED) return deployment;
-    return this.stopDeployment(deployment, { actorId: ownerId });
+    return this.stopDeployment(deployment, { actorId: userId });
   }
 
   /**
@@ -263,17 +272,16 @@ export class DeploymentService {
    * Restarting an older, stopped deployment also retires the currently running
    * one — which makes this the rollback mechanism.
    */
-  async restart(id: string, ownerId: string): Promise<Deployment> {
-    const deployment = await this.get(id, ownerId);
+  async restart(id: string, userId: string): Promise<Deployment> {
+    const { deployment, project } = await this.deps.access.deployment(id, userId, OrgRole.DEVELOPER);
     assertTransition(deployment.status, DeploymentStatus.STARTING);
     if (!deployment.containerId) {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "This deployment has no container to restart.");
     }
 
-    const project = await this.getProject(deployment.projectId, ownerId);
     this.lockProject(deployment.projectId);
     try {
-      let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: ownerId, message: "Restart" });
+      let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: userId, message: "Restart" });
       let result;
       try {
         const route = { name: project.slug, aliases: await this.projectDomains(project.id) };
@@ -303,9 +311,8 @@ export class DeploymentService {
    * deployment keeps serving. Idempotent: rolling back the same deployment
    * again returns the deployment it was rolled back to, while that is live.
    */
-  async rollback(id: string, ownerId: string): Promise<Deployment> {
-    const source = await this.get(id, ownerId);
-    const project = await this.getProject(source.projectId, ownerId);
+  async rollback(id: string, userId: string): Promise<Deployment> {
+    const { deployment: source, project } = await this.deps.access.deployment(id, userId, OrgRole.DEVELOPER);
     const { prisma } = this.deps;
 
     const done = await prisma.deploymentEvent.findFirst({
@@ -324,7 +331,7 @@ export class DeploymentService {
     try {
       const target = await this.findRollbackTarget(source);
       let current = await this.moveTo(target, DeploymentStatus.ROLLING_BACK, {}, {
-        actorId: ownerId,
+        actorId: userId,
         message: `Rolling back from deployment ${displayId(source.id)}`,
       });
       let result;
@@ -350,14 +357,14 @@ export class DeploymentService {
           {
             deploymentId: source.id,
             type: DeploymentEventType.ROLLBACK,
-            actorId: ownerId,
+            actorId: userId,
             relatedDeploymentId: target.id,
             message: `Rolled back to deployment ${displayId(target.id)}`,
           },
           {
             deploymentId: target.id,
             type: DeploymentEventType.ROLLBACK,
-            actorId: ownerId,
+            actorId: userId,
             relatedDeploymentId: source.id,
             message: `Restored in place of deployment ${displayId(source.id)}`,
           },
@@ -366,7 +373,7 @@ export class DeploymentService {
       this.deps.logger.info({ projectId: project.id, from: source.id, to: target.id }, "Rolled back");
       await this.deps.audit.record({
         action: "ROLLBACK",
-        actorId: ownerId,
+        actorId: userId,
         project,
         metadata: { fromDeploymentId: source.id, toDeploymentId: target.id },
       });
@@ -761,6 +768,13 @@ export class DeploymentService {
     if (project) await this.deps.router.deactivate(project.slug, deployment.id);
   }
 
+  /** Unscoped: for Shipyard's own work (verified pushes), never on a person's behalf. */
+  private async loadProject(id: string): Promise<Project> {
+    const project = await this.deps.prisma.project.findUnique({ where: { id } });
+    if (!project) throw new NotFoundError(`Project not found: ${id}`);
+    return project;
+  }
+
   /** Unscoped: only for re-reading a row whose access was already checked. */
   private async load(id: string): Promise<Deployment> {
     const deployment = await this.deps.prisma.deployment.findUnique({ where: { id } });
@@ -768,11 +782,7 @@ export class DeploymentService {
     return deployment;
   }
 
-  private async getProject(projectId: string, ownerId: string): Promise<Project> {
-    const project = await this.deps.prisma.project.findFirst({ where: { id: projectId, ownerId } });
-    if (!project) throw new NotFoundError(`Project not found: ${projectId}`);
-    return project;
-  }
+
 
   private lockProject(projectId: string): void {
     if (this.busyProjects.has(projectId)) {
@@ -795,7 +805,7 @@ export class DeploymentService {
       // Unscoped lookup: the push's signature was verified when it arrived; the deploy runs as the project's owner.
       const project = await this.deps.prisma.project.findUnique({ where: { id: projectId } });
       if (!project) return; // deleted in the meantime
-      const result = await this.deployOnPush(project.id, project.ownerId);
+      const result = await this.deployOnPush(project.id);
       this.deps.logger.info({ projectId, outcome: result.outcome }, "Deployed a push received during a previous deploy");
     } catch (error) {
       this.deps.logger.error({ err: error, projectId }, "Could not deploy a queued push");

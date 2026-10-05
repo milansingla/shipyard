@@ -106,11 +106,21 @@ Append-only history per deployment: `type` (`CREATED` | `STATUS_CHANGED`),
 user is deleted), `message`. Written in the same transaction as the change it
 records. Integer id = exact order.
 
+### Organization, Membership (`organizations`, `memberships`)
+
+Projects belong to an organization (`projects.organizationId`, Restrict:
+delete projects first). `memberships` = (organization, user, role). Every
+user owns a personal organization (`personal = true`, slug `user-<login>`).
+The `organizations` migration created one per existing user, moved their
+projects into it (keeping the old owner as `createdById`) and moved audit
+entries likewise — hand-written so no row is lost, and run against
+existing data before committing.
+
 ### AuditLog (`audit_logs`)
 
 Append-only trail: `action`, `actorId` (null = Shipyard itself), `projectId`
 + `projectName` copied (no foreign key, so entries outlive the project),
-`ownerId` (who may see it, also after deletion), `metadata` (ids and names,
+`organizationId` (whose members may see it, also after deletion), `metadata` (ids and names,
 never secret values). Recorded: project created / settings changed /
 deleted, deployment started / succeeded / failed, rollback, environment
 variable set / deleted, domain added / removed, API key created / revoked.

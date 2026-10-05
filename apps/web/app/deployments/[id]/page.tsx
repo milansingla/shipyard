@@ -12,6 +12,7 @@ import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
 import type { Deployment, Project } from "@/lib/types";
+import { can } from "@/lib/roles";
 import { useApi } from "@/lib/useApi";
 
 type Action = "stop" | "restart" | "redeploy" | "rollback";
@@ -56,9 +57,10 @@ export default function DeploymentPage() {
   if (!d) return null;
 
   const url = d.status === "RUNNING" ? safeHttpUrl(d.deploymentUrl) : null;
-  const canStop = d.status === "RUNNING" || d.status === "HEALTHY";
-  const canRestart = (d.status === "RUNNING" || d.status === "STOPPED") && d.containerId !== null;
-  const canRollBack = d.status === "RUNNING" || d.status === "FAILED";
+  const developer = can(project.data?.role, "DEVELOPER");
+  const canStop = developer && (d.status === "RUNNING" || d.status === "HEALTHY");
+  const canRestart = developer && (d.status === "RUNNING" || d.status === "STOPPED") && d.containerId !== null;
+  const canRollBack = developer && (d.status === "RUNNING" || d.status === "FAILED");
   const rollBack = () => {
     if (window.confirm("Roll back to the previous version that worked? It takes over once healthy; this one is stopped.")) {
       void act("rollback");
@@ -109,9 +111,11 @@ export default function DeploymentPage() {
               {busy === "restart" ? "Starting…" : d.status === "STOPPED" ? "Run this version again" : "Restart"}
             </Button>
           )}
-          <Button busy={busy === "redeploy"} disabled={busy !== null || isInProgress(d.status)} onClick={() => void act("redeploy")}>
-            Deploy latest commit
-          </Button>
+          {developer && (
+            <Button busy={busy === "redeploy"} disabled={busy !== null || isInProgress(d.status)} onClick={() => void act("redeploy")}>
+              Deploy latest commit
+            </Button>
+          )}
         </div>
       </div>
 

@@ -7,6 +7,8 @@ import { originCheck } from "./middleware/originCheck.js";
 import { DEFAULT_RATE_LIMITS, type RateLimits, isDeploy, isWrite, rateLimit } from "./middleware/rateLimit.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { createAuthRouter } from "./modules/auth/auth.routes.js";
+import { createOrganizationRouter } from "./modules/access/organization.routes.js";
+import type { OrganizationService } from "./modules/access/OrganizationService.js";
 import { createAuditRouter } from "./modules/audit/audit.routes.js";
 import type { AuditService } from "./modules/audit/AuditService.js";
 import { createApiKeyRouter } from "./modules/auth/apiKey.routes.js";
@@ -46,6 +48,7 @@ export interface AppDeps {
   environment?: EnvironmentService | null;
   domains?: DomainService;
   audit?: AuditService;
+  organizations?: OrganizationService;
   /** null/omitted = GitHub sign-in not configured: protected routes answer 503. */
   auth?: AppAuth | null;
   /** GitHub push webhooks; null/omitted = not configured (503). */
@@ -102,6 +105,7 @@ export function createApp(deps: AppDeps): Express {
     if (deps.environment) app.use("/api", createEnvironmentRouter(deps.environment));
     if (deps.domains) app.use("/api", createDomainRouter(deps.domains));
     if (deps.audit) app.use("/api", createAuditRouter(deps.audit));
+    if (deps.organizations) app.use("/api", createOrganizationRouter(deps.organizations));
   }
 
   app.use(notFoundHandler);

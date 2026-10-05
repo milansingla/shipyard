@@ -6,6 +6,8 @@ import type { Logger } from "./lib/logger.js";
 import type { AppAuth } from "./app.js";
 import { SecretBox } from "./lib/secretBox.js";
 import { sessionCookieName } from "./middleware/authenticate.js";
+import { AccessService } from "./modules/access/AccessService.js";
+import { OrganizationService } from "./modules/access/OrganizationService.js";
 import { AuditService } from "./modules/audit/AuditService.js";
 import { ApiKeyService } from "./modules/auth/ApiKeyService.js";
 import { AuthService } from "./modules/auth/AuthService.js";
@@ -39,6 +41,7 @@ export interface ApiServices extends EngineServices {
   environment: EnvironmentService | null;
   domains: DomainService;
   audit: AuditService;
+  organizations: OrganizationService;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -100,13 +103,16 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
   const engineServices = createEngineServices(config, logger);
   const prisma = createPrismaClient(databaseUrl);
   const audit = new AuditService({ prisma, logger: logger.child({ component: "audit" }) });
+  const access = new AccessService(prisma);
+  const organizations = new OrganizationService({ prisma, access, audit, logger: logger.child({ component: "organizations" }) });
   const secretBox = config.auth.secretKey ? new SecretBox(config.auth.secretKey) : null;
   const environment = secretBox
-    ? new EnvironmentService({ prisma, secretBox, audit, logger: logger.child({ component: "environment" }) })
+    ? new EnvironmentService({ prisma, secretBox, access, audit, logger: logger.child({ component: "environment" }) })
     : null;
 
   const deployments = new DeploymentService({
     prisma,
+    access,
     audit,
     engine: engineServices.engine,
     environment,
@@ -117,6 +123,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
   });
   const projects = new ProjectService({
     prisma,
+    access,
     audit,
     git: engineServices.git,
     deployments,
@@ -136,12 +143,13 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     deployments,
     publicDomain: config.routing?.domain ?? null,
     https: Boolean(config.routing?.tls),
+    access,
     audit,
     logger: logger.child({ component: "domains" }),
   });
 
   const auth = createAuth(config, prisma, secretBox, audit, logger);
-  return { ...engineServices, prisma, projects, deployments, environment, domains, audit, auth, webhooks };
+  return { ...engineServices, prisma, projects, deployments, environment, domains, audit, organizations, auth, webhooks };
 }
 
 function createAuth(

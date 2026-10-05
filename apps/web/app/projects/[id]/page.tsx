@@ -12,6 +12,7 @@ import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
 import type { Deployment, ProjectWithLatestDeployment } from "@/lib/types";
+import { can } from "@/lib/roles";
 import { useApi } from "@/lib/useApi";
 
 export default function ProjectPage() {
@@ -87,15 +88,24 @@ export default function ProjectPage() {
               {p.repositoryOwner}/{p.repositoryName}
             </a>
             <Mono className="ml-3">branch {p.branch}</Mono>
+            {!p.organization.personal && (
+              <span className="ml-3 text-sm">
+                in <span className="font-semibold">{p.organization.name}</span> · you are {p.role.toLowerCase()}
+              </span>
+            )}
           </p>
         </div>
         <div className="flex gap-3">
-          <Button variant="danger" busy={busy === "delete"} disabled={busy !== null} onClick={remove}>
-            Delete project
-          </Button>
-          <Button busy={busy === "deploy"} disabled={busy !== null} onClick={() => void deploy()}>
-            {busy === "deploy" ? "Starting…" : "Deploy latest commit"}
-          </Button>
+          {can(p.role, "ADMIN") && (
+            <Button variant="danger" busy={busy === "delete"} disabled={busy !== null} onClick={remove}>
+              Delete project
+            </Button>
+          )}
+          {can(p.role, "DEVELOPER") && (
+            <Button busy={busy === "deploy"} disabled={busy !== null} onClick={() => void deploy()}>
+              {busy === "deploy" ? "Starting…" : "Deploy latest commit"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -120,11 +130,11 @@ export default function ProjectPage() {
 
       <PushDeploySetup branch={p.branch} />
 
-      <DomainsPanel projectId={p.id} />
+      <DomainsPanel projectId={p.id} canEdit={can(p.role, "ADMIN")} />
 
-      <EnvironmentPanel projectId={p.id} />
+      <EnvironmentPanel projectId={p.id} canEdit={can(p.role, "DEVELOPER")} />
 
-      <ProjectSettings project={p} onSaved={() => void project.reload()} />
+      <ProjectSettings project={p} canEdit={can(p.role, "ADMIN")} onSaved={() => void project.reload()} />
 
       <h2 className="mt-12 font-display text-2xl font-bold uppercase tracking-wide">Deployments</h2>
       {history.data?.length === 0 && <p className="mt-4 text-ink-soft">No deployments yet. Deploy the latest commit to start.</p>}

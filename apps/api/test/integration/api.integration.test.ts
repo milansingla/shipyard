@@ -13,6 +13,8 @@ import type { PrismaClient } from "../../src/db/prisma.js";
 import { NotFoundError } from "../../src/lib/errors.js";
 import { SecretBox } from "../../src/lib/secretBox.js";
 import { sessionCookieName } from "../../src/middleware/authenticate.js";
+import { AccessService } from "../../src/modules/access/AccessService.js";
+import { OrganizationService } from "../../src/modules/access/OrganizationService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
@@ -209,6 +211,7 @@ const SESSION_COOKIE = sessionCookieName(false);
 const ALICE = { id: 1001, login: "alice" };
 const BOB = { id: 2002, login: "bob" };
 const MALLORY = { id: 3003, login: "mallory" };
+const CAROL = { id: 4004, login: "carol" };
 
 let prisma: PrismaClient;
 let fakeGitHub: FakeGitHub;
@@ -218,6 +221,7 @@ let dataDir: string;
 let deployments: DeploymentService;
 let environment: EnvironmentService;
 let audit: AuditService;
+let access: AccessService;
 
 beforeAll(async () => {
   prisma = createTestPrisma();
@@ -243,14 +247,16 @@ beforeAll(async () => {
     redirectUri: `${api}/api/auth/github/callback`,
     sessionTtlMs: 60 * 60 * 1000,
     // Matched case-insensitively; "alice-renamed" is used by the rename test.
-    allowedUsers: ["alice", "bob", "alice-renamed"],
+    allowedUsers: ["alice", "bob", "carol", "alice-renamed"],
     logger: silentLogger,
   });
   const secretBox = new SecretBox(Buffer.alloc(32, 5));
   audit = new AuditService({ prisma, logger: silentLogger });
-  environment = new EnvironmentService({ prisma, secretBox, audit, logger: silentLogger });
+  access = new AccessService(prisma);
+  environment = new EnvironmentService({ prisma, secretBox, access, audit, logger: silentLogger });
   deployments = new DeploymentService({
     prisma,
+    access,
     audit,
     engine: fakeEngine,
     environment,
@@ -261,6 +267,7 @@ beforeAll(async () => {
   });
   const projects = new ProjectService({
     prisma,
+    access,
     audit,
     git: { resolveBranch: async (_repo, branch) => branch ?? "main" },
     deployments,
@@ -276,7 +283,8 @@ beforeAll(async () => {
       deployments,
       environment,
       audit,
-      domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, audit, logger: silentLogger }),
+      organizations: new OrganizationService({ prisma, access, audit, logger: silentLogger }),
+      domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
         service: auth,
         github,
@@ -1325,6 +1333,100 @@ describe("audit log", () => {
     const after = (await call(alice, "GET", "/api/audit-logs")).body!.data as Array<Record<string, any>>;
     expect(after[0]).toMatchObject({ action: "PROJECT_DELETED", actor: "alice", projectName: "audited" });
     expect(after).toHaveLength(9);
+  });
+});
+
+describe("teams and roles", () => {
+  async function team(owner: string, name: string): Promise<string> {
+    const res = await call(owner, "POST", "/api/organizations", { name });
+    expect(res.status).toBe(201);
+    return res.body!.data.id as string;
+  }
+
+  it("gives each role exactly its powers on a team's projects", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const carol = await sessionFor(CAROL);
+    const orgId = await team(alice, "Acme Team");
+    expect((await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "BOB", role: "VIEWER" })).status).toBe(201);
+    const bobId = (await prisma.user.findFirstOrThrow({ where: { login: "bob" } })).id;
+
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/shared", organizationId: orgId });
+    expect(created.status).toBe(201);
+    const projectId = created.body!.data.id as string;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/API_URL`, { value: "https://api" });
+    const deployed = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+
+    // VIEWER: reads everything except variable values; changes nothing.
+    const listed = (await call(bob, "GET", "/api/projects")).body!.data as Array<Record<string, any>>;
+    expect(listed.map((p) => [p.id, p.role, p.organization.name])).toEqual([[projectId, "VIEWER", "Acme Team"]]);
+    expect((await call(bob, "GET", `/api/deployments/${deployed}/events`)).status).toBe(200);
+    expect((await call(bob, "GET", `/api/projects/${projectId}/env`)).body!.data).toMatchObject([{ key: "API_URL", value: null }]);
+    const denied = await call(bob, "POST", `/api/projects/${projectId}/deploy`);
+    expect(denied.status).toBe(403);
+    expect(denied.body!.error.message).toBe("This needs the DEVELOPER role or higher in Acme Team; you are VIEWER.");
+    expect((await call(bob, "PUT", `/api/projects/${projectId}/env/X`, { value: "1" })).status).toBe(403);
+    expect((await call(bob, "POST", `/api/deployments/${deployed}/stop`)).status).toBe(403);
+
+    // DEVELOPER: deploys and changes variables, but not settings, domains or deletion.
+    expect((await call(alice, "PATCH", `/api/organizations/${orgId}/members/${bobId}`, { role: "DEVELOPER" })).status).toBe(204);
+    expect((await call(bob, "GET", `/api/projects/${projectId}/env`)).body!.data[0].value).toBe("https://api");
+    expect((await call(bob, "POST", `/api/projects/${projectId}/deploy`)).status).toBe(202);
+    await deployments.waitForIdle();
+    expect((await call(bob, "PATCH", `/api/projects/${projectId}`, { memoryLimitMb: 256 })).status).toBe(403);
+    expect((await call(bob, "POST", `/api/projects/${projectId}/domains`, { hostname: "shared.example.com" })).status).toBe(403);
+    expect((await call(bob, "DELETE", `/api/projects/${projectId}`)).status).toBe(403);
+
+    // Outsiders can't even tell the project exists.
+    expect((await call(carol, "GET", `/api/projects/${projectId}`)).status).toBe(404);
+    expect((await call(carol, "GET", `/api/deployments/${deployed}`)).status).toBe(404);
+    expect((await call(carol, "GET", `/api/organizations/${orgId}/members`)).status).toBe(404);
+
+    // Team members see the team's activity.
+    const activity = (await call(bob, "GET", "/api/audit-logs")).body!.data as Array<Record<string, any>>;
+    expect(activity.map((e) => e.action)).toEqual(expect.arrayContaining(["PROJECT_CREATED", "MEMBER_ADDED", "MEMBER_ROLE_CHANGED"]));
+  });
+
+  it("keeps OWNER/ADMIN changes for owners, and always one owner", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    await sessionFor(CAROL);
+    const orgId = await team(alice, "Roles Team");
+    const [aliceId, bobId, carolId] = await Promise.all(
+      ["alice", "bob", "carol"].map(async (login) => (await prisma.user.findFirstOrThrow({ where: { login } })).id),
+    );
+    await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "bob", role: "ADMIN" });
+
+    // An ADMIN manages developers and viewers only.
+    expect((await call(bob, "POST", `/api/organizations/${orgId}/members`, { login: "carol", role: "ADMIN" })).status).toBe(403);
+    expect((await call(bob, "POST", `/api/organizations/${orgId}/members`, { login: "carol", role: "DEVELOPER" })).status).toBe(201);
+    expect((await call(bob, "PATCH", `/api/organizations/${orgId}/members/${carolId}`, { role: "VIEWER" })).status).toBe(204);
+    expect((await call(bob, "DELETE", `/api/organizations/${orgId}/members/${aliceId}`)).status).toBe(403);
+    expect((await call(bob, "POST", `/api/organizations/${orgId}/members`, { login: "carol" })).status).toBe(409);
+
+    // The last OWNER can't step down or leave.
+    const lastOwner = await call(alice, "PATCH", `/api/organizations/${orgId}/members/${aliceId}`, { role: "ADMIN" });
+    expect(lastOwner.status).toBe(409);
+    expect(lastOwner.body!.error.code).toBe("LAST_OWNER");
+    expect((await call(alice, "DELETE", `/api/organizations/${orgId}/members/${aliceId}`)).status).toBe(409);
+
+    // Anyone may leave; personal organizations stay single-member.
+    expect((await call(bob, "DELETE", `/api/organizations/${orgId}/members/${bobId}`)).status).toBe(204);
+    const personal = ((await call(alice, "GET", "/api/organizations")).body!.data as Array<Record<string, any>>).find((o) => o.personal);
+    expect(personal).toMatchObject({ slug: "user-alice", role: "OWNER", members: 1 });
+    expect((await call(alice, "POST", `/api/organizations/${personal!.id}/members`, { login: "bob" })).status).toBe(400);
+    expect((await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "nobody-here" })).status).toBe(404);
+  });
+
+  it("a push deploys a team project as Shipyard, whoever created it", async () => {
+    const alice = await sessionFor(ALICE);
+    const orgId = await team(alice, "Push Team");
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/team-push", organizationId: orgId })).body!.data.id;
+    const result = await deployments.deployOnPush(projectId);
+    expect(result.outcome).toBe("started");
+    await deployments.waitForIdle();
+    expect((await prisma.deploymentEvent.findFirstOrThrow({ where: { type: "CREATED", deployment: { projectId } } })).actorId).toBeNull();
   });
 });
 

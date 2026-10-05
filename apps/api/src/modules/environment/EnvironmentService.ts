@@ -2,6 +2,8 @@ import type { EnvironmentVariable, PrismaClient } from "../../db/prisma.js";
 import { AppError, ErrorCode, NotFoundError, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import type { SecretBox } from "../../lib/secretBox.js";
+import { OrgRole } from "../../db/prisma.js";
+import { type AccessService, atLeast } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import { MAX_ENV_VARS_PER_PROJECT, type SetEnvVarInput } from "./environment.schemas.js";
 
@@ -24,6 +26,7 @@ export interface DeploymentEnvironment {
 export interface EnvironmentServiceDeps {
   prisma: PrismaClient;
   secretBox: SecretBox;
+  access: AccessService;
   audit: Pick<AuditService, "record">;
   logger: Logger;
 }
@@ -40,15 +43,17 @@ export interface EnvironmentServiceDeps {
 export class EnvironmentService {
   constructor(private readonly deps: EnvironmentServiceDeps) {}
 
-  async list(projectId: string, ownerId: string): Promise<EnvironmentVariableView[]> {
-    await this.assertOwner(projectId, ownerId);
+  /** VIEWERs see names and settings only; values need DEVELOPER (secrets: never). */
+  async list(projectId: string, userId: string): Promise<EnvironmentVariableView[]> {
+    const { role } = await this.deps.access.project(projectId, userId);
     const rows = await this.deps.prisma.environmentVariable.findMany({ where: { projectId }, orderBy: { key: "asc" } });
-    return rows.map((row) => this.view(row));
+    const showValues = atLeast(role, OrgRole.DEVELOPER);
+    return rows.map((row) => ({ ...this.view(row, showValues) }));
   }
 
   /** Creates or replaces a variable. */
-  async set(projectId: string, ownerId: string, key: string, input: SetEnvVarInput): Promise<EnvironmentVariableView> {
-    const project = await this.assertOwner(projectId, ownerId);
+  async set(projectId: string, userId: string, key: string, input: SetEnvVarInput): Promise<EnvironmentVariableView> {
+    const project = await this.deps.access.project(projectId, userId, OrgRole.DEVELOPER);
     const { prisma, secretBox } = this.deps;
 
     const exists = await prisma.environmentVariable.findUnique({ where: { projectId_key: { projectId, key } } });
@@ -70,19 +75,19 @@ export class EnvironmentService {
     this.deps.logger.info({ projectId, key, secret: row.secret, target: row.target }, "Environment variable saved");
     await this.deps.audit.record({
       action: "ENV_VAR_SET",
-      actorId: ownerId,
+      actorId: userId,
       project,
       metadata: { key, secret: row.secret, target: row.target },
     });
     return this.view(row);
   }
 
-  async remove(projectId: string, ownerId: string, key: string): Promise<void> {
-    const project = await this.assertOwner(projectId, ownerId);
+  async remove(projectId: string, userId: string, key: string): Promise<void> {
+    const project = await this.deps.access.project(projectId, userId, OrgRole.DEVELOPER);
     const { count } = await this.deps.prisma.environmentVariable.deleteMany({ where: { projectId, key } });
     if (count === 0) throw new NotFoundError(`Environment variable not found: ${key}`);
     this.deps.logger.info({ projectId, key }, "Environment variable deleted");
-    await this.deps.audit.record({ action: "ENV_VAR_DELETED", actorId: ownerId, project, metadata: { key } });
+    await this.deps.audit.record({ action: "ENV_VAR_DELETED", actorId: userId, project, metadata: { key } });
   }
 
   /**
@@ -101,10 +106,10 @@ export class EnvironmentService {
     return environment;
   }
 
-  private view(row: EnvironmentVariable): EnvironmentVariableView {
+  private view(row: EnvironmentVariable, showValue = true): EnvironmentVariableView {
     return {
       key: row.key,
-      value: row.secret ? null : this.reveal(row),
+      value: row.secret || !showValue ? null : this.reveal(row),
       secret: row.secret,
       target: row.target,
       updatedAt: row.updatedAt,
@@ -123,14 +128,7 @@ export class EnvironmentService {
     }
   }
 
-  private async assertOwner(projectId: string, ownerId: string): Promise<{ id: string; name: string; ownerId: string }> {
-    const project = await this.deps.prisma.project.findFirst({
-      where: { id: projectId, ownerId },
-      select: { id: true, name: true, ownerId: true },
-    });
-    if (!project) throw new NotFoundError(`Project not found: ${projectId}`);
-    return project;
-  }
+
 }
 
 function sealContext(projectId: string, key: string): string {

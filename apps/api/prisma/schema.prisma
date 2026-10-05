@@ -51,7 +51,8 @@ model User {
   githubAccessToken String
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
-  projects          Project[]
+  projectsCreated   Project[]
+  memberships       Membership[]
   sessions          Session[]
   deploymentEvents  DeploymentEvent[]
   apiKeys           ApiKey[]
@@ -78,10 +79,14 @@ model Session {
 /// A repository + branch that Shipyard knows how to deploy.
 model Project {
   id              String       @id @default(uuid()) @db.Uuid
-  /// Restrict: deleting a user must go through project deletion, which also
-  /// removes containers. A cascade would orphan running containers.
-  ownerId         String       @db.Uuid
-  owner           User         @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  /// The team the project belongs to; access comes from membership in it.
+  /// Restrict: deleting an organization must go through deleting its
+  /// projects, which also removes containers.
+  organizationId  String       @db.Uuid
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  /// Who created it (informational; grants nothing).
+  createdById     String?      @db.Uuid
+  createdBy       User?        @relation(fields: [createdById], references: [id], onDelete: SetNull)
   name            String
   /// URL/Docker-safe identifier derived from `name`. Used for container names
   /// and the project's hostname (<slug>.<SHIPYARD_PUBLIC_DOMAIN>).
@@ -108,8 +113,46 @@ model Project {
   environmentVariables EnvironmentVariable[]
   domains         ProjectDomain[]
 
-  @@index([ownerId, createdAt(sort: Desc)])
+  @@index([organizationId, createdAt(sort: Desc)])
   @@map("projects")
+}
+
+enum OrgRole {
+  /// Everything, including managing admins and owners.
+  OWNER
+  /// Settings, domains, deleting projects, managing developers and viewers.
+  ADMIN
+  /// Deploy, roll back, change variables, create projects.
+  DEVELOPER
+  /// Read only.
+  VIEWER
+}
+
+/// A team that owns projects. Every user also has a personal organization.
+model Organization {
+  id          String       @id @default(uuid()) @db.Uuid
+  name        String
+  /// Unique, URL-safe. Personal organizations use "user-<login>".
+  slug        String       @unique
+  personal    Boolean      @default(false)
+  createdAt   DateTime     @default(now())
+  memberships Membership[]
+  projects    Project[]
+
+  @@map("organizations")
+}
+
+model Membership {
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String       @db.Uuid
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           OrgRole
+  createdAt      DateTime     @default(now())
+
+  @@id([organizationId, userId])
+  @@index([userId])
+  @@map("memberships")
 }
 
 /// A personal access token for the CLI and scripts. Only sha256(token) is
@@ -146,6 +189,10 @@ enum AuditAction {
   DOMAIN_REMOVED
   API_KEY_CREATED
   API_KEY_REVOKED
+  ORGANIZATION_CREATED
+  MEMBER_ADDED
+  MEMBER_ROLE_CHANGED
+  MEMBER_REMOVED
 }
 
 /// Who did what, append-only. Kept when the project is deleted (no foreign
@@ -158,15 +205,16 @@ model AuditLog {
   actor       User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
   projectId   String?     @db.Uuid
   projectName String?
-  /// Who the entry belongs to: the project's owner at the time (or the actor
-  /// for account-level actions). Decides visibility, also after deletion.
-  ownerId     String?     @db.Uuid
+  /// The organization the entry belongs to (the project's, or the actor's
+  /// personal one for account-level actions). Decides visibility, also after
+  /// the project is deleted.
+  organizationId String?  @db.Uuid
   /// Details, never secret values: deployment id, variable name, hostname…
   metadata    Json        @default("{}")
   createdAt   DateTime    @default(now())
 
   @@index([projectId, id])
-  @@index([ownerId, id])
+  @@index([organizationId, id])
   @@index([actorId, id])
   @@map("audit_logs")
 }

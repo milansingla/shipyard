@@ -20,7 +20,7 @@ const RESTART_LABEL: Record<RestartPolicy, string> = {
 };
 
 /** How a new deployment is checked and what it may use. Saved settings apply to the next deploy. */
-export function ProjectSettings({ project, onSaved }: { project: Project; onSaved: () => void }) {
+export function ProjectSettings({ project, canEdit, onSaved }: { project: Project; canEdit: boolean; onSaved: () => void }) {
   const [path, setPath] = useState(project.healthCheckPath);
   const [port, setPort] = useState(project.healthCheckPort?.toString() ?? "");
   const [timeoutSeconds, setTimeoutSeconds] = useState(project.healthCheckTimeoutSeconds?.toString() ?? "");
@@ -67,6 +67,7 @@ export function ProjectSettings({ project, onSaved }: { project: Project; onSave
       </div>
 
       <form onSubmit={(event) => void save(event)} className="mt-4 border-t border-rivet pt-6">
+        <fieldset disabled={!canEdit} className="disabled:opacity-80">
         <h3 className="font-semibold">Health check</h3>
         <p className="mt-1 max-w-2xl text-sm text-ink-soft">
           A new deployment only gets traffic once this check passes. On <code className="font-mono">/</code>, any answer
@@ -165,10 +166,15 @@ export function ProjectSettings({ project, onSaved }: { project: Project; onSave
         </div>
         <p className="mt-2 text-xs text-ink-soft">CPU: number of cores, e.g. 0.5 for half a core. Leave either empty for no limit.</p>
 
+        </fieldset>
         <div className="mt-4 flex flex-wrap items-center gap-4">
-          <Button type="submit" busy={busy}>
-            Save settings
-          </Button>
+          {canEdit ? (
+            <Button type="submit" busy={busy}>
+              Save settings
+            </Button>
+          ) : (
+            <p className="text-sm text-ink-soft">Changing settings needs the ADMIN role.</p>
+          )}
           {saved && (
             <span role="status" className="text-sm text-sea">
               Saved. The next deploy uses these settings.
