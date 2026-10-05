@@ -9,3 +9,26 @@ export const createProjectSchema = z.object({
 });
 
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
+
+/**
+ * A path on the app, never a URL: one leading "/", then no "/" (which would make
+ * "//host" a different server), whitespace, control characters, backslashes or fragments.
+ */
+export const healthCheckPathSchema = z
+  .string()
+  .trim()
+  .max(512)
+  .regex(/^\/(?!\/)[^\s\\#\p{Cc}]*$/u, "must be a path starting with a single /, without spaces, backslashes or #");
+
+/** Project settings. Applied to the next deployment. */
+export const updateProjectSchema = z
+  .strictObject({
+    healthCheckPath: healthCheckPathSchema.optional(),
+    /** null = the app's own port. */
+    healthCheckPort: z.int().min(1).max(65535).nullable().optional(),
+    /** null = the server default (SHIPYARD_HEALTHCHECK_TIMEOUT_MS). */
+    healthCheckTimeoutSeconds: z.int().min(5).max(900).nullable().optional(),
+  })
+  .refine((input) => Object.keys(input).length > 0, "Nothing to update.");
+
+export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;

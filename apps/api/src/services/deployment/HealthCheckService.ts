@@ -11,6 +11,13 @@ export interface HealthCheckOptions {
 
 export interface HealthCheckTarget {
   url: string;
+  /** Overrides the default time the app has to become healthy (per-project setting). */
+  timeoutMs?: number;
+  /**
+   * Only 2xx/3xx count. Used for a configured health path: a 404 there means
+   * the path is wrong, not that the app is up.
+   */
+  strict?: boolean;
   /** Lets the checker fail fast when the process has already crashed. */
   getContainerState: () => Promise<ContainerState>;
 }
@@ -25,9 +32,10 @@ export interface HealthCheckResult {
  * "Container is running" ≠ "application is healthy". A container can be up
  * while the app is still booting, crash-looping, or listening on the wrong port.
  *
- * Rule (V2): the app is healthy once it answers HTTP on its port with any
- * status below 500. A 404 still proves the server is up and listening — many
- * APIs have no route at "/". A 5xx or a refused connection does not.
+ * Rule: the app is healthy once it answers HTTP with any status below 500.
+ * A 404 still proves the server is up and listening — many APIs have no route
+ * at "/". A 5xx or a refused connection does not. With a configured health
+ * path (`strict`), only 2xx/3xx count.
  */
 export class HealthCheckService {
   constructor(
@@ -37,7 +45,8 @@ export class HealthCheckService {
 
   async waitUntilHealthy(target: HealthCheckTarget): Promise<HealthCheckResult> {
     const startedAt = Date.now();
-    const deadline = startedAt + this.options.timeoutMs;
+    const timeoutMs = target.timeoutMs ?? this.options.timeoutMs;
+    const deadline = startedAt + timeoutMs;
     let attempts = 0;
     let lastProblem = "no response yet";
 
@@ -58,7 +67,7 @@ export class HealthCheckService {
           signal: AbortSignal.timeout(this.options.requestTimeoutMs),
         });
         await response.body?.cancel(); // free the socket; we only care about the status
-        if (response.status < 500) {
+        if (target.strict ? response.status >= 200 && response.status < 400 : response.status < 500) {
           return { statusCode: response.status, attempts, durationMs: Date.now() - startedAt };
         }
         lastProblem = `HTTP ${response.status}`;
@@ -69,8 +78,10 @@ export class HealthCheckService {
       if (Date.now() + this.options.intervalMs >= deadline) {
         throw new AppError(
           ErrorCode.HEALTH_CHECK_FAILED,
-          `Application did not become healthy within ${this.options.timeoutMs}ms at ${target.url} (last result: ${lastProblem}). ` +
-            "Check that the app listens on 0.0.0.0 and on the port Shipyard passes via $PORT.",
+          `Application did not become healthy within ${timeoutMs}ms at ${target.url} (last result: ${lastProblem}). ` +
+            (/^HTTP 4\d\d$/.test(lastProblem)
+              ? "The app answers, but not with success at this path: check the project's health check path."
+              : "Check that the app listens on 0.0.0.0 and on the port Shipyard passes via $PORT."),
           { statusCode: 422 },
         );
       }

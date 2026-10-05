@@ -299,6 +299,11 @@ export class DeploymentService {
         branch: deployment.branch,
         name: project.slug,
         labels: { [ShipyardLabel.PROJECT_ID]: project.id },
+        healthCheck: {
+          path: project.healthCheckPath,
+          port: project.healthCheckPort,
+          timeoutMs: project.healthCheckTimeoutSeconds === null ? null : project.healthCheckTimeoutSeconds * 1000,
+        },
         env: (await this.deps.environment?.forDeployment(project.id)) ?? undefined,
       };
 

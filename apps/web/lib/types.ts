@@ -57,6 +57,12 @@ export interface Project {
   repositoryOwner: string;
   repositoryName: string;
   branch: string;
+  /** "/" accepts any status below 500; another path must answer 2xx/3xx. */
+  healthCheckPath: string;
+  /** null = the app's own port. */
+  healthCheckPort: number | null;
+  /** null = the server default. */
+  healthCheckTimeoutSeconds: number | null;
   createdAt: string;
   updatedAt: string;
 }

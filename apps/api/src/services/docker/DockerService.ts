@@ -19,7 +19,20 @@ export const ShipyardLabel = {
   PROJECT_ID: "shipyard.project-id",
   REPOSITORY: "shipyard.repository",
   CONTAINER_PORT: "shipyard.container-port",
+  /** Health check settings the container was created with, so a later restart checks it the same way. */
+  HEALTH_PATH: "shipyard.health-path",
+  HEALTH_PORT: "shipyard.health-port",
+  HEALTH_TIMEOUT_MS: "shipyard.health-timeout-ms",
 } as const;
+
+/** How a container is health-checked. */
+export interface HealthCheckSettings {
+  path: string;
+  /** null = the app's own port. */
+  port: number | null;
+  /** null = the server default. */
+  timeoutMs: number | null;
+}
 
 export interface ContainerState {
   running: boolean;
@@ -34,6 +47,9 @@ export interface ManagedContainer extends ContainerState {
   hostPort: number | null;
   /** Docker networks the container is attached to. */
   networks: string[];
+  healthCheck: HealthCheckSettings;
+  /** Published port the health check is sent to (the app's own, or a separate health port). */
+  healthHostPort: number | null;
 }
 
 export interface CreateContainerOptions {
@@ -45,11 +61,15 @@ export interface CreateContainerOptions {
   network?: string | null;
   /** The app's environment variables. PORT is always Shipyard's. */
   env?: Record<string, string>;
+  /** A separate port to publish (loopback) for health checks. */
+  healthCheckPort?: number | null;
 }
 
 export interface StartedContainer {
   id: string;
   hostPort: number;
+  /** Where to send health checks: hostPort, or the separate health port's published port. */
+  healthHostPort: number;
 }
 
 interface DockerServiceOptions {
@@ -163,7 +183,8 @@ export class DockerService {
   }
 
   async createAndStartContainer(options: CreateContainerOptions): Promise<StartedContainer> {
-    const portKey = `${options.containerPort}/tcp`;
+    const ports = [options.containerPort];
+    if (options.healthCheckPort && options.healthCheckPort !== options.containerPort) ports.push(options.healthCheckPort);
     if (options.network) await this.assertNetworkExists(options.network);
 
     let container: Docker.Container;
@@ -174,10 +195,16 @@ export class DockerService {
         // PORT last: if a key appears twice, Docker keeps the last one.
         Env: [...Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`), `PORT=${options.containerPort}`],
         Labels: options.labels,
-        ExposedPorts: { [portKey]: {} },
+        ExposedPorts: Object.fromEntries(ports.map((port) => [`${port}/tcp`, {}])),
         HostConfig: {
-          // HostPort "" = let Docker pick a free ephemeral port.
-          PortBindings: { [portKey]: [{ HostIp: this.options.publishHost, HostPort: "" }] },
+          // HostPort "" = let Docker pick a free ephemeral port. A separate health port is
+          // only for Shipyard's own checks, so it is always loopback-only.
+          PortBindings: Object.fromEntries(
+            ports.map((port, index) => [
+              `${port}/tcp`,
+              [{ HostIp: index === 0 ? this.options.publishHost : "127.0.0.1", HostPort: "" }],
+            ]),
+          ),
           ...(options.network ? { NetworkMode: options.network } : {}),
           LogConfig: RUNTIME_LOG_CONFIG,
           SecurityOpt: ["no-new-privileges:true"],
@@ -190,10 +217,10 @@ export class DockerService {
     }
 
     const managed = await this.inspectManagedContainer(container.id);
-    if (managed.hostPort === null) {
+    if (managed.hostPort === null || managed.healthHostPort === null) {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Docker did not assign a host port.");
     }
-    return { id: container.id, hostPort: managed.hostPort };
+    return { id: container.id, hostPort: managed.hostPort, healthHostPort: managed.healthHostPort };
   }
 
   /**
@@ -220,14 +247,25 @@ export class DockerService {
     }
 
     const containerPort = Number(labels[ShipyardLabel.CONTAINER_PORT]);
-    const binding = info.NetworkSettings.Ports?.[`${containerPort}/tcp`]?.[0];
+    const publishedPort = (port: number): number | null => {
+      const binding = info.NetworkSettings.Ports?.[`${port}/tcp`]?.[0];
+      return binding?.HostPort ? Number(binding.HostPort) : null;
+    };
+    // Containers from before V3 have no health labels: "/" on the app's port, default timeout.
+    const healthCheck: HealthCheckSettings = {
+      path: labels[ShipyardLabel.HEALTH_PATH] ?? "/",
+      port: optionalNumber(labels[ShipyardLabel.HEALTH_PORT]),
+      timeoutMs: optionalNumber(labels[ShipyardLabel.HEALTH_TIMEOUT_MS]),
+    };
 
     return {
       id: info.Id,
       name: info.Name.replace(/^\//, ""),
       deploymentId: labels[ShipyardLabel.DEPLOYMENT_ID] ?? null,
       containerPort,
-      hostPort: binding?.HostPort ? Number(binding.HostPort) : null,
+      hostPort: publishedPort(containerPort),
+      healthCheck,
+      healthHostPort: publishedPort(healthCheck.port ?? containerPort),
       networks: Object.keys(info.NetworkSettings.Networks ?? {}),
       running: info.State.Running,
       exitCode: info.State.Running ? null : info.State.ExitCode,
@@ -316,6 +354,11 @@ export class DockerService {
     this.logger.debug({ err: cause }, message);
     return new AppError(code, `${message}: ${errorMessage(cause)}`, { cause });
   }
+}
+
+function optionalNumber(value: string | undefined): number | null {
+  const number = Number(value);
+  return value === undefined || !Number.isInteger(number) || number <= 0 ? null : number;
 }
 
 function dockerStatusCode(error: unknown): number | undefined {

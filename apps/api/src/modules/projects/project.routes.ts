@@ -5,7 +5,7 @@ import { sendData } from "../../lib/http.js";
 import { idParamsSchema, parseInput } from "../../lib/validation.js";
 import { requireUser } from "../../middleware/authenticate.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
-import { createProjectSchema } from "./project.schemas.js";
+import { createProjectSchema, updateProjectSchema } from "./project.schemas.js";
 import type { ProjectService } from "./ProjectService.js";
 
 const listDeploymentsQuerySchema = z.object({
@@ -29,6 +29,14 @@ export function createProjectRouter(projects: ProjectService, deployments: Deplo
     const user = requireUser(req);
     const { id } = parseInput(idParamsSchema, req.params, "project id");
     sendData(res, await projects.get(id, user.id));
+  });
+
+  /** Settings. They apply to the next deployment; running ones keep theirs. */
+  router.patch("/projects/:id", async (req, res) => {
+    const user = requireUser(req);
+    const { id } = parseInput(idParamsSchema, req.params, "project id");
+    const input = parseInput(updateProjectSchema, req.body, "project settings");
+    sendData(res, await projects.update(id, user.id, input));
   });
 
   router.delete("/projects/:id", async (req, res) => {

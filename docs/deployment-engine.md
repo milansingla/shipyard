@@ -75,14 +75,41 @@ and the previous one keeps serving. See [routing.md](routing.md#the-cutover-rede
 `container.start()` succeeding only means Docker launched a process. The app may
 still be booting, crash a second later, or listen on the wrong port/interface.
 
-Rule: poll `http://127.0.0.1:<hostPort>/` every 1s, up to
-`SHIPYARD_HEALTHCHECK_TIMEOUT_MS` (default 60s).
+Rule: poll `http://127.0.0.1:<published port><path>` every 1s until it
+passes or the timeout ends.
 
-- Any status **< 500** → healthy (a 404 still proves the server listens).
+- On the default path `/`: any status **< 500** → healthy (a 404 still proves
+  the server listens; many APIs have no route at `/`).
+- On any other path: only **2xx/3xx** → healthy. A 404 there means the path is
+  wrong, and the error says so.
 - 5xx, connection refused, timeout → retry.
 - Container no longer running → fail immediately with its exit code.
 
-Planned: configurable health path, port, timeout and retries per project (V3).
+### Per-project settings
+
+Project page → **Settings**, or `PATCH /api/projects/:id`:
+
+| Setting | Default | Rules |
+| ------- | ------- | ----- |
+| `healthCheckPath` | `/` | A path, never a URL: one leading `/`, no `//`, spaces, control characters, `\` or `#`. Query strings are fine. |
+| `healthCheckPort` | the app's port | 1–65535. If different from the app's port, it is published too, on **127.0.0.1 only** (it is for Shipyard, not visitors). |
+| `healthCheckTimeoutSeconds` | `SHIPYARD_HEALTHCHECK_TIMEOUT_MS` (60s) | 5–900 |
+
+`null` resets a setting to its default. Settings apply to the next
+deployment, and each container records the settings it was created with in
+its labels (`shipyard.health-*`). A restart or rollback therefore checks a
+deployment exactly as it was checked when it went live, even if the project's
+settings have changed since.
+
+**Why there is no "retries" setting.** Checks run every second until the
+timeout ends, so "retries" would only restate the timeout (60s ≈ 60 tries).
+One number is easier to reason about. The check is only for *startup*:
+Shipyard decides once whether a new version may take traffic. Continuous
+monitoring of running apps is a later item.
+
+The engine resolves the path against `http://127.0.0.1:<port>` and verifies
+the origin didn't change, so even a path that slipped past validation could
+only ever change the path, never the host being probed.
 
 ## Build detection & Dockerfile generation
 

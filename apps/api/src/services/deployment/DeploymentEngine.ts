@@ -1,7 +1,12 @@
 import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { prepareBuild } from "../build/prepareBuild.js";
-import { type DockerService, type ManagedContainer, ShipyardLabel } from "../docker/DockerService.js";
+import {
+  type DockerService,
+  type HealthCheckSettings,
+  type ManagedContainer,
+  ShipyardLabel,
+} from "../docker/DockerService.js";
 import type { LogChunk } from "../docker/logs.js";
 import { buildContainerName, buildImageName } from "../docker/naming.js";
 import type { SourceProvider } from "../git/GitService.js";
@@ -111,7 +116,8 @@ export class DeploymentEngine {
 
       // 3. Build
       await moveTo(DeploymentStatus.BUILDING);
-      const labels = this.labelsFor(job, state.containerPort);
+      const healthCheck = job.healthCheck ?? DEFAULT_HEALTH_CHECK;
+      const labels = this.labelsFor(job, state.containerPort, healthCheck);
       await this.deps.docker.buildImage(
         source.path,
         state.imageName,
@@ -133,6 +139,7 @@ export class DeploymentEngine {
         labels,
         network: this.deps.router.network,
         env: env.runtime,
+        healthCheckPort: healthCheck.port,
       });
       state.containerId = container.id;
       state.hostPort = container.hostPort;
@@ -140,7 +147,7 @@ export class DeploymentEngine {
       // 5. Health check
       await moveTo(DeploymentStatus.HEALTH_CHECKING);
       const health = await this.deps.healthCheck.waitUntilHealthy({
-        url: healthCheckUrl(container.hostPort),
+        ...healthCheckTarget(container.healthHostPort, healthCheck),
         getContainerState: () => this.deps.docker.getContainerState(container.id),
       });
       log("system", `Health check passed (HTTP ${health.statusCode} after ${health.attempts} attempt(s))\n`);
@@ -220,13 +227,15 @@ export class DeploymentEngine {
 
     // Docker may assign a different ephemeral host port after a restart.
     const after = await this.deps.docker.inspectManagedContainer(before.id);
-    if (after.hostPort === null) {
+    if (after.hostPort === null || after.healthHostPort === null) {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Container restarted without a published port.");
     }
+    const { hostPort, healthHostPort } = after;
 
+    // Checked the way it was when deployed (its labels), not with today's project settings.
     await onStage(DeploymentStatus.HEALTH_CHECKING);
     await this.deps.healthCheck.waitUntilHealthy({
-      url: healthCheckUrl(after.hostPort),
+      ...healthCheckTarget(healthHostPort, after.healthCheck),
       getContainerState: () => this.deps.docker.getContainerState(after.id),
     });
     await onStage(DeploymentStatus.HEALTHY);
@@ -243,8 +252,8 @@ export class DeploymentEngine {
     return {
       containerName: after.name,
       status: DeploymentStatus.RUNNING,
-      hostPort: after.hostPort,
-      deploymentUrl: this.deps.router.urlFor(routeName, after.hostPort),
+      hostPort,
+      deploymentUrl: this.deps.router.urlFor(routeName, hostPort),
     };
   }
 
@@ -292,13 +301,16 @@ export class DeploymentEngine {
     await observer.onStatusChange?.(state, previous);
   }
 
-  private labelsFor(job: DeploymentJob, containerPort: number): Record<string, string> {
+  private labelsFor(job: DeploymentJob, containerPort: number, health: HealthCheckSettings): Record<string, string> {
     return {
       ...job.labels,
       [ShipyardLabel.MANAGED]: "true",
       [ShipyardLabel.DEPLOYMENT_ID]: job.id,
       [ShipyardLabel.REPOSITORY]: job.repository.cloneUrl,
       [ShipyardLabel.CONTAINER_PORT]: String(containerPort),
+      [ShipyardLabel.HEALTH_PATH]: health.path,
+      ...(health.port !== null && { [ShipyardLabel.HEALTH_PORT]: String(health.port) }),
+      ...(health.timeoutMs !== null && { [ShipyardLabel.HEALTH_TIMEOUT_MS]: String(health.timeoutMs) }),
     };
   }
 
@@ -322,7 +334,18 @@ function describeEnvironment(env: { runtime: Record<string, string>; build: Reco
   return `Environment: runtime ${list(env.runtime)}; build ${list(env.build)}\n`;
 }
 
-// Published ports are bound to 127.0.0.1 or 0.0.0.0; either way, loopback reaches them.
-function healthCheckUrl(hostPort: number): string {
-  return `http://127.0.0.1:${hostPort}/`;
+const DEFAULT_HEALTH_CHECK: HealthCheckSettings = { path: "/", port: null, timeoutMs: null };
+
+/**
+ * Published ports are bound to 127.0.0.1 or 0.0.0.0; either way, loopback reaches them.
+ * The path was validated when it was saved; resolving it against the origin and
+ * checking the origin again means it can only ever change the path, never the host.
+ */
+function healthCheckTarget(hostPort: number, health: HealthCheckSettings) {
+  const origin = `http://127.0.0.1:${hostPort}`;
+  const url = new URL(health.path, origin);
+  if (url.origin !== origin) {
+    throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, `Invalid health check path: ${health.path}`, { statusCode: 422 });
+  }
+  return { url: url.href, timeoutMs: health.timeoutMs ?? undefined, strict: health.path !== "/" };
 }

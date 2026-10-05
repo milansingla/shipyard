@@ -95,6 +95,7 @@ function harness(
       buildArgs: Record<string, string> = {},
     ) {
       if (Object.keys(buildArgs).length > 0) calls.push(`buildArgs:${JSON.stringify(buildArgs)}`);
+      if (labels["shipyard.health-path"] !== "/") calls.push(`labels:${JSON.stringify(labels)}`);
       calls.push(`build:${imageName}:${labels["shipyard.container-port"]}:${labels["shipyard.project-id"]}`);
       calls.push(`dockerfile:${dockerfile}:${await fs.readFile(path.join(ctx, dockerfile), "utf8").then(() => "present", () => "missing")}`);
       if (options.buildFails) {
@@ -104,7 +105,8 @@ function harness(
     async createAndStartContainer(opts) {
       calls.push(`start:${opts.containerName}:${opts.containerPort}:${opts.network ?? "bridge"}`);
       if (opts.env && Object.keys(opts.env).length > 0) calls.push(`env:${JSON.stringify(opts.env)}`);
-      return { id: "container-id", hostPort: 49153 };
+      if (opts.healthCheckPort) calls.push(`healthPort:${opts.healthCheckPort}`);
+      return { id: "container-id", hostPort: 49153, healthHostPort: opts.healthCheckPort ? 49154 : 49153 };
     },
     async getContainerState() {
       return { running: true, exitCode: null };
@@ -140,8 +142,9 @@ function harness(
     source,
     docker,
     healthCheck: {
-      async waitUntilHealthy({ url }) {
+      async waitUntilHealthy({ url, strict, timeoutMs }) {
         calls.push(`health:${url}`);
+        if (strict || timeoutMs) calls.push(`healthRule:${strict ? "strict" : "lenient"}:${timeoutMs ?? "default"}`);
         if (options.healthFails) {
           throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, "Container exited with code 1 before becoming healthy.");
         }
@@ -322,6 +325,31 @@ describe("DeploymentEngine.run", () => {
     expect(systemLog).toContain("Environment: runtime DATABASE_URL; build API_URL");
     expect(systemLog).not.toContain("postgres://secret");
     expect(systemLog).not.toContain("https://api");
+  });
+
+  it("health-checks the configured path and port, strictly, and records the settings on the container", async () => {
+    const h = harness();
+    const state = await h.engine.run(job({ healthCheck: { path: "/healthz?deep=1", port: 9000, timeoutMs: 5_000 } }));
+    const labels = JSON.parse(h.calls.find((c) => c.startsWith("labels:"))!.slice("labels:".length)) as Record<string, string>;
+
+    expect(state.status).toBe(S.RUNNING);
+    expect(h.calls).toContain("healthPort:9000");
+    expect(h.calls).toContain("health:http://127.0.0.1:49154/healthz?deep=1");
+    expect(h.calls).toContain("healthRule:strict:5000");
+    expect(labels).toMatchObject({
+      "shipyard.health-path": "/healthz?deep=1",
+      "shipyard.health-port": "9000",
+      "shipyard.health-timeout-ms": "5000",
+    });
+  });
+
+  it.each(["//evil.example/", "http://evil.example/"])("never lets a health path change the host (%s)", async (path) => {
+    const h = harness();
+    const error = (await h.engine
+      .run(job({ healthCheck: { path, port: null, timeoutMs: null } }), h.observer)
+      .catch((e: unknown) => e)) as DeploymentFailedError;
+    expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
+    expect(h.calls.some((c) => c.startsWith("health:"))).toBe(false);
   });
 
   it("a failing observer fails the deployment instead of being ignored", async () => {

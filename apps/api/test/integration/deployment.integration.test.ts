@@ -29,6 +29,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const HELLO_APP = path.resolve(here, "../../../../examples/hello-node");
 const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
 const NODE_NO_DOCKERFILE_APP = path.resolve(here, "../fixtures/node-no-dockerfile");
+const HEALTH_PORT_APP = path.resolve(here, "../fixtures/health-port-app");
 
 function localSource(sourceDir: string): SourceProvider {
   return {
@@ -55,13 +56,13 @@ function engine(sourceDir: string): DeploymentEngine {
   });
 }
 
-function job(name: string, env?: DeploymentJob["env"]): DeploymentJob {
+function job(name: string, extra: Pick<DeploymentJob, "env" | "healthCheck"> = {}): DeploymentJob {
   return {
     id: randomUUID(),
     repository: parseRepositoryUrl(`https://github.com/shipyard-test/${name}`, ["github.com"]),
     branch: null,
     name,
-    env,
+    ...extra,
   };
 }
 
@@ -157,7 +158,7 @@ describe("deployment engine against real Docker", () => {
       build: { BUILD_LABEL: "v42" },
     };
 
-    const record = await service.run(job("node-no-dockerfile", env), {
+    const record = await service.run(job("node-no-dockerfile", { env }), {
       onLog: (source, text) => void (source === "system" && (systemLog += text)),
     });
     created.push(record);
@@ -192,5 +193,31 @@ describe("deployment engine against real Docker", () => {
     } finally {
       await foreign.remove({ force: true });
     }
+  });
+
+  it("health-checks a separate admin port and path, published on loopback only, the same way after a restart", async () => {
+    const service = engine(HEALTH_PORT_APP);
+    const record = await service.run(job("health-port-app", { healthCheck: { path: "/healthz", port: 9000, timeoutMs: 20_000 } }));
+    created.push(record);
+    expect(record.status).toBe(S.RUNNING);
+
+    const info = await dockerode.getContainer(record.containerId!).inspect();
+    expect(info.HostConfig.PortBindings?.["9000/tcp"]?.[0]?.HostIp).toBe("127.0.0.1");
+    expect(info.Config.Labels).toMatchObject({ "shipyard.health-path": "/healthz", "shipyard.health-port": "9000" });
+
+    // Restart reads the settings back from the container's labels.
+    expect((await service.restart(record.containerName, "health-port-app")).status).toBe(S.RUNNING);
+    await service.stop(record.containerName);
+  });
+
+  it("fails a deployment whose health path answers 404, saying to check the path", async () => {
+    const error = (await engine(HEALTH_PORT_APP)
+      .run(job("health-port-app", { healthCheck: { path: "/wrong", port: 9000, timeoutMs: 3_000 } }))
+      .catch((e: unknown) => e)) as DeploymentFailedError;
+    created.push(error.deployment);
+
+    expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
+    expect(error.deployment.failedStage).toBe(S.HEALTH_CHECKING);
+    expect(error.message).toMatch(/HTTP 404.*health check path/s);
   });
 });

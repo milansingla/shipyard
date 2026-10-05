@@ -816,3 +816,41 @@ describe("environment variables and secrets", () => {
     expect(deployment.body!.data.errorMessage).toContain("Environment variable B can't be decrypted");
   });
 });
+
+describe("project settings: health checks", () => {
+  it("updates health check settings, applied to the next deployment", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/health" });
+    const projectId = created.body!.data.id as string;
+    expect(created.body!.data).toMatchObject({ healthCheckPath: "/", healthCheckPort: null, healthCheckTimeoutSeconds: null });
+
+    const updated = await call(alice, "PATCH", `/api/projects/${projectId}`, {
+      healthCheckPath: "/healthz",
+      healthCheckPort: 9000,
+      healthCheckTimeoutSeconds: 120,
+    });
+    expect(updated.status).toBe(200);
+    expect(updated.body!.data).toMatchObject({ healthCheckPath: "/healthz", healthCheckPort: 9000, healthCheckTimeoutSeconds: 120 });
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(lastJob?.healthCheck).toEqual({ path: "/healthz", port: 9000, timeoutMs: 120_000 });
+
+    // null resets to the defaults.
+    const reset = await call(alice, "PATCH", `/api/projects/${projectId}`, { healthCheckPort: null, healthCheckTimeoutSeconds: null });
+    expect(reset.body!.data).toMatchObject({ healthCheckPath: "/healthz", healthCheckPort: null, healthCheckTimeoutSeconds: null });
+  });
+
+  it("validates settings and keeps them owner-only", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/health2" });
+    const projectId = created.body!.data.id as string;
+
+    const invalid = await call(alice, "PATCH", `/api/projects/${projectId}`, { healthCheckPath: "//evil.example/" });
+    expect(invalid.status).toBe(400);
+    expect(JSON.stringify(invalid.body)).toContain("single /");
+    expect((await call(alice, "PATCH", `/api/projects/${projectId}`, { branch: "dev" })).status).toBe(400);
+    expect((await call(bob, "PATCH", `/api/projects/${projectId}`, { healthCheckPath: "/x" })).status).toBe(404);
+  });
+});

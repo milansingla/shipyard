@@ -72,6 +72,22 @@ describe("HealthCheckService", () => {
     await expect(check).rejects.toThrow(/HTTP 503/);
   });
 
+  it("with a configured path, only 2xx/3xx count, and the error points at the path", async () => {
+    const port = await listen((req, res) => {
+      res.statusCode = req.url === "/healthz" ? 204 : 404;
+      res.end();
+    });
+    const service = new HealthCheckService(fast);
+    const ok = await service.waitUntilHealthy({ url: `http://127.0.0.1:${port}/healthz`, strict: true, getContainerState: running });
+    expect(ok.statusCode).toBe(204);
+
+    const error = await service
+      .waitUntilHealthy({ url: `http://127.0.0.1:${port}/health`, strict: true, timeoutMs: 300, getContainerState: running })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(AppError);
+    expect((error as AppError).message).toMatch(/within 300ms .*HTTP 404.*health check path/s);
+  });
+
   it("fails fast with the exit code when the container has crashed", async () => {
     const check = new HealthCheckService(fast).waitUntilHealthy({
       url: "http://127.0.0.1:1/",

@@ -6,7 +6,7 @@ import { validateBranchName } from "../../services/git/branchName.js";
 import type { GitService } from "../../services/git/GitService.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
-import type { CreateProjectInput } from "./project.schemas.js";
+import type { CreateProjectInput, UpdateProjectInput } from "./project.schemas.js";
 
 export interface ProjectWithLatestDeployment extends Project {
   latestDeployment: Deployment | null;
@@ -87,6 +87,14 @@ export class ProjectService {
   }
 
   /** Removes the project, all its containers/images/logs, and its deployment history. */
+  /** Updates settings; they apply to the next deployment. */
+  async update(id: string, ownerId: string, input: UpdateProjectInput): Promise<ProjectWithLatestDeployment> {
+    await this.get(id, ownerId); // 404 for other users' projects
+    await this.deps.prisma.project.update({ where: { id }, data: input });
+    this.deps.logger.info({ projectId: id, settings: Object.keys(input) }, "Project settings updated");
+    return this.get(id, ownerId);
+  }
+
   async delete(id: string, ownerId: string): Promise<void> {
     await this.get(id, ownerId); // 404 (also for other users' projects) before touching anything
     await this.deps.deployments.destroyProjectDeployments(id, async () => {

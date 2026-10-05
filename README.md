@@ -114,6 +114,7 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `GET /api/github/repos` · `GET /api/github/repos/:owner/:repo/branches` | repository & branch pickers |
 | `POST /api/projects`                       | create (`repositoryUrl`, optional `branch`, `name`) |
 | `GET /api/projects` · `GET /api/projects/:id` | list / get, with latest deployment             |
+| `PATCH /api/projects/:id`                  | settings: `healthCheckPath`, `healthCheckPort`, `healthCheckTimeoutSeconds` |
 | `DELETE /api/projects/:id`                 | remove project, its containers, images and logs   |
 | `POST /api/projects/:id/deploy`            | new deployment (202)                              |
 | `GET /api/projects/:id/deployments?limit=` | deployment history, newest first                  |

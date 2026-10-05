@@ -85,6 +85,13 @@ model Project {
   repositoryOwner String
   repositoryName  String
   branch          String
+  /// Path probed before a deployment counts as healthy. "/" accepts any status < 500;
+  /// any other path requires 2xx/3xx.
+  healthCheckPath String       @default("/")
+  /// Port probed, if not the app's own port (e.g. a separate admin/metrics port).
+  healthCheckPort Int?
+  /// How long a new deployment has to become healthy; null = server default.
+  healthCheckTimeoutSeconds Int?
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   deployments     Deployment[]

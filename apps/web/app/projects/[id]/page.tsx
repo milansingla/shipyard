@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
+import { ProjectSettings } from "@/components/ProjectSettings";
 import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
@@ -119,6 +120,8 @@ export default function ProjectPage() {
       <PushDeploySetup branch={p.branch} />
 
       <EnvironmentPanel projectId={p.id} />
+
+      <ProjectSettings project={p} onSaved={() => void project.reload()} />
 
       <h2 className="mt-12 font-display text-2xl font-bold uppercase tracking-wide">Deployments</h2>
       {history.data?.length === 0 && <p className="mt-4 text-ink-soft">No deployments yet. Deploy the latest commit to start.</p>}
