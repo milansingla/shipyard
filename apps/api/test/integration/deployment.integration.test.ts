@@ -270,4 +270,38 @@ describe("deployment engine against real Docker", () => {
     expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
     expect(error.message).toContain("ran out of memory");
   });
+
+  it("reuses the cached dependency install when only the source changed, and still ships the new source", async () => {
+    const source = await fs.mkdtemp(path.join(os.tmpdir(), "shipyard-cache-"));
+    try {
+      await fs.cp(NODE_NO_DOCKERFILE_APP, source, { recursive: true });
+      const build = async () => {
+        let output = "";
+        const record = await engine(source).run(job("cache-app"), { onLog: (kind, text) => void (kind === "build" && (output += text)) });
+        created.push(record);
+        await docker.stopContainer(record.containerId!);
+        return { record, output };
+      };
+      await build();
+      // A source-only change: the manifests are untouched.
+      await fs.writeFile(path.join(source, "build.js"), 'require("node:fs").writeFileSync("built.txt", "second build");\n');
+      const second = await build();
+
+      // The step right after `RUN npm ci` comes from the cache…
+      expect(second.output).toMatch(/RUN npm ci\s*\n\s*---> Using cache/);
+      // …but the source after it doesn't: the change made it into the image.
+      expect(second.output).not.toMatch(/COPY --chown=node:node \. \.\s*\n\s*---> Using cache/);
+      await docker.restartContainer(second.record.containerId!);
+      const info = await docker.inspectManagedContainer(second.record.containerId!);
+      let body: Record<string, unknown> = {};
+      for (let i = 0; i < 20 && body.built !== "second build"; i += 1) {
+        body = await fetch(`http://127.0.0.1:${info.hostPort}/`).then((r) => r.json() as Promise<Record<string, unknown>>, () => ({}));
+        if (body.built !== "second build") await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      expect(body.built).toBe("second build");
+    } finally {
+      await fs.rm(source, { recursive: true, force: true });
+    }
+  });
 });
+

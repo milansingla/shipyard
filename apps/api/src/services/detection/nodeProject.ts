@@ -34,7 +34,13 @@ const packageJsonSchema = z.looseObject({
   scripts: z.record(z.string(), z.string()).optional(),
   engines: z.looseObject({ node: z.string().optional() }).optional(),
   packageManager: z.string().optional(),
+  workspaces: z.unknown().optional(),
 });
+
+/** npm/pnpm/yarn run these during install: they may need the whole source. */
+const INSTALL_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
+/** Package-manager config the install reads, copied with the manifests when present. */
+const INSTALL_CONFIG_FILES = [".npmrc", ".yarnrc"];
 
 type PackageJson = z.infer<typeof packageJsonSchema>;
 
@@ -48,6 +54,13 @@ export interface NodeProject {
   hasBuildScript: boolean;
   /** Exec-form command (no shell) that starts the app. */
   startCommand: string[];
+  /**
+   * Files the install needs, in order: copied before the rest of the source so
+   * the install layer is reused from Docker's cache until one of them changes.
+   * null = the install may need the whole source (install hooks, workspaces,
+   * Yarn 2+), so nothing is cached separately — correctness over speed.
+   */
+  dependencyFiles: string[] | null;
   /** Human-readable decisions worth showing in the build log. */
   notes: string[];
 }
@@ -68,6 +81,7 @@ export async function detectNodeProject(sourceDir: string): Promise<NodeProject 
   const { manager, major, lockfile } = await detectPackageManager(sourceDir, pkg.packageManager, notes);
   const nodeMajor = selectNodeMajor(pkg.engines?.node, notes);
   const startCommand = await resolveStartCommand(sourceDir, pkg, manager);
+  const dependencyFiles = await selectDependencyFiles(sourceDir, pkg, manager, major, lockfile, notes);
 
   return {
     packageManager: manager,
@@ -76,8 +90,35 @@ export async function detectNodeProject(sourceDir: string): Promise<NodeProject 
     nodeMajor,
     hasBuildScript: Boolean(pkg.scripts?.build?.trim()),
     startCommand,
+    dependencyFiles,
     notes,
   };
+}
+
+async function selectDependencyFiles(
+  sourceDir: string,
+  pkg: PackageJson,
+  manager: PackageManager,
+  major: number | null,
+  lockfile: string | null,
+  notes: string[],
+): Promise<string[] | null> {
+  const hooks = INSTALL_HOOKS.filter((hook) => pkg.scripts?.[hook]?.trim());
+  const uncachable =
+    hooks.length > 0
+      ? `install scripts (${hooks.join(", ")}) may need the source`
+      : pkg.workspaces !== undefined || (await isRegularFile(sourceDir, "pnpm-workspace.yaml"))
+        ? "workspaces need every package's source"
+        : manager === "yarn" && major !== null && major >= 2
+          ? "Yarn 2+ installs need the .yarn directory"
+          : null;
+  if (uncachable) {
+    notes.push(`Dependencies are installed with the whole source (${uncachable}), so the install isn't cached separately.`);
+    return null;
+  }
+  const config = [];
+  for (const file of INSTALL_CONFIG_FILES) if (await isRegularFile(sourceDir, file)) config.push(file);
+  return ["package.json", ...(lockfile ? [lockfile] : []), ...config];
 }
 
 export function parsePackageJson(raw: string): PackageJson {

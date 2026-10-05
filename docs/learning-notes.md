@@ -557,3 +557,32 @@ second check in the engine: the URL is resolved against
 | Limits off by default | Default 512 MB | A wrong default breaks apps confusingly; opt-in and visible |
 | `UNLESS_STOPPED` by default | `NO` | Production apps should survive crashes and host reboots |
 
+---
+
+# V4 — Developer platform
+
+## API keys, audit log, teams, CLI
+
+- **Hash, don't encrypt, tokens you only need to check**: an API key is
+  stored as sha256; like a session token, it can be verified but never shown
+  again. A recognisable prefix (`shp_`) lets secret scanners catch leaks.
+- **Authorization in one place**: `AccessService` turns "user, project,
+  needed role" into allow / 403 / 404. Services never write their own
+  ownership queries any more, so a missing check is visible in review.
+- **404 vs 403**: non-members get 404, so they can't learn which ids exist;
+  members with too low a role get 403, because telling them why helps.
+- **Data migrations by hand**: moving projects into organizations needed
+  INSERT … SELECT and UPDATE … FROM steps Prisma can't generate. They were run
+  against rows that already existed before committing.
+- **Thin clients**: the CLI is HTTP calls plus formatting. Deployment logic
+  stays on the server, so the CLI, dashboard and API can't disagree.
+
+## Build cache
+
+**Interview: why copy package.json before the source?** Each Dockerfile step
+is a cached layer keyed by its inputs. Copying everything first makes any
+code change invalidate the dependency install. Copying the manifests first
+makes the install depend only on them. The exceptions (install hooks,
+workspaces) are where the install really reads other files, so caching
+there would be wrong.
+

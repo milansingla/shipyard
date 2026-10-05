@@ -28,15 +28,23 @@ export function generateNodeDockerfile(project: NodeProject, port: number, build
     "RUN chown node:node /app",
     "# Install scripts, the build and the app all run as an unprivileged user.",
     "USER node",
-    // Whole source before install: correct for postinstall scripts and workspaces,
-    // at the cost of re-installing on every change (build caching comes later).
-    "COPY --chown=node:node . .",
   );
+  if (project.dependencyFiles) {
+    // Manifests first: Docker reuses the install layer until one of them changes.
+    lines.push(
+      "# Dependencies first, so the install is cached until they change",
+      `COPY --chown=node:node ${project.dependencyFiles.map(assertFileName).join(" ")} ./`,
+    );
+  } else {
+    // Whole source before install: install scripts and workspaces may need it.
+    lines.push("COPY --chown=node:node . .");
+  }
   if (buildArgNames.length > 0) {
     // Names only: values are passed to `docker build`, never written into this file.
     lines.push("# Build variables set in Shipyard", ...buildArgNames.map(assertArgName).map((name) => `ARG ${name}`));
   }
   lines.push(`RUN ${installCommand(project)}`);
+  if (project.dependencyFiles) lines.push("COPY --chown=node:node . .");
 
   if (project.hasBuildScript) lines.push(`RUN ${pm} run build`);
 
@@ -48,6 +56,12 @@ export function generateNodeDockerfile(project: NodeProject, port: number, build
   );
 
   return `${lines.join("\n")}\n`;
+}
+
+/** Dependency files come from a fixed list (package.json, lockfiles, rc files); refuse anything else. */
+function assertFileName(name: string): string {
+  if (!/^\.?[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) throw new RangeError(`Invalid dependency file name: ${name}`);
+  return name;
 }
 
 /** Build variable names come from the user: allow exactly what the API allows, nothing that could break a line. */

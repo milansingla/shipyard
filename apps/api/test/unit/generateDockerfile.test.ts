@@ -11,6 +11,7 @@ function project(overrides: Partial<NodeProject> = {}): NodeProject {
     nodeMajor: 24,
     hasBuildScript: true,
     startCommand: ["npm", "start"],
+    dependencyFiles: null,
     notes: [],
     ...overrides,
   };
@@ -37,6 +38,26 @@ describe("generateNodeDockerfile", () => {
         "",
       ].join("\n"),
     );
+  });
+
+  it("installs from the manifests first when it can, so the install layer is cached", () => {
+    const dockerfile = generateNodeDockerfile(project({ dependencyFiles: ["package.json", "package-lock.json", ".npmrc"] }), 3000, ["API_URL"]);
+    expect(dockerfile).toContain(
+      [
+        "USER node",
+        "# Dependencies first, so the install is cached until they change",
+        "COPY --chown=node:node package.json package-lock.json .npmrc ./",
+        "# Build variables set in Shipyard",
+        "ARG API_URL",
+        "RUN npm ci",
+        "COPY --chown=node:node . .",
+        "RUN npm run build",
+      ].join("\n"),
+    );
+  });
+
+  it("refuses a dependency file name that isn't a plain file name", () => {
+    expect(() => generateNodeDockerfile(project({ dependencyFiles: ["../etc/passwd"] }), 3000)).toThrow(RangeError);
   });
 
   it("enables corepack for pnpm and yarn, before switching user", () => {

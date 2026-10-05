@@ -158,14 +158,39 @@ RUN corepack enable
 WORKDIR /app
 RUN chown node:node /app
 USER node
-COPY --chown=node:node . .
+# Dependencies first, so the install is cached until they change
+COPY --chown=node:node package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
+COPY --chown=node:node . .
 RUN pnpm run build
 ENV NODE_ENV=production
 ENV PORT=3000
 EXPOSE 3000
 CMD ["pnpm","start"]
 ```
+
+### Build cache
+
+Docker reuses a build step's layer when the step and everything it depends
+on are unchanged. A generated Dockerfile therefore copies **only the
+manifests** (`package.json`, the lockfile, `.npmrc` / `.yarnrc` when present)
+before installing, and the rest of the source after. Changing code but not
+dependencies reuses the install layer, usually the slowest step. Changing
+`package.json` or the lockfile re-installs, because Docker hashes the copied
+files. Build variables are declared before the install, so changing one also
+re-installs.
+
+Correctness over speed: when installing may need more than the manifests,
+the whole source is copied first and nothing is cached separately. That is
+the case for install hooks (`preinstall`, `install`, `postinstall`,
+`prepare`), workspaces (`workspaces` in package.json, `pnpm-workspace.yaml`)
+and Yarn 2+. The build log says which reason applied. Lockfile installs
+(`npm ci`, `--frozen-lockfile`, `--immutable`) keep the install
+reproducible. Your own Dockerfile is used as-is: order its steps the same way
+to benefit.
+
+The integration test builds the same app twice with a source-only change and
+checks that the install step came from the cache and the new code shipped.
 
 If the repository has no `.dockerignore`, a default one (`node_modules`, `.git`)
 is added so a committed `node_modules` with host binaries is never copied in.

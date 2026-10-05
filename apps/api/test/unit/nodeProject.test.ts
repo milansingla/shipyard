@@ -44,8 +44,26 @@ describe("detectNodeProject", () => {
       nodeMajor: DEFAULT_NODE_MAJOR,
       hasBuildScript: true,
       startCommand: ["npm", "start"],
+      dependencyFiles: ["package.json", "package-lock.json"],
       notes: [],
     });
+  });
+
+  it("copies package-manager config with the manifests when present", async () => {
+    await write({ "package.json": { scripts: { start: "x" } }, "yarn.lock": "", ".npmrc": "registry=…", ".yarnrc": "" });
+    expect((await detectNodeProject(dir))?.dependencyFiles).toEqual(["package.json", "yarn.lock", ".npmrc", ".yarnrc"]);
+  });
+
+  it.each([
+    ["install scripts", { scripts: { start: "x", postinstall: "patch-package" } }, {}, "install scripts (postinstall)"],
+    ["npm workspaces", { scripts: { start: "x" }, workspaces: ["packages/*"] }, {}, "workspaces"],
+    ["pnpm workspaces", { scripts: { start: "x" } }, { "pnpm-workspace.yaml": "packages: []" }, "workspaces"],
+    ["Yarn 2+", { scripts: { start: "x" }, packageManager: "yarn@4.1.0" }, { "yarn.lock": "" }, "Yarn 2+"],
+  ])("installs with the whole source for %s, and says why", async (_case, pkg, files, reason) => {
+    await write({ "package.json": pkg, ...files });
+    const project = await detectNodeProject(dir);
+    expect(project?.dependencyFiles).toBeNull();
+    expect(project?.notes.join(" ")).toContain(reason);
   });
 
   it.each([
