@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 
-import { type Deployment, DeploymentTrigger, type PrismaClient, type Project } from "../../db/prisma.js";
+import {
+  type Deployment,
+  DeploymentEventType,
+  DeploymentTrigger,
+  type Prisma,
+  type PrismaClient,
+  type Project,
+} from "../../db/prisma.js";
 import { AppError, ConflictError, ErrorCode, NotFoundError, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { DeploymentEngine, DeploymentFailedError } from "../../services/deployment/DeploymentEngine.js";
@@ -37,6 +44,24 @@ export type PushDeployResult =
   | { outcome: "started"; deployment: Deployment }
   /** A deploy/restart of the project was running; one follow-up deploy will run when it ends. */
   | { outcome: "queued" };
+
+/** One entry of a deployment's history, as the API returns it. */
+export interface DeploymentEventView {
+  id: number;
+  type: DeploymentEventType;
+  fromStatus: DeploymentStatus | null;
+  toStatus: DeploymentStatus | null;
+  /** Login of the person who caused it; null when Shipyard acted on its own. */
+  actor: string | null;
+  message: string | null;
+  createdAt: Date;
+}
+
+/** Who caused a status change, and why. Recorded with it. */
+interface Cause {
+  actorId?: string | null;
+  message?: string | null;
+}
 
 export interface DeploymentLogs {
   type: LogType;
@@ -92,6 +117,20 @@ export class DeploymentService {
     });
   }
 
+  /** The deployment's history, oldest first. */
+  async listEvents(id: string, ownerId: string): Promise<DeploymentEventView[]> {
+    await this.get(id, ownerId);
+    const events = await this.deps.prisma.deploymentEvent.findMany({
+      where: { deploymentId: id },
+      orderBy: { id: "asc" },
+      include: { actor: { select: { login: true } } },
+    });
+    return events.map(({ actor, actorId: _actorId, deploymentId: _deploymentId, ...event }) => ({
+      ...event,
+      actor: actor?.login ?? null,
+    }));
+  }
+
   async getLogs(id: string, ownerId: string, type: LogType, tail: number): Promise<DeploymentLogs> {
     const deployment = await this.get(id, ownerId);
 
@@ -128,14 +167,27 @@ export class DeploymentService {
     let deployment: Deployment;
     try {
       const id = randomUUID();
-      deployment = await this.deps.prisma.deployment.create({
-        data: {
-          id,
-          projectId,
-          trigger,
-          branch: project.branch,
-          ...DeploymentEngine.artifactNames({ id, name: project.slug }),
-        },
+      deployment = await this.deps.prisma.$transaction(async (tx) => {
+        const created = await tx.deployment.create({
+          data: {
+            id,
+            projectId,
+            trigger,
+            branch: project.branch,
+            ...DeploymentEngine.artifactNames({ id, name: project.slug }),
+          },
+        });
+        await tx.deploymentEvent.create({
+          data: {
+            deploymentId: id,
+            type: DeploymentEventType.CREATED,
+            toStatus: DeploymentStatus.QUEUED,
+            // A push is Shipyard acting on GitHub's behalf, not the owner clicking "Deploy".
+            actorId: trigger === DeploymentTrigger.MANUAL ? ownerId : null,
+            message: trigger === DeploymentTrigger.PUSH ? `Push to ${project.branch}` : null,
+          },
+        });
+        return created;
       });
     } catch (error) {
       this.unlockProject(projectId);
@@ -167,7 +219,7 @@ export class DeploymentService {
   async stop(id: string, ownerId: string): Promise<Deployment> {
     const deployment = await this.get(id, ownerId);
     if (deployment.status === DeploymentStatus.STOPPED) return deployment;
-    return this.stopDeployment(deployment);
+    return this.stopDeployment(deployment, { actorId: ownerId });
   }
 
   /**
@@ -185,7 +237,7 @@ export class DeploymentService {
     const project = await this.getProject(deployment.projectId, ownerId);
     this.lockProject(deployment.projectId);
     try {
-      let current = await this.moveTo(deployment, DeploymentStatus.STARTING);
+      let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: ownerId, message: "Restart" });
       let result;
       try {
         result = await this.deps.engine.restart(deployment.containerId, project.slug, async (stage) => {
@@ -251,10 +303,12 @@ export class DeploymentService {
     const stopping = await prisma.deployment.findMany({ where: { status: DeploymentStatus.STOPPING } });
     for (const deployment of stopping) {
       if (deployment.containerId) await engine.stop(deployment.containerId).catch(() => {});
-      await prisma.deployment.update({
-        where: { id: deployment.id },
-        data: { status: DeploymentStatus.STOPPED, hostPort: null, deploymentUrl: null },
-      });
+      await this.moveTo(
+        deployment,
+        DeploymentStatus.STOPPED,
+        { hostPort: null, deploymentUrl: null },
+        { message: "Finished stopping after Shipyard restarted" },
+      );
       summary.stopped += 1;
     }
 
@@ -313,7 +367,7 @@ export class DeploymentService {
       };
 
       await this.deps.engine.run(job, {
-        onStatusChange: (state) => this.persist(state),
+        onStatusChange: (state, previous) => this.persist(state, previous),
         onLog: (source, text) => logWriter.write(source === "runtime" ? prefixLines("[app] ", text) : text),
       });
 
@@ -335,25 +389,38 @@ export class DeploymentService {
     }
   }
 
-  private async persist(state: Readonly<DeploymentState>): Promise<void> {
-    await this.deps.prisma.deployment.update({
-      where: { id: state.id },
-      data: {
-        status: state.status,
-        commitSha: state.commitSha,
-        imageName: state.imageName,
-        containerName: state.containerName,
-        containerId: state.containerId,
-        containerPort: state.containerPort,
-        hostPort: state.hostPort,
-        deploymentUrl: state.deploymentUrl,
-        errorMessage: state.errorMessage,
-        failedStage: state.failedStage,
-        startedAt: state.startedAt,
-        finishedAt: state.finishedAt,
-      },
-    });
+  private async persist(state: Readonly<DeploymentState>, previous: DeploymentStatus): Promise<void> {
+    const { prisma } = this.deps;
+    await prisma.$transaction([
+      prisma.deployment.update({
+        where: { id: state.id },
+        data: {
+          status: state.status,
+          commitSha: state.commitSha,
+          imageName: state.imageName,
+          containerName: state.containerName,
+          containerId: state.containerId,
+          containerPort: state.containerPort,
+          hostPort: state.hostPort,
+          deploymentUrl: state.deploymentUrl,
+          errorMessage: state.errorMessage,
+          failedStage: state.failedStage,
+          startedAt: state.startedAt,
+          finishedAt: state.finishedAt,
+        },
+      }),
+      prisma.deploymentEvent.create({
+        data: {
+          deploymentId: state.id,
+          type: DeploymentEventType.STATUS_CHANGED,
+          fromStatus: previous,
+          toStatus: state.status,
+          message: state.status === DeploymentStatus.FAILED ? state.errorMessage : null,
+        },
+      }),
+    ]);
   }
+
 
   /** Stops every other healthy deployment of the project, keeping containers for rollback. */
   private async retireOthers(projectId: string, keepId: string): Promise<void> {
@@ -365,15 +432,15 @@ export class DeploymentService {
       },
     });
     for (const other of others) {
-      await this.stopDeployment(other).catch((error: unknown) =>
+      await this.stopDeployment(other, { message: `Replaced by deployment ${displayId(keepId)}` }).catch((error: unknown) =>
         this.deps.logger.warn({ err: error, deploymentId: other.id }, "Could not retire previous deployment"),
       );
     }
   }
 
-  private async stopDeployment(deployment: Deployment): Promise<Deployment> {
+  private async stopDeployment(deployment: Deployment, cause: Cause = {}): Promise<Deployment> {
     assertTransition(deployment.status, DeploymentStatus.STOPPING);
-    const stopping = await this.moveTo(deployment, DeploymentStatus.STOPPING);
+    const stopping = await this.moveTo(deployment, DeploymentStatus.STOPPING, {}, cause);
     try {
       // Out of the router first: visitors get a clean "not found", not errors from a stopping app.
       // A deployment being retired no longer has the route, so this is a no-op for it.
@@ -393,36 +460,47 @@ export class DeploymentService {
    * Validated, race-safe status change: the UPDATE only matches if the row is
    * still in the status we read. If something else changed it in between, the
    * update matches 0 rows and we report a conflict instead of overwriting.
+   * The change and its history event are written together, or not at all.
    */
   private async moveTo(
     deployment: Pick<Deployment, "id" | "status">,
     to: DeploymentStatus,
     data: Partial<Pick<Deployment, "hostPort" | "deploymentUrl" | "errorMessage">> = {},
+    cause: Cause = {},
   ): Promise<Deployment> {
     assertTransition(deployment.status, to);
-    const { count } = await this.deps.prisma.deployment.updateMany({
-      where: { id: deployment.id, status: deployment.status },
-      data: { status: to, ...data },
+    await this.deps.prisma.$transaction(async (tx) => {
+      const { count } = await tx.deployment.updateMany({
+        where: { id: deployment.id, status: deployment.status },
+        data: { status: to, ...data },
+      });
+      if (count === 0) {
+        throw new ConflictError(
+          ErrorCode.INVALID_STATUS_TRANSITION,
+          `Deployment ${deployment.id} changed while it was being updated. Refresh and try again.`,
+        );
+      }
+      await recordStatusChange(tx, deployment.id, deployment.status, to, cause);
     });
-    if (count === 0) {
-      throw new ConflictError(
-        ErrorCode.INVALID_STATUS_TRANSITION,
-        `Deployment ${deployment.id} changed while it was being updated. Refresh and try again.`,
-      );
-    }
     return this.load(deployment.id);
   }
 
   private async markFailed(id: string, reason: unknown, failedStage?: DeploymentStatus): Promise<void> {
-    await this.deps.prisma.deployment
-      .updateMany({
-        where: { id, status: { not: DeploymentStatus.FAILED } },
-        data: {
-          status: DeploymentStatus.FAILED,
-          ...(failedStage && { failedStage }),
-          errorMessage: typeof reason === "string" ? reason : errorMessage(reason),
-          finishedAt: new Date(),
-        },
+    const message = typeof reason === "string" ? reason : errorMessage(reason);
+    await this.deps.prisma
+      .$transaction(async (tx) => {
+        const current = await tx.deployment.findUnique({ where: { id }, select: { status: true } });
+        if (!current || current.status === DeploymentStatus.FAILED) return;
+        const { count } = await tx.deployment.updateMany({
+          where: { id, status: current.status },
+          data: {
+            status: DeploymentStatus.FAILED,
+            ...(failedStage && { failedStage }),
+            errorMessage: message,
+            finishedAt: new Date(),
+          },
+        });
+        if (count === 1) await recordStatusChange(tx, id, current.status, DeploymentStatus.FAILED, { message });
       })
       .catch((error: unknown) => this.deps.logger.error({ err: error, deploymentId: id }, "Could not mark FAILED"));
   }
@@ -535,6 +613,30 @@ export class DeploymentService {
     this.pending.add(promise);
     void promise.finally(() => this.pending.delete(promise));
   }
+}
+
+function recordStatusChange(
+  tx: Prisma.TransactionClient,
+  deploymentId: string,
+  fromStatus: DeploymentStatus,
+  toStatus: DeploymentStatus,
+  cause: Cause,
+) {
+  return tx.deploymentEvent.create({
+    data: {
+      deploymentId,
+      type: DeploymentEventType.STATUS_CHANGED,
+      fromStatus,
+      toStatus,
+      actorId: cause.actorId ?? null,
+      message: cause.message ?? null,
+    },
+  });
+}
+
+/** The short id the dashboard shows. */
+function displayId(deploymentId: string): string {
+  return deploymentId.replace(/-/g, "").slice(0, 7);
 }
 
 function prefixLines(prefix: string, text: string): string {

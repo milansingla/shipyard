@@ -5,6 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { type ReactNode, useState } from "react";
 
 import { DraftScale } from "@/components/DraftScale";
+import { History } from "@/components/History";
 import { LogPanel } from "@/components/LogPanel";
 import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
@@ -141,6 +142,8 @@ export default function DeploymentPage() {
           </dl>
 
           <LogPanel deploymentId={d.id} status={d.status} />
+
+          <History deploymentId={d.id} status={d.status} />
         </div>
       </div>
     </div>

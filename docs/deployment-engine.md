@@ -70,6 +70,23 @@ project's hostname at the new container and waits until Traefik actually
 serves it from there. A deployment that fails that step (`ROUTING_FAILED`) never took traffic,
 and the previous one keeps serving. See [routing.md](routing.md#the-cutover-redeploy).
 
+## History (deployment events)
+
+Every deployment has a timeline in `deployment_events`, shown as **History**
+on its page and served by `GET /api/deployments/:id/events`:
+
+- `CREATED`: who started it (the user's login), or `Push to <branch>`.
+- `STATUS_CHANGED`: every move, `fromStatus → toStatus`, with a message
+  where there is one (the failure reason, `Replaced by deployment abc1234`,
+  `Finished stopping after Shipyard restarted`) and the actor when a person
+  caused it (stop, restart).
+
+Each event is written **in the same transaction** as the status it records, so
+the timeline can never disagree with the deployment's status. Events use an
+auto-increment id, so their order is exact even within one millisecond. They
+are deleted with their deployment. The dashboard shows how long each state
+lasted, so a slow build or health check stands out.
+
 ## Health checks
 
 `container.start()` succeeding only means Docker launched a process. The app may

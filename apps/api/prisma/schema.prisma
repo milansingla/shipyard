@@ -51,6 +51,7 @@ model User {
   updatedAt         DateTime  @updatedAt
   projects          Project[]
   sessions          Session[]
+  deploymentEvents  DeploymentEvent[]
 
   @@map("users")
 }
@@ -169,9 +170,38 @@ model Deployment {
   finishedAt    DateTime?
   updatedAt     DateTime         @updatedAt
 
+  events        DeploymentEvent[]
+
   @@index([projectId, createdAt(sort: Desc)])
   @@index([status])
   @@map("deployments")
+}
+
+enum DeploymentEventType {
+  /// The deployment was created (by a person, or by a push).
+  CREATED
+  STATUS_CHANGED
+}
+
+/// A deployment's history: written in the same transaction as each change,
+/// so the timeline and the deployment's status can't disagree.
+model DeploymentEvent {
+  /// Auto-increment: orders events exactly, even within the same millisecond.
+  id           Int                 @id @default(autoincrement())
+  deploymentId String              @db.Uuid
+  deployment   Deployment          @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  type         DeploymentEventType
+  fromStatus   DeploymentStatus?
+  toStatus     DeploymentStatus?
+  /// The person whose action caused it; null when Shipyard acted on its own
+  /// (the pipeline, a push, startup recovery).
+  actorId      String?             @db.Uuid
+  actor        User?               @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  message      String?
+  createdAt    DateTime            @default(now())
+
+  @@index([deploymentId, id])
+  @@map("deployment_events")
 }
 
 /// Every GitHub webhook delivery Shipyard accepted, keyed by GitHub's delivery

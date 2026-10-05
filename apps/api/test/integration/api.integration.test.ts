@@ -639,7 +639,12 @@ describe("GitHub push webhooks", () => {
     release();
     await deployments.waitForIdle();
 
-    // …cost exactly one follow-up deployment, triggered by push.
+    // …cost exactly one follow-up deployment, triggered by push: Shipyard's doing, not the owner's.
+    const pushed = await prisma.deployment.findFirstOrThrow({ where: { projectId, trigger: "PUSH" } });
+    expect(await prisma.deploymentEvent.findFirst({ where: { deploymentId: pushed.id, type: "CREATED" } })).toMatchObject({
+      actorId: null,
+      message: "Push to main",
+    });
     const history = await prisma.deployment.findMany({ where: { projectId }, orderBy: { createdAt: "asc" } });
     expect(history.map((d) => [d.trigger, d.status])).toEqual([
       ["MANUAL", S.STOPPED], // retired when the newer one went live
@@ -873,5 +878,69 @@ describe("project settings: health checks and resources", () => {
     expect(JSON.stringify(invalid.body)).toContain("single /");
     expect((await call(alice, "PATCH", `/api/projects/${projectId}`, { branch: "dev" })).status).toBe(400);
     expect((await call(bob, "PATCH", `/api/projects/${projectId}`, { healthCheckPath: "/x" })).status).toBe(404);
+  });
+});
+
+describe("deployment history (events)", () => {
+  type Event = { type: string; fromStatus: string | null; toStatus: string | null; actor: string | null; message: string | null };
+  const events = async (cookie: string, id: string) =>
+    (await call(cookie, "GET", `/api/deployments/${id}/events`)).body!.data as Event[];
+
+  it("records who created a deployment and every status it went through, in order", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/history" });
+    const projectId = created.body!.data.id as string;
+
+    const first = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+
+    const history = await events(alice, first);
+    expect(history[0]).toMatchObject({ type: "CREATED", toStatus: "QUEUED", actor: "alice", message: null });
+    expect(history.slice(1).map((e) => `${e.fromStatus}→${e.toStatus}`)).toEqual([
+      "QUEUED→CLONING",
+      "CLONING→DETECTING",
+      "DETECTING→BUILDING",
+      "BUILDING→STARTING",
+      "STARTING→HEALTH_CHECKING",
+      "HEALTH_CHECKING→HEALTHY",
+      "HEALTHY→ROUTING",
+      "ROUTING→RUNNING",
+    ]);
+    expect(history.slice(1).every((e) => e.actor === null)).toBe(true); // the pipeline is Shipyard's own work
+
+    // A newer deployment retires it, and the history says why.
+    const second = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    expect((await events(alice, first)).slice(-2)).toMatchObject([
+      { fromStatus: "RUNNING", toStatus: "STOPPING", actor: null, message: `Replaced by deployment ${second.replace(/-/g, "").slice(0, 7)}` },
+      { fromStatus: "STOPPING", toStatus: "STOPPED" },
+    ]);
+
+    // A person stopping it is recorded as that person.
+    await call(alice, "POST", `/api/deployments/${second}/stop`);
+    const stopped = await events(alice, second);
+    expect(stopped.at(-2)).toMatchObject({ fromStatus: "RUNNING", toStatus: "STOPPING", actor: "alice" });
+    expect(stopped.at(-1)!.toStatus).toBe((await call(alice, "GET", `/api/deployments/${second}`)).body!.data.status);
+
+    // Other users can't read it.
+    expect((await call(await sessionFor(BOB), "GET", `/api/deployments/${first}/events`)).status).toBe(404);
+  });
+
+  it("records failures with their reason", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/history-fail" });
+    const projectId = created.body!.data.id as string;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/A`, { value: "a", secret: true });
+    await prisma.environmentVariable.updateMany({ where: { projectId }, data: { value: "v1:tampered" } });
+
+    const id = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+
+    expect((await events(alice, id)).at(-1)).toMatchObject({
+      type: "STATUS_CHANGED",
+      fromStatus: "QUEUED",
+      toStatus: "FAILED",
+      message: expect.stringContaining("can't be decrypted"),
+    });
   });
 });

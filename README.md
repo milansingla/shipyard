@@ -121,6 +121,7 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `GET /api/projects/:id/env`                | environment variables (secrets: value hidden)     |
 | `PUT /api/projects/:id/env/:key` · `DELETE …` | set (`value`, `secret`, `target`) · remove — applies on next deploy |
 | `GET /api/deployments/:id`                 | one deployment                                    |
+| `GET /api/deployments/:id/events`          | its history: created by whom, every status change, why |
 | `GET /api/deployments/:id/logs?type=build\|runtime&tail=` | logs                              |
 | `POST /api/deployments/:id/stop`           | stop (idempotent)                                 |
 | `POST /api/deployments/:id/restart`        | restart + health check; on an old deployment = rollback |

@@ -99,6 +99,13 @@ fails, the row is deleted again so GitHub's retry can succeed. Rows older than
 
 See [environment.md](environment.md).
 
+### DeploymentEvent (`deployment_events`)
+
+Append-only history per deployment: `type` (`CREATED` | `STATUS_CHANGED`),
+`fromStatus`, `toStatus`, `actorId` (null = Shipyard itself; set null if the
+user is deleted), `message`. Written in the same transaction as the change it
+records. Integer id = exact order.
+
 ## Known limits
 
 - The route table Traefik reads (`<SHIPYARD_DATA_DIR>/traefik/routes.yml`) is

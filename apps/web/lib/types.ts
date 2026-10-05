@@ -90,6 +90,17 @@ export interface EnvironmentVariable {
   updatedAt: string;
 }
 
+export interface DeploymentEvent {
+  id: number;
+  type: "CREATED" | "STATUS_CHANGED";
+  fromStatus: DeploymentStatus | null;
+  toStatus: DeploymentStatus | null;
+  /** Login of the person who caused it; null when Shipyard acted on its own. */
+  actor: string | null;
+  message: string | null;
+  createdAt: string;
+}
+
 export interface DeploymentLogs {
   type: "build" | "runtime";
   content: string;
