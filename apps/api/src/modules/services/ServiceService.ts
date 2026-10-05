@@ -76,7 +76,9 @@ export class ServiceService {
   async update(serviceId: string, userId: string, input: UpdateServiceInput): Promise<Service> {
     const { service, project } = await this.find(serviceId, userId, OrgRole.ADMIN);
     if (service.type === "WORKER" && input.public === true) throw new ValidationError("Workers can't be public.");
-    const updated = await this.deps.prisma.service.update({ where: { id: serviceId }, data: input });
+    // Remembered, so shipyard.yaml never overwrites what someone set here.
+    const overrides = [...new Set([...service.overrides, ...Object.keys(input)])].sort();
+    const updated = await this.deps.prisma.service.update({ where: { id: serviceId }, data: { ...input, overrides } });
     await this.deps.audit.record({
       action: "SERVICE_CHANGED",
       actorId: userId,

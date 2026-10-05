@@ -175,6 +175,7 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [Architecture](docs/architecture.md) — components and why they are split this way
 - [Deployment engine](docs/deployment-engine.md) — pipeline, statuses, health checks, debugging
 - [Routing](docs/routing.md) — Traefik, stable hostnames, zero-downtime redeploys
+- [Configuration as code](docs/configuration.md) — `shipyard.yaml`, and which setting wins
 - [Services](docs/services.md) — multi-service projects, private networking, per-service settings
 - [Teams & roles](docs/teams.md) — organizations, OWNER/ADMIN/DEVELOPER/VIEWER, what each may do
 - [Environment variables & secrets](docs/environment.md) — encrypted per-project config, runtime vs build

@@ -16,6 +16,7 @@ import { SecretBox } from "../../src/lib/secretBox.js";
 import { sessionCookieName } from "../../src/middleware/authenticate.js";
 import { AccessService } from "../../src/modules/access/AccessService.js";
 import { OrganizationService } from "../../src/modules/access/OrganizationService.js";
+import { ConfigSync } from "../../src/modules/services/ConfigSync.js";
 import { ServiceService } from "../../src/modules/services/ServiceService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
@@ -146,6 +147,9 @@ const removedContainers = new Set<string>();
 
 /** The last job the fake engine was asked to run (to see what it would hand to Docker). */
 let lastJob: DeploymentJob | null = null;
+/** shipyard.yaml per repository name, as the fake git "reads" it at the branch head. */
+const repoFiles = new Map<string, string>();
+
 /** Every job, in the order the fake engine ran them. */
 const jobs: DeploymentJob[] = [];
 
@@ -270,6 +274,17 @@ beforeAll(async () => {
     prisma,
     access,
     audit,
+    configSync: new ConfigSync({
+      prisma,
+      git: {
+        async readFile(repository) {
+          const content = repoFiles.get(repository.name);
+          return content === undefined ? null : { name: "shipyard.yaml", content, commitSha: "c".repeat(40) };
+        },
+      },
+      allowedGitHosts: ["github.com"],
+      logger: silentLogger,
+    }),
     engine: fakeEngine,
     environment,
     router: fakeRouter,
@@ -325,6 +340,7 @@ beforeEach(async () => {
   liveAliases.clear();
   removedContainers.clear();
   jobs.length = 0;
+  repoFiles.clear();
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
   await prisma.auditLog.deleteMany();
@@ -1640,6 +1656,87 @@ describe("multi-service projects", () => {
     expect(await prisma.deployment.count({ where: { serviceId: api.id } })).toBe(0);
     expect(await prisma.environmentVariable.count({ where: { projectId, scope: api.id } })).toBe(0);
     expect(await prisma.deployment.count({ where: { projectId } })).toBe(1); // web's deployment remains
+  });
+});
+
+describe("shipyard.yaml", () => {
+  const buildLog = async (cookie: string, id: string) =>
+    (await call(cookie, "GET", `/api/deployments/${id}/logs?type=build`)).body!.data.content as string;
+
+  it("creates and updates services from the file at each deploy; dashboard changes win; nothing is deleted", async () => {
+    const alice = await sessionFor(ALICE);
+    repoFiles.set("yaml-app", `
+version: 1
+services:
+  web:
+    source: apps/web
+  api:
+    source: apps/api
+    port: 4000
+    public: false
+    start:
+      command: node server.js
+  jobs:
+    type: worker
+    source: apps/worker
+`);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/yaml-app" })).body!.data.id;
+    const first = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+
+    const services = (await call(alice, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    expect(services.map((s) => [s.name, s.type, s.sourceDir, s.port, s.public, s.managedBy])).toEqual([
+      ["web", "WEB", "apps/web", null, true, "CONFIG_FILE"],
+      ["api", "WEB", "apps/api", 4000, false, "CONFIG_FILE"],
+      ["jobs", "WORKER", "apps/worker", null, false, "CONFIG_FILE"],
+    ]);
+    expect(jobs.map((job) => job.service?.alias)).toEqual(["api", "jobs", "web"]);
+    expect(await buildLog(alice, first)).toContain("shipyard.yaml: added service api");
+
+    // A dashboard change outranks the file…
+    const api = services.find((s) => s.name === "api")!;
+    expect((await call(alice, "PATCH", `/api/services/${api.id}`, { port: 5000 })).status).toBe(200);
+    // …the file changes something else and drops the worker.
+    repoFiles.set("yaml-app", `
+version: 1
+services:
+  web:
+    source: apps/web
+  api:
+    source: apps/api
+    port: 4000
+    public: false
+    start:
+      command: node index.js
+`);
+    jobs.length = 0;
+    const second = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+
+    const after = await prisma.service.findFirstOrThrow({ where: { id: api.id } });
+    expect(after).toMatchObject({ port: 5000, startCommand: "node index.js", overrides: ["port"] });
+    const log = await buildLog(alice, second);
+    expect(log).toContain("shipyard.yaml: updated api: startCommand");
+    expect(log).toContain("shipyard.yaml: kept the dashboard's port for api");
+    expect(log).toContain("service jobs is no longer in shipyard.yaml");
+    expect(await prisma.service.count({ where: { projectId } })).toBe(3); // the worker is still there
+  });
+
+  it("an invalid file fails the deploy visibly instead of silently", async () => {
+    const alice = await sessionFor(ALICE);
+    repoFiles.set("bad-yaml", "version: 1\nservices:\n  web:\n    sorce: .\n");
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/bad-yaml" })).body!.data.id;
+
+    const res = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    expect(res.status).toBe(202);
+    expect(res.body!.data).toMatchObject({ status: "FAILED", failedStage: "QUEUED" });
+    expect(res.body!.data.errorMessage).toContain("shipyard.yaml is invalid at services.web");
+    expect(await buildLog(alice, res.body!.data.id)).toContain("ERROR: shipyard.yaml is invalid");
+    expect(jobs).toHaveLength(0); // nothing was built
+    // The project isn't stuck: fix the file, deploy again.
+    repoFiles.set("bad-yaml", "version: 1\nservices:\n  web: {}\n");
+    expect((await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.status).toBe("QUEUED");
+    await deployments.waitForIdle();
   });
 });
 

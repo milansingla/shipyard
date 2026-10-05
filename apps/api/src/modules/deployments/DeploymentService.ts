@@ -22,6 +22,7 @@ import type { Service } from "../../db/prisma.js";
 import type { AccessService } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import type { EnvironmentService } from "../environment/EnvironmentService.js";
+import type { ConfigSync } from "../services/ConfigSync.js";
 import {
   artifactName,
   effectiveHealthCheck,
@@ -53,6 +54,8 @@ export interface DeploymentServiceDeps {
   access: AccessService;
   /** Decrypts the project's variables for each deployment; null = no variables (no secret key). */
   environment: Pick<EnvironmentService, "forDeployment"> | null;
+  /** Syncs services from the repository's shipyard.yaml before each deploy; null = no file support. */
+  configSync?: Pick<ConfigSync, "sync"> | null;
   /** The same router the engine uses: stopping takes a deployment out of it, startup rebuilds it. */
   router: Pick<Router, "urlFor" | "activate" | "deactivate" | "sync">;
   buildLogs: Pick<BuildLogStore, "open" | "read" | "remove" | "follow">;
@@ -228,6 +231,15 @@ export class DeploymentService {
       actorId === null
         ? await this.loadProject(projectId)
         : await this.deps.access.project(projectId, actorId, OrgRole.DEVELOPER);
+    // shipyard.yaml first: it may add services or change how they build. A broken file
+    // still produces a deployment (FAILED, with the reason) so a push doesn't fail silently.
+    let notes: string[] = [];
+    try {
+      notes = (await this.deps.configSync?.sync(project)) ?? [];
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== ErrorCode.CONFIG_INVALID) throw error;
+      return this.recordConfigFailure(project, actorId, trigger, error);
+    }
     const services = await this.services(projectId);
     const selected = options.serviceIds ? services.filter((service) => options.serviceIds!.includes(service.id)) : services;
     if (selected.length === 0) throw new NotFoundError("No such service in this project.");
@@ -282,7 +294,7 @@ export class DeploymentService {
         },
       });
     }
-    this.track(this.executeAll(project, deployments, services).finally(() => this.unlockProject(projectId)));
+    this.track(this.executeAll(project, deployments, services, notes).finally(() => this.unlockProject(projectId)));
     const primaryId = primaryServiceId(services);
     return deployments.find((deployment) => deployment.serviceId === primaryId) ?? deployments[0]!;
   }
@@ -429,6 +441,60 @@ export class DeploymentService {
     }
   }
 
+  /**
+   * A deploy that couldn't start because shipyard.yaml is invalid: recorded as a
+   * FAILED deployment of the primary service, with the reason, in its history.
+   */
+  private async recordConfigFailure(
+    project: Project,
+    actorId: string | null,
+    trigger: DeploymentTrigger,
+    error: AppError,
+  ): Promise<Deployment> {
+    const services = await this.services(project.id);
+    const service = services.find((candidate) => candidate.id === primaryServiceId(services)) ?? services[0]!;
+    const id = randomUUID();
+    const deployment = await this.deps.prisma.$transaction(async (tx) => {
+      const created = await tx.deployment.create({
+        data: {
+          id,
+          projectId: project.id,
+          serviceId: service.id,
+          trigger,
+          branch: project.branch,
+          status: DeploymentStatus.FAILED,
+          failedStage: DeploymentStatus.QUEUED,
+          errorMessage: error.message,
+          finishedAt: new Date(),
+          ...this.deps.engine.artifactNames({ id, name: artifactName(project, service) }),
+        },
+      });
+      await tx.deploymentEvent.create({
+        data: { deploymentId: id, type: DeploymentEventType.CREATED, toStatus: DeploymentStatus.QUEUED, actorId },
+      });
+      await tx.deploymentEvent.create({
+        data: {
+          deploymentId: id,
+          type: DeploymentEventType.STATUS_CHANGED,
+          fromStatus: DeploymentStatus.QUEUED,
+          toStatus: DeploymentStatus.FAILED,
+          message: error.message,
+        },
+      });
+      return created;
+    });
+    const writer = await this.deps.buildLogs.open(id);
+    writer.write(`ERROR: ${error.message}\n`);
+    await writer.close();
+    await this.deps.audit.record({
+      action: "DEPLOYMENT_FAILED",
+      actorId: null,
+      project,
+      metadata: { deploymentId: id, service: service.name, failedStage: DeploymentStatus.QUEUED },
+    });
+    return deployment;
+  }
+
   /** Like destroyProjectDeployments, for one service (see ServiceService.delete). */
   async destroyServiceDeployments(projectId: string, serviceId: string, finalize: () => Promise<void>): Promise<void> {
     this.lockProject(projectId);
@@ -533,24 +599,31 @@ export class DeploymentService {
    * live before the backend it calls. Each service switches with zero downtime
    * on its own; one failing doesn't stop the others (it keeps its previous version).
    */
-  private async executeAll(project: Project, deployments: Deployment[], services: Service[]): Promise<void> {
+  private async executeAll(project: Project, deployments: Deployment[], services: Service[], notes: string[] = []): Promise<void> {
     const primaryId = primaryServiceId(services);
     const order = (deployment: Deployment) => {
       const service = services.find((s) => s.id === deployment.serviceId)!;
       return service.id === primaryId ? 2 : service.type === "WEB" && service.public ? 1 : 0;
     };
     for (const deployment of [...deployments].sort((a, b) => order(a) - order(b))) {
-      await this.execute(project, deployment, services.find((s) => s.id === deployment.serviceId)!, primaryId);
+      await this.execute(project, deployment, services.find((s) => s.id === deployment.serviceId)!, primaryId, notes);
     }
   }
 
-  private async execute(project: Project, deployment: Deployment, service: Service, primaryId: string | null): Promise<void> {
+  private async execute(
+    project: Project,
+    deployment: Deployment,
+    service: Service,
+    primaryId: string | null,
+    notes: string[] = [],
+  ): Promise<void> {
     const logger = this.deps.logger.child({ deploymentId: deployment.id, projectId: project.id, service: service.name });
     let writer: BuildLogWriter | null = null;
 
     try {
       writer = await this.deps.buildLogs.open(deployment.id);
       const logWriter = writer;
+      for (const note of notes) logWriter.write(`shipyard.yaml: ${note}\n`);
       const job: DeploymentJob = {
         id: deployment.id,
         // Re-validated on every deploy: the allowlist may have changed since creation.

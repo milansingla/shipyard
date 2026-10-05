@@ -250,6 +250,11 @@ model ProjectDomain {
   @@map("project_domains")
 }
 
+enum ServiceSource {
+  DASHBOARD
+  CONFIG_FILE
+}
+
 enum ServiceType {
   /// Serves HTTP on its port: health-checked over HTTP, routable.
   WEB
@@ -284,6 +289,10 @@ model Service {
   healthCheckTimeoutSeconds Int?
   cpuLimit     Float?
   memoryLimitMb Int?
+  /// Who declared it: the dashboard/API, or the repository's shipyard.yaml.
+  managedBy    ServiceSource @default(DASHBOARD)
+  /// Settings changed in the dashboard: shipyard.yaml no longer overwrites them.
+  overrides    String[]    @default([])
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
   deployments  Deployment[]

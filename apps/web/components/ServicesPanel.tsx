@@ -106,6 +106,18 @@ export function ServicesPanel({
                 <span className="ml-2 rounded-sm border border-rivet px-1.5 py-0.5 text-xs text-ink-soft">
                   {service.type === "WORKER" ? "worker" : service.public ? "public" : "private"}
                 </span>
+                {service.managedBy === "CONFIG_FILE" && (
+                  <span
+                    className="ml-1 rounded-sm border border-rivet px-1.5 py-0.5 text-xs text-ink-soft"
+                    title={
+                      service.overrides.length
+                        ? `Changed here, so the file no longer sets: ${service.overrides.join(", ")}`
+                        : "Settings come from the repository's shipyard.yaml"
+                    }
+                  >
+                    shipyard.yaml
+                  </span>
+                )}
                 <p className="mt-1 truncate text-xs text-ink-soft">
                   <Mono>{service.sourceDir === "." ? "repository root" : service.sourceDir}</Mono>
                 </p>

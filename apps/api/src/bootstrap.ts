@@ -16,6 +16,7 @@ import { DeploymentService } from "./modules/deployments/DeploymentService.js";
 import { DomainService } from "./modules/domains/DomainService.js";
 import { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { ProjectService } from "./modules/projects/ProjectService.js";
+import { ConfigSync } from "./modules/services/ConfigSync.js";
 import { ServiceService } from "./modules/services/ServiceService.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
@@ -124,6 +125,12 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     prisma,
     access,
     audit,
+    configSync: new ConfigSync({
+      prisma,
+      git: engineServices.git,
+      allowedGitHosts: config.allowedGitHosts,
+      logger: logger.child({ component: "config" }),
+    }),
     engine: engineServices.engine,
     environment,
     router: engineServices.router,

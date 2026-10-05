@@ -116,6 +116,10 @@ export interface Service {
   public: boolean;
   /** Owns the project's own address. */
   primary: boolean;
+  /** Declared in the repository's shipyard.yaml, or in the dashboard. */
+  managedBy: "DASHBOARD" | "CONFIG_FILE";
+  /** Settings changed in the dashboard, which shipyard.yaml no longer overwrites. */
+  overrides: string[];
   /** First hostname label when public; null for workers and private services. */
   routeName: string | null;
   latestDeployment: Deployment | null;

@@ -1,3 +1,7 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { runCommand } from "../../lib/process.js";
@@ -76,6 +80,55 @@ export class GitService implements SourceProvider {
   }
 
   /**
+   * Reads one file at the branch's latest commit without downloading the rest:
+   * a blobless, checkout-free shallow clone fetches only that file's blob.
+   * Returns the first of `names` that exists as a regular file (never a
+   * symlink), or null. Larger than `maxBytes` → an error, not a truncation.
+   */
+  async readFile(
+    repository: RepositoryRef,
+    branch: string,
+    names: readonly string[],
+    maxBytes: number,
+  ): Promise<RepositoryFile | null> {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "shipyard-read-"));
+    const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+    try {
+      const clone = [...GIT_HARDENING_ARGS, "clone", "--depth", "1", "--single-branch", "--no-tags", "--filter=blob:none", "--no-checkout"];
+      clone.push("--branch", branch, "--", repository.cloneUrl, dir);
+      await runCommand("git", clone, { timeoutMs: this.options.cloneTimeoutMs, env });
+      const { stdout: sha } = await runCommand("git", ["-C", dir, "rev-parse", "HEAD"], { timeoutMs: 10_000 });
+
+      for (const name of names) {
+        // "<mode> blob <sha> <size>\t<name>": mode 100644/100755 = a regular file.
+        const { stdout: entry } = await runCommand("git", ["-C", dir, "ls-tree", "-l", "HEAD", "--", name], { timeoutMs: 10_000 });
+        const match = /^(100644|100755) blob [0-9a-f]+\s+(\d+)\t/.exec(entry);
+        if (!match) continue;
+        if (Number(match[2]) > maxBytes) {
+          throw new AppError(ErrorCode.CONFIG_INVALID, `${name} is larger than ${maxBytes} bytes.`, { statusCode: 422 });
+        }
+        const { stdout } = await runCommand(
+          "git",
+          [...GIT_HARDENING_ARGS, "-C", dir, "show", `HEAD:${name}`],
+          { timeoutMs: this.options.cloneTimeoutMs, env },
+        );
+        return { name, content: stdout, commitSha: sha.trim() };
+      }
+      return null;
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      this.logger.warn({ err: error, repository: repository.cloneUrl, branch }, "Reading a repository file failed");
+      throw new AppError(
+        ErrorCode.GIT_CLONE_FAILED,
+        `Can't read ${repository.cloneUrl}: ${explainGitFailure(errorMessage(error), { branch, destination: dir })}`,
+        { statusCode: 422, cause: error },
+      );
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  /**
    * Shallow-clones a single branch (or the default branch when `branch` is null).
    * `repository` and `branch` must already be validated by the caller.
    */
@@ -107,6 +160,13 @@ export class GitService implements SourceProvider {
       );
     }
   }
+}
+
+export interface RepositoryFile {
+  /** Which of the names was found. */
+  name: string;
+  content: string;
+  commitSha: string;
 }
 
 /**

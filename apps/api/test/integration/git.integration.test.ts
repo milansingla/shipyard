@@ -44,3 +44,21 @@ describe("GitService.clone", () => {
     });
   });
 });
+
+describe("GitService.readFile", () => {
+  const repo = parseRepositoryUrl("https://github.com/octocat/Hello-World", ["github.com"]);
+
+  it("reads one file at the branch head without a checkout, trying names in order", async () => {
+    const file = await git.readFile(repo, "master", ["shipyard.yaml", "README"], 10_000);
+    expect(file).toMatchObject({ name: "README", commitSha: expect.stringMatching(/^[0-9a-f]{40}$/) });
+    expect(file!.content).toContain("Hello World");
+  });
+
+  it("returns null when none of the files exist", async () => {
+    expect(await git.readFile(repo, "master", ["shipyard.yaml", "shipyard.yml"], 10_000)).toBeNull();
+  });
+
+  it("refuses a file larger than the limit instead of truncating it", async () => {
+    await expect(git.readFile(repo, "master", ["README"], 5)).rejects.toMatchObject({ code: ErrorCode.CONFIG_INVALID });
+  });
+});
