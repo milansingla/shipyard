@@ -129,7 +129,7 @@ const fakeEngine: EngineLike = {
   async run(job, observer = {}) {
     const state: DeploymentState = {
       id: job.id,
-      status: S.PENDING,
+      status: S.QUEUED,
       branch: job.branch,
       commitSha: "c".repeat(40),
       imageName: `shipyard/${job.name}:x`,
@@ -139,10 +139,11 @@ const fakeEngine: EngineLike = {
       hostPort: 49_999,
       deploymentUrl: null,
       errorMessage: null,
+      failedStage: null,
       startedAt: new Date(),
       finishedAt: null,
     };
-    for (const status of [S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]) {
+    for (const status of [S.CLONING, S.DETECTING, S.BUILDING, S.STARTING, S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING, S.RUNNING]) {
       if (status === S.RUNNING) {
         await fakeRouter.activate({ name: job.name, deploymentId: job.id, containerName: state.containerName, containerPort: 3000 });
         state.deploymentUrl = fakeRouter.urlFor(job.name, 49_999);
@@ -157,7 +158,8 @@ const fakeEngine: EngineLike = {
   async stop() {
     return { containerName: "x", status: S.STOPPED, hostPort: null, deploymentUrl: null };
   },
-  async restart(containerId, routeName) {
+  async restart(containerId, routeName, onStage = async () => {}) {
+    for (const stage of [S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING]) await onStage(stage);
     const deploymentId = containerId.replace(/^container-/, "");
     await fakeRouter.activate({ name: routeName, deploymentId, containerName: "x", containerPort: 3000 });
     return { containerName: "x", status: S.RUNNING, hostPort: 49_998, deploymentUrl: fakeRouter.urlFor(routeName, 49_998) };

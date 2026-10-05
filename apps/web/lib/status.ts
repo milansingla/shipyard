@@ -1,7 +1,17 @@
 import type { Deployment, DeploymentStatus } from "./types";
 
 /** The pipeline a deployment climbs, bottom to top on the draft-mark scale. */
-export const PIPELINE = ["PENDING", "CLONING", "BUILDING", "STARTING", "HEALTHY", "RUNNING"] as const;
+export const PIPELINE = [
+  "QUEUED",
+  "CLONING",
+  "DETECTING",
+  "BUILDING",
+  "STARTING",
+  "HEALTH_CHECKING",
+  "HEALTHY",
+  "ROUTING",
+  "RUNNING",
+] as const;
 export type PipelineStage = (typeof PIPELINE)[number];
 
 /**
@@ -18,11 +28,14 @@ interface StatusInfo {
 }
 
 const STATUS: Record<DeploymentStatus, StatusInfo> = {
-  PENDING: { label: "Queued", tone: "working" },
+  QUEUED: { label: "Queued", tone: "working" },
   CLONING: { label: "Cloning", tone: "working" },
+  DETECTING: { label: "Detecting", tone: "working" },
   BUILDING: { label: "Building", tone: "working" },
   STARTING: { label: "Starting", tone: "working" },
-  HEALTHY: { label: "Health check passed", tone: "working" },
+  HEALTH_CHECKING: { label: "Health check", tone: "working" },
+  HEALTHY: { label: "Healthy", tone: "working" },
+  ROUTING: { label: "Switching traffic", tone: "working" },
   RUNNING: { label: "Running", tone: "live" },
   FAILED: { label: "Failed", tone: "failed" },
   STOPPING: { label: "Stopping", tone: "working" },
@@ -30,11 +43,14 @@ const STATUS: Record<DeploymentStatus, StatusInfo> = {
 };
 
 export const STAGE_LABEL: Record<PipelineStage, string> = {
-  PENDING: "Queued",
+  QUEUED: "Queued",
   CLONING: "Clone",
+  DETECTING: "Detect",
   BUILDING: "Build",
   STARTING: "Start",
-  HEALTHY: "Health check",
+  HEALTH_CHECKING: "Health check",
+  HEALTHY: "Healthy",
+  ROUTING: "Switch traffic",
   RUNNING: "Live",
 };
 
@@ -57,22 +73,29 @@ export interface StageProgress {
 /**
  * Where the waterline sits for a deployment.
  *
- * The API stores the current status, not which stage a FAILED deployment
- * failed in, so that is inferred from what the deployment had produced:
- * a container → it failed while starting/health-checking; a commit → it was
- * cloned, so it failed in detection or the build; neither → during the clone.
+ * A FAILED deployment records the stage it failed in (`failedStage`). For
+ * deployments from before that was stored, the stage is inferred from what
+ * the deployment had produced: a container → it failed while starting or
+ * health-checking; a commit → it failed in detection or the build; neither →
+ * during the clone.
  */
-export function stageProgress(deployment: Pick<Deployment, "status" | "commitSha" | "containerId">): StageProgress {
+export function stageProgress(
+  deployment: Pick<Deployment, "status" | "commitSha" | "containerId" | "failedStage">,
+): StageProgress {
   const { status } = deployment;
   const index = PIPELINE.indexOf(status as PipelineStage);
   if (index !== -1) return { reached: index, failedAt: null };
 
   if (status === "FAILED") {
-    const failedAt = deployment.containerId
-      ? PIPELINE.indexOf("STARTING")
-      : deployment.commitSha
-        ? PIPELINE.indexOf("BUILDING")
-        : PIPELINE.indexOf("CLONING");
+    const recorded = PIPELINE.indexOf(deployment.failedStage as PipelineStage);
+    const failedAt =
+      recorded !== -1
+        ? recorded
+        : deployment.containerId
+          ? PIPELINE.indexOf("HEALTH_CHECKING")
+          : deployment.commitSha
+            ? PIPELINE.indexOf("BUILDING")
+            : PIPELINE.indexOf("CLONING");
     return { reached: failedAt - 1, failedAt };
   }
   // STOPPING / STOPPED: it went all the way before being stopped.

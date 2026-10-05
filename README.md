@@ -102,7 +102,7 @@ api -X POST localhost:4000/api/projects -H 'content-type: application/json' \
 # 2. Deploy — returns 202 immediately; the pipeline runs in the background
 api -X POST localhost:4000/api/projects/<projectId>/deploy
 
-# 3. Watch it: status goes PENDING → CLONING → BUILDING → STARTING → HEALTHY → RUNNING
+# 3. Watch it: QUEUED → CLONING → DETECTING → BUILDING → STARTING → HEALTH_CHECKING → HEALTHY → ROUTING → RUNNING
 api localhost:4000/api/deployments/<deploymentId>
 api 'localhost:4000/api/deployments/<deploymentId>/logs?type=build'
 api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'

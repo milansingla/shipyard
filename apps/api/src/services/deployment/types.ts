@@ -29,6 +29,8 @@ export interface DeploymentState {
   hostPort: number | null;
   deploymentUrl: string | null;
   errorMessage: string | null;
+  /** The stage the run was in when it failed (set only when FAILED). */
+  failedStage: DeploymentStatus | null;
   startedAt: Date | null;
   finishedAt: Date | null;
 }

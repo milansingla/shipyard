@@ -55,7 +55,8 @@ export class DeploymentFailedError extends AppError {
 const FAILURE_LOG_TAIL = 50;
 
 /**
- * The mechanics of a deployment: clone → detect/generate Dockerfile → build → start → health check → route.
+ * The mechanics of a deployment:
+ * clone → detect (own or generated Dockerfile) → build → start → health check → route.
  *
  * It enforces the status order for ONE run and reports progress to an observer.
  * It knows nothing about the database, projects, or which other deployments
@@ -73,7 +74,7 @@ export class DeploymentEngine {
   async run(job: DeploymentJob, observer: DeploymentObserver = {}): Promise<DeploymentState> {
     const state: DeploymentState = {
       id: job.id,
-      status: DeploymentStatus.PENDING,
+      status: DeploymentStatus.QUEUED,
       branch: job.branch,
       commitSha: null,
       ...DeploymentEngine.artifactNames(job),
@@ -82,6 +83,7 @@ export class DeploymentEngine {
       hostPort: null,
       deploymentUrl: null,
       errorMessage: null,
+      failedStage: null,
       startedAt: null,
       finishedAt: null,
     };
@@ -101,6 +103,7 @@ export class DeploymentEngine {
       log("system", `Cloned ${job.repository.cloneUrl} at ${source.commitSha.slice(0, 7)}\n`);
 
       // 2. Detect: the repository's own Dockerfile, or one generated for a Node.js project.
+      await moveTo(DeploymentStatus.DETECTING);
       const plan = await prepareBuild(source.path, (text) => log("system", text));
       state.containerPort = plan.containerPort;
 
@@ -131,6 +134,7 @@ export class DeploymentEngine {
       state.hostPort = container.hostPort;
 
       // 5. Health check
+      await moveTo(DeploymentStatus.HEALTH_CHECKING);
       const health = await this.deps.healthCheck.waitUntilHealthy({
         url: healthCheckUrl(container.hostPort),
         getContainerState: () => this.deps.docker.getContainerState(container.id),
@@ -141,6 +145,7 @@ export class DeploymentEngine {
       // 6. Route: move the project's URL to this container. Resolves only once visitors
       //    actually reach it; until then the previous deployment keeps serving.
       const url = this.deps.router.urlFor(job.name, container.hostPort);
+      await moveTo(DeploymentStatus.ROUTING);
       await this.deps.router.activate({
         name: job.name,
         deploymentId: job.id,
@@ -171,6 +176,7 @@ export class DeploymentEngine {
           .catch((stopError: unknown) => logger.warn({ err: stopError }, "Could not stop failed container"));
       }
 
+      state.failedStage = state.status;
       await moveTo(DeploymentStatus.FAILED);
       throw new DeploymentFailedError(state, error);
     } finally {
@@ -197,8 +203,14 @@ export class DeploymentEngine {
   /**
    * Restarts the container, waits until it is healthy again, then points the
    * route `routeName` at it. Restarting an older deployment is a rollback.
+   * `onStage` is told when the health check starts, passes, and routing starts,
+   * so the caller can record each stage as it happens.
    */
-  async restart(containerReference: string, routeName: string): Promise<ContainerActionResult> {
+  async restart(
+    containerReference: string,
+    routeName: string,
+    onStage: (status: DeploymentStatus) => Promise<void> = async () => {},
+  ): Promise<ContainerActionResult> {
     const before = await this.deps.docker.inspectManagedContainer(containerReference);
     await this.deps.docker.restartContainer(before.id);
 
@@ -208,12 +220,15 @@ export class DeploymentEngine {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Container restarted without a published port.");
     }
 
+    await onStage(DeploymentStatus.HEALTH_CHECKING);
     await this.deps.healthCheck.waitUntilHealthy({
       url: healthCheckUrl(after.hostPort),
       getContainerState: () => this.deps.docker.getContainerState(after.id),
     });
+    await onStage(DeploymentStatus.HEALTHY);
 
     await this.joinRouterNetwork(after);
+    await onStage(DeploymentStatus.ROUTING);
     await this.deps.router.activate({
       name: routeName,
       deploymentId: after.deploymentId ?? after.id,

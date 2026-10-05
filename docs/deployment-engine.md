@@ -11,47 +11,63 @@ Routing and zero-downtime switching: [routing.md](routing.md).
 ```
 validate input ──✗──► ValidationError (no deployment is created)
       │
-  PENDING
+  QUEUED
       │
-  CLONING ─── git clone --depth 1 --single-branch [--branch B] -- <url> <workspace>/<id>
-      │       git rev-parse HEAD  → commitSha
-      │       prepareBuild():
-      │         repo has a Dockerfile  → use it; port from last EXPOSE, else 3000
-      │         else package.json      → generate .shipyard.Dockerfile; port 3000
-      │         else                   → DOCKERFILE_NOT_FOUND
-  BUILDING ── docker build (tar of the clone; .dockerignore applied, .git excluded)
-      │       workspace deleted (source now lives in the image)
-  STARTING ── docker create + start, PORT=<port>, published on 127.0.0.1:<random>
-      │       (with routing: attached to the shipyard-edge network)
-      │       health check loop
-  HEALTHY ─── app answered HTTP < 500 — the previous deployment is still serving
-      │       route: <slug>.<domain> → this container, confirmed through Traefik
-      │       (without routing: URL = http://localhost:<published port>)
-  RUNNING ─── DeploymentService then retires the previous deployment
+  CLONING ─────────── git clone --depth 1 --single-branch [--branch B] -- <url> <workspace>/<id>
+      │               git rev-parse HEAD  → commitSha
+  DETECTING ───────── prepareBuild():
+      │                 repo has a Dockerfile  → use it; port from last EXPOSE, else 3000
+      │                 else package.json      → generate .shipyard.Dockerfile; port 3000
+      │                 else                   → DOCKERFILE_NOT_FOUND
+  BUILDING ────────── docker build (tar of the clone; .dockerignore applied, .git excluded)
+      │               workspace deleted (source now lives in the image)
+  STARTING ────────── docker create + start, PORT=<port>, published on 127.0.0.1:<random>
+      │               (with routing: attached to the shipyard-edge network)
+  HEALTH_CHECKING ─── poll the app until it answers HTTP < 500
+      │
+  HEALTHY ─────────── the app works; the previous deployment is still serving
+      │
+  ROUTING ─────────── route: <slug>.<domain> → this container, confirmed through Traefik
+      │               (without routing: URL = http://localhost:<published port>)
+  RUNNING ─────────── DeploymentService then retires the previous deployment
 
-any step fails ──► FAILED  (errorMessage stored, runtime logs captured,
-                            container stopped but kept for inspection)
+any step fails ──► FAILED  (errorMessage + failedStage stored, runtime logs
+                            captured, container stopped but kept for inspection)
 ```
 
 ## Status model
 
-| Status     | Meaning                                         | Next                         |
-| ---------- | ----------------------------------------------- | ---------------------------- |
-| `PENDING`  | Created, not started                            | CLONING, FAILED              |
-| `CLONING`  | Fetching source                                 | BUILDING, FAILED             |
-| `BUILDING` | `docker build` running                          | STARTING, FAILED             |
-| `STARTING` | Container started, waiting for health           | HEALTHY, FAILED              |
-| `HEALTHY`  | App responds over HTTP                          | RUNNING, STOPPING, FAILED    |
-| `RUNNING`  | Healthy **and** reachable at its URL            | STOPPING, STARTING, FAILED   |
-| `STOPPING` | Stop requested                                  | STOPPED, FAILED              |
-| `STOPPED`  | Container stopped                               | STARTING (restart)           |
-| `FAILED`   | Terminal. Fix and redeploy (= new deployment)   | —                            |
+| Status            | Meaning                                              | Next                         |
+| ----------------- | ---------------------------------------------------- | ---------------------------- |
+| `QUEUED`          | Created, not started                                 | CLONING, FAILED              |
+| `CLONING`         | Fetching source                                      | DETECTING, FAILED            |
+| `DETECTING`       | Choosing the repo's Dockerfile or generating one     | BUILDING, FAILED             |
+| `BUILDING`        | `docker build` running                               | STARTING, FAILED             |
+| `STARTING`        | Container being created and started                  | HEALTH_CHECKING, FAILED      |
+| `HEALTH_CHECKING` | Waiting for the app to answer HTTP                   | HEALTHY, FAILED              |
+| `HEALTHY`         | App responds over HTTP; no traffic yet               | ROUTING, STOPPING, FAILED    |
+| `ROUTING`         | Moving the project's address to it                   | RUNNING, FAILED              |
+| `RUNNING`         | Healthy **and** serving the project's address        | STOPPING, STARTING, FAILED   |
+| `STOPPING`        | Stop requested                                       | STOPPED, FAILED              |
+| `STOPPED`         | Container stopped                                    | STARTING (restart)           |
+| `FAILED`          | Terminal. `failedStage` says where. Redeploy to fix  | —                            |
+
+Restart (and rollback) walk the same tail: `STARTING → HEALTH_CHECKING →
+HEALTHY → ROUTING → RUNNING`. Every move is checked against
+[`status.ts`](../apps/api/src/services/deployment/status.ts) and persisted as it
+happens, so the dashboard shows the real stage, not a guess.
+
+**Why HEALTHY comes before ROUTING.** The V3 plan lists ROUTING before HEALTHY
+("register route, then mark healthy"). Shipyard has one route per project, so
+registering the route *is* switching traffic. Marking HEALTHY first keeps the
+rule "a deployment becomes HEALTHY only after its health check" literal, and
+ROUTING then means exactly one thing: traffic is moving to it.
 
 ### Why HEALTHY and RUNNING are separate
 HEALTHY says *the process works*. RUNNING says *users can reach it*. With
-routing on, there's real work between them: Shipyard points the project's
-hostname at the new container and waits until Traefik actually serves it from
-there. A deployment that fails that step (`ROUTING_FAILED`) never took traffic,
+routing on, the ROUTING stage between them is real work: Shipyard points the
+project's hostname at the new container and waits until Traefik actually
+serves it from there. A deployment that fails that step (`ROUTING_FAILED`) never took traffic,
 and the previous one keeps serving. See [routing.md](routing.md#the-cutover-redeploy).
 
 ## Health checks

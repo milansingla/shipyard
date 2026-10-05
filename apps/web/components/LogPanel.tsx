@@ -13,10 +13,13 @@ const TABS: Array<{ type: LogType; label: string }> = [
   { type: "runtime", label: "App output" },
 ];
 
+/** Statuses in which the app's container is running and may print output. */
+const CONTAINER_UP: DeploymentStatus[] = ["HEALTH_CHECKING", "HEALTHY", "ROUTING", "RUNNING"];
+
 /** Build log while deploying, then the app's own output. Refreshes while there is something new to see. */
 export function LogPanel({ deploymentId, status }: { deploymentId: string; status: DeploymentStatus }) {
   const [type, setType] = useState<LogType>(status === "RUNNING" ? "runtime" : "build");
-  const live = type === "build" ? isInProgress(status) : status === "RUNNING" || status === "HEALTHY";
+  const live = type === "build" ? isInProgress(status) : CONTAINER_UP.includes(status);
 
   const { data, error } = useApi<DeploymentLogs>(
     `/deployments/${deploymentId}/logs?type=${type}${type === "runtime" ? "&tail=500" : ""}`,

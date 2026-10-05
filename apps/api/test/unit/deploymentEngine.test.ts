@@ -162,7 +162,7 @@ describe("DeploymentEngine.run", () => {
     const h = harness();
     const state = await h.engine.run(job({ labels: { "shipyard.project-id": "p1" } }), h.observer);
 
-    expect(h.statuses).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]);
+    expect(h.statuses).toEqual([S.CLONING, S.DETECTING, S.BUILDING, S.STARTING, S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING, S.RUNNING]);
     expect(h.calls).toEqual([
       "clone:main",
       "build:shipyard/hello:3f2a9c1e77b4:8080:p1",
@@ -183,6 +183,7 @@ describe("DeploymentEngine.run", () => {
       hostPort: 49153,
       deploymentUrl: "http://localhost:49153",
       errorMessage: null,
+      failedStage: null,
     });
     expect(state.startedAt).toBeInstanceOf(Date);
     expect(state.finishedAt).toBeInstanceOf(Date);
@@ -199,7 +200,7 @@ describe("DeploymentEngine.run", () => {
         order.push(state.status);
       },
     });
-    expect(order).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]);
+    expect(order).toEqual([S.CLONING, S.DETECTING, S.BUILDING, S.STARTING, S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING, S.RUNNING]);
   });
 
   it("defaults to port 3000 and the default branch", async () => {
@@ -230,7 +231,8 @@ describe("DeploymentEngine.run", () => {
     const error = (await h.engine.run(job(), h.observer).catch((e: unknown) => e)) as DeploymentFailedError;
 
     expect(error.code).toBe(ErrorCode.PROJECT_DETECTION_FAILED);
-    expect(h.statuses).toEqual([S.CLONING, S.FAILED]);
+    expect(h.statuses).toEqual([S.CLONING, S.DETECTING, S.FAILED]);
+    expect(error.deployment.failedStage).toBe(S.DETECTING);
   });
 
   it("fails with DOCKERFILE_NOT_FOUND and cleans up the clone", async () => {
@@ -240,7 +242,7 @@ describe("DeploymentEngine.run", () => {
     expect(error).toBeInstanceOf(DeploymentFailedError);
     expect((error as DeploymentFailedError).code).toBe(ErrorCode.DOCKERFILE_NOT_FOUND);
     expect((error as DeploymentFailedError).deployment.status).toBe(S.FAILED);
-    expect(h.statuses).toEqual([S.CLONING, S.FAILED]);
+    expect(h.statuses).toEqual([S.CLONING, S.DETECTING, S.FAILED]);
     expect(await workspaceEntries(h.workspaceRoot)).toEqual([]);
   });
 
@@ -250,7 +252,8 @@ describe("DeploymentEngine.run", () => {
 
     expect(error.code).toBe(ErrorCode.DOCKER_BUILD_FAILED);
     expect(error.deployment.errorMessage).toContain("npm ci exited 1");
-    expect(h.statuses).toEqual([S.CLONING, S.BUILDING, S.FAILED]);
+    expect(h.statuses).toEqual([S.CLONING, S.DETECTING, S.BUILDING, S.FAILED]);
+    expect(error.deployment.failedStage).toBe(S.BUILDING);
     expect(h.calls.some((c) => c.startsWith("start:"))).toBe(false);
     expect(await workspaceEntries(h.workspaceRoot)).toEqual([]);
   });
@@ -263,7 +266,8 @@ describe("DeploymentEngine.run", () => {
       .catch((e: unknown) => e)) as DeploymentFailedError;
 
     expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
-    expect(h.statuses).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.FAILED]);
+    expect(h.statuses).toEqual([S.CLONING, S.DETECTING, S.BUILDING, S.STARTING, S.HEALTH_CHECKING, S.FAILED]);
+    expect(error.deployment.failedStage).toBe(S.HEALTH_CHECKING);
     expect(h.calls.slice(-2)).toEqual(["logs", "stop:container-id"]);
     expect(logs).toEqual(["Error: listen EADDRINUSE\n"]);
     expect(error.deployment).toMatchObject({ containerId: "container-id", deploymentUrl: null });
@@ -274,9 +278,10 @@ describe("DeploymentEngine.run", () => {
     const state = await h.engine.run(job(), { onStatusChange: (record) => void h.calls.push(record.status) });
 
     expect(h.calls).toContain("start:shipyard-hello-3f2a9c1e77b4:8080:shipyard-edge");
-    expect(h.calls.slice(-4)).toEqual([
+    expect(h.calls.slice(-5)).toEqual([
       "health:http://127.0.0.1:49153/",
       S.HEALTHY,
+      S.ROUTING,
       "route:hello->shipyard-hello-3f2a9c1e77b4:8080",
       S.RUNNING,
     ]);
@@ -288,7 +293,8 @@ describe("DeploymentEngine.run", () => {
     const error = (await h.engine.run(job(), h.observer).catch((e: unknown) => e)) as DeploymentFailedError;
 
     expect(error.code).toBe(ErrorCode.ROUTING_FAILED);
-    expect(h.statuses).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.FAILED]);
+    expect(h.statuses).toEqual([S.CLONING, S.DETECTING, S.BUILDING, S.STARTING, S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING, S.FAILED]);
+    expect(error.deployment.failedStage).toBe(S.ROUTING);
     expect(h.calls.at(-1)).toBe("stop:container-id");
     expect(error.deployment.deploymentUrl).toBeNull();
   });

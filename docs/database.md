@@ -52,6 +52,7 @@ history is what makes "what was running at 14:02?" and rollback possible.
 | `imageName`, `containerName`          | Deterministic from slug + id, so known before Docker runs    |
 | `containerId`, `hostPort`, `deploymentUrl` | Filled as the deployment progresses; cleared on stop. `deploymentUrl` is the stable `http://<slug>.<domain>` with routing on, else `http://localhost:<hostPort>` |
 | `errorMessage`                        | Why it FAILED — kept in the DB even if the log file is lost  |
+| `failedStage`                         | Stage it was in when it FAILED (null before V3)              |
 | `startedAt`, `finishedAt`             | Timing of the pipeline                                       |
 
 Indexes: `(projectId, createdAt DESC)` for history pages, `status` for

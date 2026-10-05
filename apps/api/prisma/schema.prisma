@@ -15,11 +15,14 @@ datasource db {
 /// Must stay identical to DeploymentStatus in src/services/deployment/status.ts
 /// (a unit test enforces this). The legal transitions live in that file, not here.
 enum DeploymentStatus {
-  PENDING
+  QUEUED
   CLONING
+  DETECTING
   BUILDING
   STARTING
+  HEALTH_CHECKING
   HEALTHY
+  ROUTING
   RUNNING
   FAILED
   STOPPING
@@ -97,7 +100,7 @@ model Deployment {
   id            String           @id @default(uuid()) @db.Uuid
   projectId     String           @db.Uuid
   project       Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  status        DeploymentStatus @default(PENDING)
+  status        DeploymentStatus @default(QUEUED)
   trigger       DeploymentTrigger @default(MANUAL)
   /// Branch at the time of deployment (the project's branch may change later).
   branch        String
@@ -109,6 +112,8 @@ model Deployment {
   hostPort      Int?
   deploymentUrl String?
   errorMessage  String?
+  /// The stage a FAILED deployment was in when it failed.
+  failedStage   DeploymentStatus?
   createdAt     DateTime         @default(now())
   startedAt     DateTime?
   finishedAt    DateTime?

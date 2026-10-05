@@ -4,7 +4,7 @@ import { type Deployment, DeploymentTrigger, type PrismaClient, type Project } f
 import { ConflictError, ErrorCode, NotFoundError, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { DeploymentEngine, DeploymentFailedError } from "../../services/deployment/DeploymentEngine.js";
-import { DeploymentStatus, assertTransition } from "../../services/deployment/status.js";
+import { DeploymentStatus, IN_PROGRESS_STATUSES, assertTransition } from "../../services/deployment/status.js";
 import type { DeploymentJob, DeploymentState } from "../../services/deployment/types.js";
 import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
@@ -41,15 +41,6 @@ export interface DeploymentLogs {
   /** Set when logs are unavailable, e.g. the container was removed. */
   message?: string;
 }
-
-/** Statuses during which a deployment is still being worked on. */
-const IN_PROGRESS: DeploymentStatus[] = [
-  DeploymentStatus.PENDING,
-  DeploymentStatus.CLONING,
-  DeploymentStatus.BUILDING,
-  DeploymentStatus.STARTING,
-  DeploymentStatus.HEALTHY,
-];
 
 /**
  * Application-level deployment rules, on top of the engine:
@@ -120,7 +111,7 @@ export class DeploymentService {
   // ───────────────────────── commands ─────────────────────────
 
   /**
-   * Creates a PENDING deployment for the project's configured branch and starts
+   * Creates a QUEUED deployment for the project's configured branch and starts
    * the pipeline in the background. Returns immediately; poll GET /deployments/:id.
    */
   async deploy(
@@ -191,16 +182,17 @@ export class DeploymentService {
     const project = await this.getProject(deployment.projectId, ownerId);
     this.lockProject(deployment.projectId);
     try {
-      const starting = await this.moveTo(deployment, DeploymentStatus.STARTING);
+      let current = await this.moveTo(deployment, DeploymentStatus.STARTING);
       let result;
       try {
-        result = await this.deps.engine.restart(deployment.containerId, project.slug);
+        result = await this.deps.engine.restart(deployment.containerId, project.slug, async (stage) => {
+          current = await this.moveTo(current, stage);
+        });
       } catch (error) {
-        await this.markFailed(id, error);
+        await this.markFailed(id, error, current.status);
         throw error;
       }
-      const healthy = await this.moveTo(starting, DeploymentStatus.HEALTHY);
-      const running = await this.moveTo(healthy, DeploymentStatus.RUNNING, {
+      const running = await this.moveTo(current, DeploymentStatus.RUNNING, {
         hostPort: result.hostPort,
         deploymentUrl: result.deploymentUrl,
         errorMessage: null,
@@ -242,12 +234,13 @@ export class DeploymentService {
     const summary = { failed: 0, stopped: 0, refreshed: 0 };
     const { prisma, engine, logger } = this.deps;
 
-    const interrupted = await prisma.deployment.findMany({ where: { status: { in: IN_PROGRESS } } });
+    const interrupted = await prisma.deployment.findMany({ where: { status: { in: [...IN_PROGRESS_STATUSES] } } });
     for (const deployment of interrupted) {
       if (deployment.containerId) await engine.stop(deployment.containerId).catch(() => {});
       await this.markFailed(
         deployment.id,
         `Interrupted: Shipyard stopped while this deployment was ${deployment.status}. Redeploy to try again.`,
+        deployment.status,
       );
       summary.failed += 1;
     }
@@ -269,7 +262,7 @@ export class DeploymentService {
     for (const deployment of running) {
       const reason = await this.checkStillRunning(deployment, deployment.project.slug);
       if (reason) {
-        await this.markFailed(deployment.id, reason);
+        await this.markFailed(deployment.id, reason, DeploymentStatus.RUNNING);
         summary.failed += 1;
       } else {
         summary.refreshed += 1;
@@ -335,6 +328,7 @@ export class DeploymentService {
         hostPort: state.hostPort,
         deploymentUrl: state.deploymentUrl,
         errorMessage: state.errorMessage,
+        failedStage: state.failedStage,
         startedAt: state.startedAt,
         finishedAt: state.finishedAt,
       },
@@ -368,7 +362,7 @@ export class DeploymentService {
     } catch (error) {
       // Removed outside Shipyard: it is certainly not running any more.
       if (!(error instanceof NotFoundError)) {
-        await this.markFailed(deployment.id, error);
+        await this.markFailed(deployment.id, error, DeploymentStatus.STOPPING);
         throw error;
       }
     }
@@ -399,12 +393,13 @@ export class DeploymentService {
     return this.load(deployment.id);
   }
 
-  private async markFailed(id: string, reason: unknown): Promise<void> {
+  private async markFailed(id: string, reason: unknown, failedStage?: DeploymentStatus): Promise<void> {
     await this.deps.prisma.deployment
       .updateMany({
         where: { id, status: { not: DeploymentStatus.FAILED } },
         data: {
           status: DeploymentStatus.FAILED,
+          ...(failedStage && { failedStage }),
           errorMessage: typeof reason === "string" ? reason : errorMessage(reason),
           finishedAt: new Date(),
         },

@@ -6,7 +6,11 @@ import type { Deployment } from "@/lib/types";
  * bottom to top, and the waterline rises as the deployment gets through them.
  * Below the line = done. A failed stage is marked in oxide at the line.
  */
-export function DraftScale({ deployment }: { deployment: Pick<Deployment, "status" | "commitSha" | "containerId"> }) {
+export function DraftScale({
+  deployment,
+}: {
+  deployment: Pick<Deployment, "status" | "commitSha" | "containerId" | "failedStage">;
+}) {
   const { reached, failedAt } = stageProgress(deployment);
   const working = isInProgress(deployment.status);
   const failed = failedAt !== null;
@@ -18,7 +22,7 @@ export function DraftScale({ deployment }: { deployment: Pick<Deployment, "statu
   const line = failed ? "border-oxide" : stopped ? "border-ink-soft" : "border-ink";
 
   return (
-    // self-start: the scale must be exactly as tall as its six rows, or the water's % height drifts.
+    // self-start: the scale must be exactly as tall as its rows, or the water's % height drifts.
     <div className="relative self-start border-l-2 border-ink">
       {/* The water. Its top edge is the waterline. */}
       <div
@@ -36,12 +40,12 @@ export function DraftScale({ deployment }: { deployment: Pick<Deployment, "statu
             <li
               key={stage}
               aria-current={isCurrent || isFailed ? "step" : undefined}
-              className="flex h-14 items-center gap-4 pl-4"
+              className="flex h-12 items-center gap-4 pl-4"
             >
               {/* Draft marks: tall condensed numerals, read from the bottom up. */}
               <span
                 aria-hidden
-                className={`w-8 font-display text-4xl font-bold leading-none tabular-nums ${
+                className={`w-8 font-display text-3xl font-bold leading-none tabular-nums ${
                   isFailed ? "text-oxide" : done ? "text-ink" : "text-rivet"
                 }`}
               >

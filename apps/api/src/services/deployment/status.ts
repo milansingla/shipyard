@@ -1,13 +1,21 @@
 import { AppError, ErrorCode } from "../../lib/errors.js";
 
 export const DeploymentStatus = {
-  PENDING: "PENDING",
+  /** Created; waiting for its turn to run. */
+  QUEUED: "QUEUED",
   CLONING: "CLONING",
+  /** Deciding how to build: the repository's Dockerfile, or one generated for it. */
+  DETECTING: "DETECTING",
   BUILDING: "BUILDING",
+  /** Container created and started. */
   STARTING: "STARTING",
-  /** Container answered the health check. */
+  /** Waiting for the app to answer HTTP. A running container is not yet a working app. */
+  HEALTH_CHECKING: "HEALTH_CHECKING",
+  /** The app answered its health check. It does not receive traffic yet. */
   HEALTHY: "HEALTHY",
-  /** Healthy AND reachable at its URL (routing registered). */
+  /** Moving the project's address to this deployment; done once the proxy confirms it. */
+  ROUTING: "ROUTING",
+  /** Healthy AND serving the project's address. */
   RUNNING: "RUNNING",
   FAILED: "FAILED",
   STOPPING: "STOPPING",
@@ -23,16 +31,31 @@ const S = DeploymentStatus;
  * loudly instead of silently corrupting a deployment's history.
  */
 const TRANSITIONS: Readonly<Record<DeploymentStatus, readonly DeploymentStatus[]>> = {
-  [S.PENDING]: [S.CLONING, S.FAILED],
-  [S.CLONING]: [S.BUILDING, S.FAILED],
+  [S.QUEUED]: [S.CLONING, S.FAILED],
+  [S.CLONING]: [S.DETECTING, S.FAILED],
+  [S.DETECTING]: [S.BUILDING, S.FAILED],
   [S.BUILDING]: [S.STARTING, S.FAILED],
-  [S.STARTING]: [S.HEALTHY, S.FAILED],
-  [S.HEALTHY]: [S.RUNNING, S.STOPPING, S.FAILED],
+  [S.STARTING]: [S.HEALTH_CHECKING, S.FAILED],
+  [S.HEALTH_CHECKING]: [S.HEALTHY, S.FAILED],
+  [S.HEALTHY]: [S.ROUTING, S.STOPPING, S.FAILED],
+  [S.ROUTING]: [S.RUNNING, S.FAILED],
   [S.RUNNING]: [S.STOPPING, S.STARTING, S.FAILED], // RUNNING → STARTING = restart
   [S.STOPPING]: [S.STOPPED, S.FAILED],
   [S.STOPPED]: [S.STARTING], // restart a stopped deployment
   [S.FAILED]: [], // terminal: recover by redeploying (a new deployment)
 };
+
+/** Statuses during which a deployment is still being worked on. */
+export const IN_PROGRESS_STATUSES: readonly DeploymentStatus[] = [
+  S.QUEUED,
+  S.CLONING,
+  S.DETECTING,
+  S.BUILDING,
+  S.STARTING,
+  S.HEALTH_CHECKING,
+  S.HEALTHY,
+  S.ROUTING,
+];
 
 export function canTransition(from: DeploymentStatus, to: DeploymentStatus): boolean {
   return TRANSITIONS[from].includes(to);

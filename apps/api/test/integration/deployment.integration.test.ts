@@ -93,7 +93,16 @@ describe("deployment engine against real Docker", () => {
     });
     created.push(record);
 
-    expect(statuses).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]);
+    expect(statuses).toEqual([
+      S.CLONING,
+      S.DETECTING,
+      S.BUILDING,
+      S.STARTING,
+      S.HEALTH_CHECKING,
+      S.HEALTHY,
+      S.ROUTING,
+      S.RUNNING,
+    ]);
     expect(buildOutput).toContain("FROM node:24-alpine");
     expect(record.containerPort).toBe(3000);
 
@@ -134,6 +143,7 @@ describe("deployment engine against real Docker", () => {
 
     expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
     expect(error.deployment.status).toBe(S.FAILED);
+    expect(error.deployment.failedStage).toBe(S.HEALTH_CHECKING);
     expect(error.message).toContain("exited with code 1");
     expect(runtimeLogs.join("")).toContain("fatal: missing DATABASE_URL");
   });

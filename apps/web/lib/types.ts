@@ -3,11 +3,14 @@
 // Dates arrive as ISO strings.
 
 export type DeploymentStatus =
-  | "PENDING"
+  | "QUEUED"
   | "CLONING"
+  | "DETECTING"
   | "BUILDING"
   | "STARTING"
+  | "HEALTH_CHECKING"
   | "HEALTHY"
+  | "ROUTING"
   | "RUNNING"
   | "FAILED"
   | "STOPPING"
@@ -38,6 +41,8 @@ export interface Deployment {
   hostPort: number | null;
   deploymentUrl: string | null;
   errorMessage: string | null;
+  /** The stage a FAILED deployment failed in (null for deployments from before V3). */
+  failedStage: DeploymentStatus | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

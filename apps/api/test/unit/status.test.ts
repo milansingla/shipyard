@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { AppError } from "../../src/lib/errors.js";
 import {
   DeploymentStatus as S,
+  IN_PROGRESS_STATUSES,
   assertTransition,
   canTransition,
   isTerminal,
@@ -10,7 +11,19 @@ import {
 
 describe("deployment status transitions", () => {
   it("allows the happy path in order", () => {
-    const path = [S.PENDING, S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING, S.STOPPING, S.STOPPED];
+    const path = [
+      S.QUEUED,
+      S.CLONING,
+      S.DETECTING,
+      S.BUILDING,
+      S.STARTING,
+      S.HEALTH_CHECKING,
+      S.HEALTHY,
+      S.ROUTING,
+      S.RUNNING,
+      S.STOPPING,
+      S.STOPPED,
+    ];
     for (let i = 1; i < path.length; i++) {
       expect(canTransition(path[i - 1]!, path[i]!)).toBe(true);
     }
@@ -21,7 +34,7 @@ describe("deployment status transitions", () => {
     expect(canTransition(S.STOPPED, S.STARTING)).toBe(true);
   });
 
-  it.each([S.PENDING, S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING, S.STOPPING])(
+  it.each([...IN_PROGRESS_STATUSES, S.RUNNING, S.STOPPING])(
     "allows %s → FAILED",
     (from) => {
       expect(canTransition(from, S.FAILED)).toBe(true);
@@ -29,8 +42,11 @@ describe("deployment status transitions", () => {
   );
 
   it.each([
-    [S.PENDING, S.RUNNING], // skipping the pipeline
-    [S.STARTING, S.RUNNING], // skipping the health check
+    [S.QUEUED, S.RUNNING], // skipping the pipeline
+    [S.CLONING, S.BUILDING], // skipping detection
+    [S.STARTING, S.HEALTHY], // skipping the health check
+    [S.HEALTH_CHECKING, S.RUNNING], // healthy is not yet serving
+    [S.HEALTHY, S.RUNNING], // serving requires routing first
     [S.BUILDING, S.CLONING], // going backwards
     [S.FAILED, S.STARTING], // FAILED is terminal
     [S.STOPPED, S.FAILED],
