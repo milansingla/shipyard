@@ -54,9 +54,10 @@ export class GitService implements SourceProvider {
         env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
       }));
     } catch (error) {
+      this.logger.warn({ err: error, repository: repository.cloneUrl }, "git ls-remote failed");
       throw new AppError(
         ErrorCode.GIT_CLONE_FAILED,
-        `Repository ${repository.cloneUrl} is not reachable. It may be private or not exist. (${errorMessage(error)})`,
+        `Can't read ${repository.cloneUrl}: ${explainGitFailure(errorMessage(error), { branch })}`,
         { statusCode: 422, cause: error },
       );
     }
@@ -97,13 +98,35 @@ export class GitService implements SourceProvider {
       });
       return { path: destination, commitSha: stdout.trim() };
     } catch (error) {
+      // Full git output (paths, flags) stays in the server log; users get the explanation.
+      this.logger.warn({ err: error, repository: repository.cloneUrl, branch }, "git clone failed");
       throw new AppError(
         ErrorCode.GIT_CLONE_FAILED,
-        `Could not clone ${repository.cloneUrl}${branch ? ` (branch ${branch})` : ""}: ${errorMessage(error)}`,
+        `Could not clone ${repository.cloneUrl}${branch ? ` (branch ${branch})` : ""}: ${explainGitFailure(errorMessage(error), { branch, destination })}`,
         { statusCode: 422, cause: error },
       );
     }
   }
+}
+
+/**
+ * Turns git's stderr into something a user can act on. Never returns server
+ * paths: the workspace directory is replaced, and unrecognised output is
+ * reduced to git's own `fatal:` line.
+ */
+export function explainGitFailure(raw: string, context: { branch?: string | null; destination?: string } = {}): string {
+  // GitHub answers "not found" for private repositories too, and git then asks for a username.
+  if (/could not read Username|Repository not found|Authentication failed|returned error: 40[134]/i.test(raw)) {
+    return "the repository doesn't exist or is private. Shipyard can only clone public repositories for now.";
+  }
+  if (/Remote branch .* not found|couldn't find remote ref/i.test(raw)) {
+    return `branch "${context.branch ?? "?"}" doesn't exist in the repository.`;
+  }
+  if (/timed out/i.test(raw)) return "git took too long and was stopped. Try again, or check the repository's size.";
+  if (/Could not resolve host|unable to access/i.test(raw)) return "couldn't reach the git host from this server.";
+
+  const fatal = raw.split("\n").find((line) => line.trim().startsWith("fatal:"))?.trim() ?? "git failed.";
+  return context.destination ? fatal.split(context.destination).join("<workspace>") : fatal;
 }
 
 /**

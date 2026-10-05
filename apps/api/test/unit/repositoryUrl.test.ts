@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../../src/lib/errors.js";
 import { validateBranchName } from "../../src/services/git/branchName.js";
+import { explainGitFailure } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
 
 const HOSTS = ["github.com"];
@@ -72,5 +73,26 @@ describe("validateBranchName", () => {
     "a".repeat(256),
   ])("rejects %j", (branch) => {
     expect(() => validateBranchName(branch)).toThrow(ValidationError);
+  });
+});
+
+describe("explainGitFailure", () => {
+  const destination = "/var/folders/9m/abc/T/shipyard/workspaces/c6f8bbb9";
+
+  it.each([
+    ["fatal: could not read Username for 'https://github.com': terminal prompts disabled", "doesn't exist or is private"],
+    ["remote: Repository not found.\nfatal: repository 'https://github.com/a/b.git/' not found", "doesn't exist or is private"],
+    ["warning: Could not find remote branch nope to clone.\nfatal: Remote branch nope not found in upstream origin", 'branch "nope"'],
+    ["git -c failed: Command timed out after 120000ms", "took too long"],
+    ["fatal: unable to access 'https://github.com/a/b.git/': Could not resolve host: github.com", "couldn't reach"],
+  ])("%j → %s", (raw, expected) => {
+    expect(explainGitFailure(raw, { branch: "nope", destination })).toContain(expected);
+  });
+
+  it("never echoes the server's workspace path", () => {
+    const raw = `git -c failed: Cloning into '${destination}'...\nfatal: destination path '${destination}' already exists`;
+    const message = explainGitFailure(raw, { destination });
+    expect(message).not.toContain("/var/folders");
+    expect(message).toBe("fatal: destination path '<workspace>' already exists");
   });
 });
