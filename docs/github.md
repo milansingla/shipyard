@@ -7,9 +7,10 @@ Code: [`modules/auth/`](../apps/api/src/modules/auth/),
 ## Setup
 
 1. GitHub → **Settings → Developer settings → OAuth Apps → New OAuth App**
-   - Homepage URL: `http://localhost:4000`
-   - Authorization callback URL: `http://localhost:4000/api/auth/github/callback`
-     (always `<SHIPYARD_PUBLIC_URL>/api/auth/github/callback`)
+   - Homepage URL: `http://localhost:3000`
+   - Authorization callback URL: `http://localhost:3000/api/auth/github/callback`
+     (always `<SHIPYARD_PUBLIC_URL>/api/auth/github/callback`; browsers reach the
+     API through the dashboard, which proxies `/api`)
 2. Generate a client secret.
 3. In `.env`:
    ```bash
@@ -18,14 +19,22 @@ Code: [`modules/auth/`](../apps/api/src/modules/auth/),
    SHIPYARD_SECRET_KEY=$(openssl rand -base64 32)   # paste the generated value
    SHIPYARD_ALLOWED_GITHUB_USERS=your-github-login     # comma-separated
    ```
-4. `npm run db:deploy && npm run dev:api`, then open
-   <http://localhost:4000/api/auth/github/login> in a browser.
-   After authorizing you land on `SHIPYARD_APP_URL`; `GET /api/auth/me` now returns you.
+4. Keep `SHIPYARD_PUBLIC_URL=http://localhost:3000` and `SHIPYARD_APP_URL=http://localhost:3000`
+   (the `.env.example` values).
+5. `npm run db:deploy`, then `npm run dev:api` and `npm run dev:web` in two
+   terminals, and open <http://localhost:3000>. **Sign in with GitHub** takes
+   you to GitHub and back to the dashboard.
+
+> Created the OAuth App with a `localhost:4000` callback (the M4 instructions)?
+> Change it to `localhost:3000` — GitHub rejects a callback URL that doesn't match.
 
 **Who may sign in.** Anyone who signs in can deploy code that runs on this
 host, so the allowlist is required. It is checked at sign-in *and* on every
 request: removing a login (and restarting) locks that person out immediately.
 `*` allows any GitHub account — only for an isolated test machine.
+
+A failed sign-in (cancelled, not allowlisted, expired) returns the browser to
+the dashboard with `?signin_error=<code>`, which it explains.
 
 Until all four variables are set, the API starts but every project/deployment
 endpoint answers `503 AUTH_NOT_CONFIGURED`, with a message saying what to set.

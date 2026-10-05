@@ -7,10 +7,11 @@ Render/Railway you can read end to end.
 GitHub repo → clone → detect → docker build → container → health check → URL
 ```
 
-> **Status: V2, Milestone 4.** GitHub sign-in with per-user projects, a REST
-> API with background deployments and logs, deployment history in PostgreSQL,
-> and Dockerfile generation for Node.js apps. The dashboard, webhooks and
-> Traefik are next.
+> **Status: V2, Milestone 5.** A dashboard to sign in with GitHub, pick a
+> repository and branch, deploy, and follow each deployment's stages and logs.
+> Behind it: a REST API with background deployments, per-user projects,
+> deployment history in PostgreSQL, and Dockerfile generation for Node.js apps.
+> Push-to-deploy webhooks and Traefik routing are next.
 > See [the roadmap](#roadmap).
 
 ## Requirements
@@ -56,16 +57,29 @@ a GitHub repo of your own to try a full deployment.
 it to the Dockerfile's `EXPOSE` port, or 3000 when there is none or when
 Shipyard generated the Dockerfile — see [build detection](docs/deployment-engine.md#build-detection--dockerfile-generation)).
 
-## Run the API
+## Run Shipyard
 
 ```bash
-npm run dev:api                       # http://localhost:4000, auto-reload
+npm run dev:api   # terminal 1 — API on http://localhost:4000
+npm run dev:web   # terminal 2 — dashboard on http://localhost:3000
+```
+
+Open <http://localhost:3000>, sign in with GitHub, choose **New project**, pick
+a repository and branch, and **Create and deploy**. The deployment page follows
+the pipeline stage by stage and streams the build log.
+
+The dashboard proxies `/api/*` to the API, so the browser only ever talks to
+one origin (no CORS; the session cookie and CSRF checks work unchanged). See
+[docs/dashboard.md](docs/dashboard.md).
+
+### Use the API directly
+
+```bash
 curl http://localhost:4000/api/health # {"data":{"status":"ok","docker":"reachable"}}
 ```
 
-Deploy through the API. Sign in first: open
-<http://localhost:4000/api/auth/github/login> in a browser, then copy the
-`shipyard_session` cookie (browser dev tools → Application → Cookies) for curl:
+Sign in through the dashboard, then copy the `shipyard_session` cookie
+(browser dev tools → Application → Cookies) for curl:
 
 ```bash
 export S='shipyard_session=<value>'
@@ -114,6 +128,7 @@ npm run typecheck
 ## Repository layout
 
 ```
+apps/web/            Next.js dashboard (proxies /api to apps/api)
 apps/api/            Express API + CLI + deployment engine (TypeScript)
   prisma/            schema + migrations
   src/modules/       projects, deployments (HTTP routes + database rules)
@@ -131,6 +146,7 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [Deployment engine](docs/deployment-engine.md) — pipeline, statuses, health checks, debugging
 - [Database](docs/database.md) — schema and persistence decisions
 - [GitHub](docs/github.md) — sign-in setup, sessions, authorization, repository selection
+- [Dashboard](docs/dashboard.md) — how the web app talks to the API, and its visual language
 - [Security](docs/security.md) — threat model and what is (not yet) safe
 - [Learning notes](docs/learning-notes.md) — concepts + interview prep per milestone
 
@@ -140,6 +156,6 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [x] **M2** PostgreSQL + Prisma, REST deployment API, deployment history
 - [x] **M3** Node.js project detection + Dockerfile generation
 - [x] **M4** GitHub OAuth, repository & branch selection
-- [ ] **M5** Next.js dashboard
+- [x] **M5** Next.js dashboard
 - [ ] **M6** GitHub webhooks (auto-deploy on push)
 - [ ] **M7** Traefik routing, zero-downtime redeploy

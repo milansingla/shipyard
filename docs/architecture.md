@@ -1,8 +1,12 @@
 # Architecture
 
-## Current shape (V2 · Milestone 4)
+## Current shape (V2 · Milestone 5)
 
 ```
+ Browser ──► apps/web (Next.js, :3000) ── pages + rewrite /api/* ──┐
+                                                                    │ same-origin proxy
+ CLI / curl ────────────────────────────────────────────────────────┤
+                                                                    ▼
             ┌──────────── apps/api ──────────────────────────────────────────────┐
  CLI ──────►│ cli.ts ─────────┐                                                  │
             │                 ├─► bootstrap.ts (composition root)                │

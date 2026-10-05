@@ -277,3 +277,66 @@ verifier — plus `/user`, repos and branches. The real `GitHubClient`,
 | Owner = single user               | Teams/RBAC                     | V4 scope; ownership column is the seam for it        |
 | Hand-rolled 15-line cookie reader | `cookie-parser`                | One function, fully tested; setting uses Express     |
 | Login allowlist by `login`        | By numeric id                  | Readable config; logins re-checked each request      |
+
+---
+
+## Milestone 5 — Next.js dashboard
+
+### Understand Before Interview
+
+#### Key concepts
+
+1. **Same-origin via a reverse-proxy rewrite** — the dashboard serves pages and
+   forwards `/api/*` to the API. The browser sees one origin: no CORS, cookies
+   stay first-party, CSRF checks unchanged.
+2. **Thin client** — the UI renders what the API returns; authorization and
+   state rules live only in the API. A UI bug can't grant access.
+3. **Polling with a stop condition** — poll only while a deployment is in
+   progress; stop when it reaches a terminal state.
+4. **Graceful auth expiry** — any 401 flips the whole app back to sign-in.
+5. **Clickjacking** — `frame-ancestors 'none'` so a page that can trigger
+   deployments can't be framed by another site.
+6. **Untrusted URLs in `href`** — only `http(s)` becomes a link
+   (`javascript:` would execute).
+7. **Design tokens** — colours named by meaning and mapped 1:1 to states.
+
+#### Likely interview questions
+
+**Why proxy /api through Next.js instead of calling the API from the browser?**
+Calling `localhost:4000` from `localhost:3000` is cross-origin: CORS with
+credentials, a cookie the browser may treat as third-party, and an Origin
+allowlist to keep in sync. A rewrite makes it one origin. Trade-off: one extra
+hop, and the dashboard's server must reach the API.
+
+**Why client components instead of Server Components fetching data?**
+Server-side fetching would have to forward the user's cookie from the
+dashboard server to the API on every request. Client components call `/api`
+directly with the browser's cookie, and polling naturally lives in the client.
+Server Components become worth it when pages need SEO or first-paint data.
+
+**Why polling, not WebSockets?**
+A handful of users and short deploys: polling every 1.5 s only while something
+changes is simple, stateless and survives API restarts. Live log streaming
+(SSE) is a V3 item.
+
+**How do you know which stage a FAILED deployment failed in?**
+The API stores only the current status, so the UI infers it from artefacts: no
+commit → the clone failed; commit but no container → detection or build;
+container → start/health check. Exact per-stage events are a V3 item
+(deployment events table).
+
+**How did you test the UI?**
+Pure logic (status model, formatting, API client) has unit tests. The pages
+were driven in a headless browser against the real API and PostgreSQL with
+seeded deployments in every state — which caught a layout bug where the stage
+scale's water level was computed against a stretched container.
+
+#### Trade-offs to be able to defend
+
+| Decision                  | Alternative                   | Why this, for now                                 |
+| ------------------------- | ----------------------------- | ------------------------------------------------- |
+| Rewrite proxy             | CORS                          | One origin, zero cookie/CSRF special cases        |
+| Hand-written API types    | Shared package / OpenAPI      | Small API; a shared package is the next step      |
+| `useApi` (40 lines)       | TanStack Query / SWR          | Only load + poll needed; no cache invalidation yet |
+| Polling                   | SSE / WebSockets              | Simple and stateless; SSE for logs in V3          |
+| No component tests        | Testing Library / Playwright  | Logic is unit-tested; a Playwright suite is a V3 item |

@@ -1,0 +1,70 @@
+@import "tailwindcss";
+
+/*
+ * Shipyard palette — the colours of a hull in dry dock.
+ *   primer  grey primer coat (page)       plate   bare plate (surfaces)
+ *   rivet   seams and rules                ink     hull-number paint (text, log panel)
+ *   sea     afloat: RUNNING                signal  code-flag yellow: work in progress
+ *   oxide   anti-fouling red: FAILED, and the hull below the waterline
+ * Every colour that carries meaning maps to exactly one deployment state.
+ */
+@theme {
+  --color-primer: #e7eae8;
+  --color-plate: #f5f6f5;
+  --color-rivet: #c3cac7;
+  --color-ink: #13212b;
+  --color-ink-soft: #4a5965;
+  --color-sea: #16705f;
+  --color-sea-wash: #d3e6e0;
+  --color-signal: #e8b007;
+  --color-oxide: #9f2f28;
+  --color-oxide-wash: #f1dcd9;
+
+  --font-display: var(--font-big-shoulders), "Arial Narrow", sans-serif;
+  --font-stencil: var(--font-big-shoulders-stencil), var(--font-big-shoulders), sans-serif;
+  --font-sans: var(--font-public-sans), system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-primer);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-ink);
+  outline-offset: 2px;
+}
+
+/* The waterline: hull paint above, anti-fouling red below. Used by the wordmark. */
+.waterline-text {
+  background: linear-gradient(to bottom, var(--color-ink) 0 58%, var(--color-oxide) 58% 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes signal-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.signal-pulse {
+  animation: signal-pulse 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
