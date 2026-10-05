@@ -1,3 +1,6 @@
+import { Writable } from "node:stream";
+import { StringDecoder } from "node:string_decoder";
+
 import type Docker from "dockerode";
 import tar from "tar-fs";
 
@@ -5,7 +8,7 @@ import { AppError, ErrorCode, NotFoundError, ValidationError, errorMessage } fro
 import type { Logger } from "../../lib/logger.js";
 import { createContextFilter } from "./buildContext.js";
 import { type BuildEvent, interpretBuildEvent } from "./buildOutput.js";
-import { type LogChunk, demuxDockerLogs } from "./logs.js";
+import { type LogChunk, type LogStream, demuxDockerLogs } from "./logs.js";
 import { isValidContainerReference } from "./naming.js";
 
 /**
@@ -310,6 +313,50 @@ export class DockerService {
       follow: false,
     });
     return demuxDockerLogs(buffer);
+  }
+
+  /**
+   * Follows a container's output (`docker logs --follow`) until it stops or
+   * `signal` aborts. Starts with the last `tail` lines.
+   */
+  async followLogs(
+    containerId: string,
+    tail: number,
+    onChunk: (chunk: LogChunk) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const stream = (await this.docker.getContainer(containerId).logs({
+      stdout: true,
+      stderr: true,
+      follow: true,
+      tail,
+      timestamps: false,
+    })) as unknown as NodeJS.ReadableStream & { destroy(): void };
+
+    const sink = (name: LogStream) => {
+      const decoder = new StringDecoder("utf8");
+      return new Writable({
+        write(chunk: Buffer, _encoding, done) {
+          const text = decoder.write(chunk);
+          if (text) onChunk({ stream: name, text });
+          done();
+        },
+      });
+    };
+    // Shipyard containers have no TTY, so the stream is multiplexed (see logs.ts).
+    this.docker.modem.demuxStream(stream, sink("stdout"), sink("stderr"));
+
+    await new Promise<void>((resolve) => {
+      const stop = () => {
+        stream.destroy();
+        resolve();
+      };
+      if (signal.aborted) return stop();
+      signal.addEventListener("abort", stop, { once: true });
+      stream.on("end", resolve);
+      stream.on("close", resolve);
+      stream.on("error", resolve);
+    });
   }
 
   async stopContainer(containerId: string): Promise<void> {

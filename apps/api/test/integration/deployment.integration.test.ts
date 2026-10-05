@@ -121,6 +121,14 @@ describe("deployment engine against real Docker", () => {
     const info = await dockerode.getContainer(record.containerId!).inspect();
     expect(info.HostConfig.PortBindings?.["3000/tcp"]?.[0]?.HostIp).toBe("127.0.0.1");
 
+    // Follow the output live; the stream ends by itself when the container stops.
+    let followed = "";
+    const following = service.followLogs(record.containerName, 10, (chunk) => void (followed += chunk.text), new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(followed).toBe("Server running on port 3000\n");
+    await docker.stopContainer(record.containerId!);
+    await following;
+
     const restarted = await service.restart(record.containerName, "hello-node");
     expect(restarted.status).toBe(S.RUNNING);
     expect(restarted.deploymentUrl).toMatch(/^http:\/\/localhost:\d+$/);

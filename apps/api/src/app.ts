@@ -71,7 +71,7 @@ export function createApp(deps: AppDeps): Express {
   }
   if (projects && deployments) {
     app.use("/api", createProjectRouter(projects, deployments));
-    app.use("/api", createDeploymentRouter(deployments));
+    app.use("/api", createDeploymentRouter(deployments, logger));
     if (deps.environment) app.use("/api", createEnvironmentRouter(deps.environment));
   }
 

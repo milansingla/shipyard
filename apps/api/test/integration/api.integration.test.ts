@@ -183,6 +183,11 @@ const fakeEngine: EngineLike = {
     return { running: true, exitCode: null, hostPort: 49_999 };
   },
   async ensureRoutable() {},
+  async followLogs(_containerId, _tail, onChunk, signal) {
+    onChunk({ stream: "stdout", text: "hello\n" });
+    // Like `docker logs --follow`: keeps going until the container stops or the client leaves.
+    await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+  },
 };
 
 const APP_URL = "http://localhost:3000";
@@ -1020,3 +1025,81 @@ describe("rollback", () => {
   });
 });
 
+
+describe("live logs (Server-Sent Events)", () => {
+  /** Reads SSE frames until `stopAfter` returns true or the stream ends. */
+  async function readEvents(
+    cookie: string,
+    route: string,
+    stopAfter: (events: Array<{ event: string; data: Record<string, unknown> }>) => boolean = () => false,
+  ) {
+    const abort = new AbortController();
+    const res = await fetch(`${api}${route}`, { headers: { cookie }, signal: abort.signal });
+    const events: Array<{ event: string; data: Record<string, unknown> }> = [];
+    if (!res.ok || !res.body) return { status: res.status, contentType: res.headers.get("content-type"), events };
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for await (const chunk of res.body) {
+        buffer += decoder.decode(chunk, { stream: true });
+        let end: number;
+        while ((end = buffer.indexOf("\n\n")) !== -1) {
+          const frame = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          const event = /^event: (.*)$/m.exec(frame)?.[1];
+          const data = /^data: (.*)$/m.exec(frame)?.[1];
+          if (event && data) events.push({ event, data: JSON.parse(data) });
+        }
+        if (stopAfter(events)) break;
+      }
+    } finally {
+      abort.abort();
+    }
+    return { status: res.status, contentType: res.headers.get("content-type"), events };
+  }
+
+  async function finishedDeployment(cookie: string, repo: string): Promise<string> {
+    const projectId = (await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` })).body!.data.id;
+    const id = (await call(cookie, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    return id;
+  }
+
+  it("streams a finished build log in full, then ends", async () => {
+    const alice = await sessionFor(ALICE);
+    const id = await finishedDeployment(alice, "sse-build");
+    const stored = (await call(alice, "GET", `/api/deployments/${id}/logs?type=build`)).body!.data.content as string;
+
+    const { status, contentType, events } = await readEvents(alice, `/api/deployments/${id}/logs/stream?type=build`);
+    expect(status).toBe(200);
+    expect(contentType).toContain("text/event-stream");
+    expect(events.at(-1)).toEqual({ event: "end", data: {} });
+    expect(events.filter((e) => e.event === "log").map((e) => e.data.text).join("")).toBe(stored);
+  });
+
+  it("streams the app's output while it runs", async () => {
+    const alice = await sessionFor(ALICE);
+    const id = await finishedDeployment(alice, "sse-runtime");
+    const { events } = await readEvents(alice, `/api/deployments/${id}/logs/stream?type=runtime`, (e) => e.length > 0);
+    expect(events[0]).toEqual({ event: "log", data: { text: "hello\n" } });
+  });
+
+  it("is owner-only, and caps open streams per user", async () => {
+    const alice = await sessionFor(ALICE);
+    const id = await finishedDeployment(alice, "sse-limits");
+    expect((await readEvents(await sessionFor(BOB), `/api/deployments/${id}/logs/stream`)).status).toBe(404);
+
+    // Ten runtime streams stay open (the fake container keeps running)…
+    const open = Array.from({ length: 10 }, () => new AbortController());
+    const responses = await Promise.all(
+      open.map((abort) => fetch(`${api}/api/deployments/${id}/logs/stream?type=runtime`, { headers: { cookie: alice }, signal: abort.signal })),
+    );
+    expect(responses.every((r) => r.status === 200)).toBe(true);
+    // …the eleventh is refused.
+    expect((await call(alice, "GET", `/api/deployments/${id}/logs/stream?type=runtime`)).status).toBe(429);
+
+    for (const abort of open) abort.abort();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await readEvents(alice, `/api/deployments/${id}/logs/stream?type=runtime`, (e) => e.length > 0)).status).toBe(200);
+  });
+});

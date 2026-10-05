@@ -1,6 +1,8 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { AppError, ErrorCode } from "../../lib/errors.js";
 
@@ -21,6 +23,8 @@ import { AppError, ErrorCode } from "../../lib/errors.js";
  */
 export class BuildLogStore {
   private readonly dir: string;
+  /** Logs being written by this process right now. */
+  private readonly writing = new Set<string>();
 
   constructor(
     dataDir: string,
@@ -32,7 +36,39 @@ export class BuildLogStore {
 
   async open(deploymentId: string): Promise<BuildLogWriter> {
     await fsp.mkdir(this.dir, { recursive: true });
-    return new BuildLogWriter(this.pathFor(deploymentId), this.keepBytes, this.hardLimitBytes);
+    const writer = new BuildLogWriter(this.pathFor(deploymentId), this.keepBytes, this.hardLimitBytes, () =>
+      this.writing.delete(deploymentId),
+    );
+    this.writing.add(deploymentId);
+    return writer;
+  }
+
+  /**
+   * Streams the log as it is written, like `tail -f`: everything so far, then
+   * new bytes every `pollMs`, until the build is over (its writer closed).
+   * Reads the file by byte offset, so it doesn't depend on being in the
+   * process that writes it. Multi-byte characters split across reads are
+   * decoded correctly.
+   */
+  async follow(deploymentId: string, onText: (text: string) => void, signal: AbortSignal, pollMs = 500): Promise<void> {
+    const file = this.pathFor(deploymentId);
+    const decoder = new StringDecoder("utf8");
+    let offset = 0;
+    while (!signal.aborted) {
+      const active = this.writing.has(deploymentId); // checked before reading, so the last read sees the final bytes
+      const chunk = await readFrom(file, offset);
+      if (chunk === null) return; // trimmed when the build ended: the rest is in the stored log
+      if (chunk.length > 0) {
+        offset += chunk.length;
+        onText(decoder.write(chunk));
+      }
+      if (!active) {
+        const rest = decoder.end();
+        if (rest) onText(rest);
+        return;
+      }
+      await sleep(pollMs, undefined, { signal }).catch(() => {});
+    }
   }
 
   /** Returns "" when no log exists (e.g. the deployment never started). */
@@ -58,6 +94,26 @@ export class BuildLogStore {
   }
 }
 
+/** Bytes from `offset` to the end; empty if the file doesn't exist yet; null if it shrank below `offset`. */
+async function readFrom(file: string, offset: number): Promise<Buffer | null> {
+  let handle: fsp.FileHandle;
+  try {
+    handle = await fsp.open(file, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return Buffer.alloc(0);
+    throw error;
+  }
+  try {
+    const { size } = await handle.stat();
+    if (size < offset) return null;
+    const buffer = Buffer.alloc(size - offset);
+    await handle.read(buffer, 0, buffer.length, offset);
+    return buffer;
+  } finally {
+    await handle.close();
+  }
+}
+
 export class BuildLogWriter {
   private readonly stream: fs.WriteStream;
   private bytesWritten = 0;
@@ -67,6 +123,7 @@ export class BuildLogWriter {
     private readonly filePath: string,
     private readonly keepBytes: number,
     private readonly hardLimitBytes: number,
+    private readonly onClosed: () => void = () => {},
   ) {
     this.stream = fs.createWriteStream(filePath, { flags: "a" });
   }
@@ -84,10 +141,14 @@ export class BuildLogWriter {
   }
 
   async close(): Promise<void> {
-    await new Promise<void>((resolve, reject) => {
-      this.stream.end((error?: Error | null) => (error ? reject(error) : resolve()));
-    });
-    await this.trimToTail();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        this.stream.end((error?: Error | null) => (error ? reject(error) : resolve()));
+      });
+      await this.trimToTail();
+    } finally {
+      this.onClosed();
+    }
   }
 
   private async trimToTail(): Promise<void> {

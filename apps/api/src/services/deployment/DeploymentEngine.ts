@@ -31,6 +31,7 @@ export type EngineDocker = Pick<
   | "inspectManagedContainer"
   | "getContainerState"
   | "getLogs"
+  | "followLogs"
   | "stopContainer"
   | "restartContainer"
   | "connectToNetwork"
@@ -205,6 +206,17 @@ export class DeploymentEngine {
   async getLogs(containerReference: string, tail?: number): Promise<LogChunk[]> {
     const container = await this.deps.docker.inspectManagedContainer(containerReference);
     return this.deps.docker.getLogs(container.id, tail);
+  }
+
+  /** Follows a Shipyard container's output until it stops or `signal` aborts. */
+  async followLogs(
+    containerReference: string,
+    tail: number,
+    onChunk: (chunk: LogChunk) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const container = await this.deps.docker.inspectManagedContainer(containerReference);
+    await this.deps.docker.followLogs(container.id, tail, onChunk, signal);
   }
 
   /** Idempotent: stopping an already-stopped container succeeds. */

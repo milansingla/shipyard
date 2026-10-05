@@ -219,6 +219,30 @@ memory limit) before becoming healthy.`
 | `system`  | Shipyard's own progress messages   | same build log file                                     |
 | `runtime` | app stdout/stderr                  | Docker's json-file driver (3 × 10 MB), read on demand; a failed start's last 50 lines are copied into the build log, prefixed `[app]` |
 
+### Live logs (Server-Sent Events)
+
+`GET /api/deployments/:id/logs/stream?type=build|runtime[&tail=200]` keeps the
+response open and sends `event: log` frames (`{"text": …}`) as output
+appears, then `event: end` (`{"message"?}`) when there is nothing more: the
+build finished, or the container stopped. The dashboard uses it while a
+deployment is building or running.
+
+- **Build**: the log file is followed by byte offset, like `tail -f`, until
+  its writer closes. It reads the file, not in-memory events, so it doesn't
+  depend on being in the process that runs the build.
+- **Runtime**: `docker logs --follow`, starting with the last `tail` lines.
+- Every connection starts with a snapshot; when EventSource reconnects, the
+  dashboard replaces what it shows. No duplicated lines, no resume protocol.
+- A keep-alive comment every 15s stops proxies closing idle streams; a stream
+  is recycled after an hour; at most 10 open streams per user (429 beyond).
+- Through the dashboard's proxy the frames arrive unbuffered (checked with a
+  container printing once a second).
+
+**Why SSE and not WebSockets?** Logs only flow server → browser. SSE is plain
+HTTP: it works through the existing proxy, cookies and Origin rules, and the
+browser reconnects automatically. WebSockets would add a second protocol and
+server for no gain here.
+
 `GET /api/deployments/:id/logs?type=build` returns the build log;
 `?type=runtime&tail=200` reads the container's output. Build logs stop growing
 at 20 MB and are trimmed to their last 2 MB when the build ends (the error is

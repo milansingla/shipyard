@@ -22,7 +22,7 @@ import type { BuildLogStore, BuildLogWriter } from "./BuildLogStore.js";
 
 export type EngineLike = Pick<
   DeploymentEngine,
-  "run" | "stop" | "restart" | "getLogs" | "destroy" | "inspect" | "ensureRoutable"
+  "run" | "stop" | "restart" | "getLogs" | "followLogs" | "destroy" | "inspect" | "ensureRoutable"
 >;
 
 export interface DeploymentServiceDeps {
@@ -32,7 +32,7 @@ export interface DeploymentServiceDeps {
   environment: Pick<EnvironmentService, "forDeployment"> | null;
   /** The same router the engine uses: stopping takes a deployment out of it, startup rebuilds it. */
   router: Pick<Router, "urlFor" | "deactivate" | "sync">;
-  buildLogs: Pick<BuildLogStore, "open" | "read" | "remove">;
+  buildLogs: Pick<BuildLogStore, "open" | "read" | "remove" | "follow">;
   allowedGitHosts: readonly string[];
   logger: Logger;
 }
@@ -146,6 +146,34 @@ export class DeploymentService {
       if (error instanceof NotFoundError) {
         return { type, content: "", message: "The container no longer exists." };
       }
+      throw error;
+    }
+  }
+
+  /**
+   * Streams a deployment's logs as they are produced: the build log until the
+   * build ends, or the app's output (starting with its last `tail` lines)
+   * until the container stops. Resolves when there is nothing more to send.
+   */
+  async followLogs(
+    id: string,
+    ownerId: string,
+    type: LogType,
+    tail: number,
+    onText: (text: string) => void,
+    signal: AbortSignal,
+  ): Promise<{ message?: string }> {
+    const deployment = await this.get(id, ownerId);
+    if (type === "build") {
+      await this.deps.buildLogs.follow(id, onText, signal);
+      return {};
+    }
+    if (!deployment.containerId) return { message: "This deployment never started a container." };
+    try {
+      await this.deps.engine.followLogs(deployment.containerId, tail, (chunk) => onText(chunk.text), signal);
+      return {};
+    } catch (error) {
+      if (error instanceof NotFoundError) return { message: "The container no longer exists." };
       throw error;
     }
   }

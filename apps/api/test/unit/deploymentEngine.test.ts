@@ -121,6 +121,7 @@ function harness(
     },
     inspectManagedContainer: unused,
     restartContainer: unused,
+    followLogs: unused,
     connectToNetwork: unused,
     removeContainer: unused,
     removeImage: unused,

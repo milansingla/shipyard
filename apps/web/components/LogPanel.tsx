@@ -2,9 +2,9 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { ApiError, api } from "@/lib/api";
 import { isInProgress } from "@/lib/status";
 import type { DeploymentLogs, DeploymentStatus } from "@/lib/types";
-import { useApi } from "@/lib/useApi";
 
 type LogType = "build" | "runtime";
 
@@ -16,15 +16,54 @@ const TABS: Array<{ type: LogType; label: string }> = [
 /** Statuses in which the app's container is running and may print output. */
 const CONTAINER_UP: DeploymentStatus[] = ["HEALTH_CHECKING", "HEALTHY", "ROUTING", "RUNNING"];
 
-/** Build log while deploying, then the app's own output. Refreshes while there is something new to see. */
+/** The browser keeps at most this much of a long-running app's output. */
+const MAX_CHARS = 1_000_000;
+
+interface LogState {
+  content: string | null;
+  message?: string;
+  error?: ApiError;
+}
+
+/**
+ * Build log while deploying, then the app's own output. While there is
+ * something new to see, the API streams it (Server-Sent Events); otherwise
+ * the stored log is fetched once.
+ */
 export function LogPanel({ deploymentId, status }: { deploymentId: string; status: DeploymentStatus }) {
   const [type, setType] = useState<LogType>(status === "RUNNING" ? "runtime" : "build");
   const live = type === "build" ? isInProgress(status) : CONTAINER_UP.includes(status);
+  const [log, setLog] = useState<LogState>({ content: null });
+  const query = `type=${type}${type === "runtime" ? "&tail=500" : ""}`;
 
-  const { data, error } = useApi<DeploymentLogs>(
-    `/deployments/${deploymentId}/logs?type=${type}${type === "runtime" ? "&tail=500" : ""}`,
-    { pollMs: () => (live ? 2_000 : null) },
-  );
+  useEffect(() => {
+    setLog({ content: null });
+    if (!live) {
+      let cancelled = false;
+      api<DeploymentLogs>(`/deployments/${deploymentId}/logs?${query}`).then(
+        (data) => !cancelled && setLog({ content: data.content, message: data.message }),
+        (error: unknown) => !cancelled && setLog({ content: null, error: error instanceof ApiError ? error : undefined }),
+      );
+      return () => void (cancelled = true);
+    }
+
+    const source = new EventSource(`/api/deployments/${deploymentId}/logs/stream?${query}`);
+    // Every connection (also a reconnect) starts with a full snapshot: start over.
+    source.onopen = () => setLog({ content: "" });
+    source.addEventListener("log", (event) => {
+      const { text } = JSON.parse(event.data) as { text: string };
+      setLog((previous) => ({ content: ((previous.content ?? "") + text).slice(-MAX_CHARS) }));
+    });
+    source.addEventListener("end", (event) => {
+      source.close();
+      const { message } = JSON.parse(event.data) as { message?: string };
+      if (message) setLog((previous) => ({ ...previous, message }));
+    });
+    return () => source.close();
+  }, [deploymentId, query, live]);
+
+  const data = log.content === null && !log.message ? undefined : log;
+  const error = log.error;
 
   // Follow new output, but only if the reader is already at the bottom.
   const scroller = useRef<HTMLPreElement>(null);

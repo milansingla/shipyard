@@ -19,6 +19,52 @@ describe("BuildLogStore", () => {
     await fs.rm(dataDir, { recursive: true, force: true });
   });
 
+  it("follows a log while it is written, decoding characters split across reads, and ends with the build", async () => {
+    const store = new BuildLogStore(dataDir);
+    const writer = await store.open(ID); // marks the build as in progress
+    const file = path.join(dataDir, "logs", `${ID}.log`);
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 40));
+
+    let received = "";
+    const done = store.follow(ID, (text) => void (received += text), new AbortController().signal, 10);
+    await fs.appendFile(file, "Step 1/2\n");
+    await pause();
+    const ship = Buffer.from("⛵");
+    await fs.appendFile(file, ship.subarray(0, 1)); // half a character…
+    await pause();
+    await fs.appendFile(file, Buffer.concat([ship.subarray(1), Buffer.from(" Step 2/2\n")]));
+    await pause();
+    expect(received).toBe("Step 1/2\n⛵ Step 2/2\n");
+
+    await writer.close();
+    await done; // ends because the build ended
+  });
+
+  it("follow() of a finished build sends the whole log and ends; a missing one ends empty", async () => {
+    const store = new BuildLogStore(dataDir);
+    const writer = await store.open(ID);
+    writer.write("all done\n");
+    await writer.close();
+
+    let received = "";
+    await store.follow(ID, (text) => void (received += text), new AbortController().signal, 10);
+    expect(received).toBe("all done\n");
+
+    let nothing = "";
+    await store.follow("00000000-0000-4000-8000-000000000000", (text) => void (nothing += text), new AbortController().signal, 10);
+    expect(nothing).toBe("");
+  });
+
+  it("stops following when the client goes away", async () => {
+    const store = new BuildLogStore(dataDir);
+    const writer = await store.open(ID);
+    const abort = new AbortController();
+    const done = store.follow(ID, () => {}, abort.signal, 10);
+    abort.abort();
+    await expect(done).resolves.toBeUndefined();
+    await writer.close();
+  });
+
   it("writes, reads back and removes a log", async () => {
     const store = new BuildLogStore(dataDir);
     const writer = await store.open(ID);
