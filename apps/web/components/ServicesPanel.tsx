@@ -14,6 +14,8 @@ const FIELD = "h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink";
 interface Draft {
   name: string;
   type: ServiceType;
+  /** PostgreSQL major version, for databases. */
+  version: string;
   sourceDir: string;
   port: string;
   isPublic: boolean;
@@ -21,7 +23,7 @@ interface Draft {
   buildCommand: string;
 }
 
-const EMPTY: Draft = { name: "", type: "WEB", sourceDir: ".", port: "", isPublic: false, startCommand: "", buildCommand: "" };
+const EMPTY: Draft = { name: "", type: "WEB", version: "17", sourceDir: ".", port: "", isPublic: false, startCommand: "", buildCommand: "" };
 
 /**
  * Asks before something whose data would be deleted for good. With volumes,
@@ -42,6 +44,7 @@ export function confirmDeletion(what: string, name: string, volumes: Volume[], r
 
 /** Where a service can be reached, in words a person can use. */
 function address(service: Service): { text: string; href: string | null } {
+  if (service.type === "POSTGRES") return { text: `postgres://${service.name}:5432 inside the project`, href: null };
   if (service.type === "WORKER") return { text: "Background worker, no address", href: null };
   if (!service.public) return { text: `http://${service.name}:${service.port ?? "<port>"} inside the project`, href: null };
   const url = safeHttpUrl(service.latestDeployment?.status === "RUNNING" ? service.latestDeployment.deploymentUrl : null);
@@ -69,6 +72,7 @@ export function ServicesPanel({
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   /** The service whose "add a volume" form is open. */
   const [volumeFor, setVolumeFor] = useState<string | null>(null);
   const [volumeDraft, setVolumeDraft] = useState({ name: "", mountPath: "" });
@@ -76,6 +80,7 @@ export function ServicesPanel({
   async function act(key: string, fn: () => Promise<void>) {
     setBusy(key);
     setError(null);
+    setNotice(null);
     try {
       await fn();
       await services.reload();
@@ -89,6 +94,16 @@ export function ServicesPanel({
   const add = (event: FormEvent) => {
     event.preventDefault();
     void act("add", async () => {
+      if (draft.type === "POSTGRES") {
+        const database = await api<Service & { connectionVariable: string }>(`/projects/${projectId}/services`, {
+          method: "POST",
+          body: { name: draft.name.trim(), type: "POSTGRES", version: Number(draft.version) },
+        });
+        setNotice(`Added ${database.name}. Your services get its address in ${database.connectionVariable}; deploy to start it.`);
+        setDraft(EMPTY);
+        setAdding(false);
+        return;
+      }
       await api(`/projects/${projectId}/services`, {
         method: "POST",
         body: {
@@ -147,7 +162,13 @@ export function ServicesPanel({
               <div className="min-w-0">
                 <span className="font-semibold">{service.name}</span>
                 <span className="ml-2 rounded-sm border border-rivet px-1.5 py-0.5 text-xs text-ink-soft">
-                  {service.type === "WORKER" ? "worker" : service.public ? "public" : "private"}
+                  {service.type === "POSTGRES"
+                    ? service.image?.replace(/^postgres:(\d+).*/, "PostgreSQL $1")
+                    : service.type === "WORKER"
+                      ? "worker"
+                      : service.public
+                        ? "public"
+                        : "private"}
                 </span>
                 {service.managedBy === "CONFIG_FILE" && (
                   <span
@@ -162,7 +183,11 @@ export function ServicesPanel({
                   </span>
                 )}
                 <p className="mt-1 truncate text-xs text-ink-soft">
-                  <Mono>{service.sourceDir === "." ? "repository root" : service.sourceDir}</Mono>
+                  {service.type === "POSTGRES" ? (
+                    "Database, data kept on this server"
+                  ) : (
+                    <Mono>{service.sourceDir === "." ? "repository root" : service.sourceDir}</Mono>
+                  )}
                 </p>
               </div>
               <div className="min-w-0">
@@ -220,7 +245,8 @@ export function ServicesPanel({
                 )}
               </div>
 
-              {(service.volumes.length > 0 || canEdit) && (
+              {/* A database's storage is Shipyard's to manage. */}
+              {(service.volumes.length > 0 || canEdit) && service.type !== "POSTGRES" && (
                 <div className="sm:col-span-3">
                   {service.volumes.length > 0 && (
                     <ul className="flex flex-wrap gap-2" aria-label={`Volumes of ${service.name}`}>
@@ -317,7 +343,7 @@ export function ServicesPanel({
               onChange={(event) => setDraft({ ...draft, name: event.target.value })}
               required
               maxLength={20}
-              placeholder="api"
+              placeholder={draft.type === "POSTGRES" ? "db" : "api"}
               className={`${FIELD} font-mono`}
             />
           </label>
@@ -326,43 +352,60 @@ export function ServicesPanel({
             <select value={draft.type} onChange={(event) => setDraft({ ...draft, type: event.target.value as ServiceType })} className={FIELD}>
               <option value="WEB">Web: serves HTTP</option>
               <option value="WORKER">Worker: runs in the background</option>
+              <option value="POSTGRES">PostgreSQL database</option>
             </select>
           </label>
-          <label className="flex flex-col gap-2">
-            <Label>Directory</Label>
-            <input
-              value={draft.sourceDir}
-              onChange={(event) => setDraft({ ...draft, sourceDir: event.target.value })}
-              placeholder="apps/api"
-              className={`${FIELD} font-mono`}
-            />
-          </label>
-          {draft.type === "WEB" && (
+          {draft.type === "POSTGRES" ? (
             <>
               <label className="flex flex-col gap-2">
-                <Label>Port</Label>
+                <Label>Version</Label>
+                <select value={draft.version} onChange={(event) => setDraft({ ...draft, version: event.target.value })} className={FIELD}>
+                  <option value="17">PostgreSQL 17</option>
+                  <option value="16">PostgreSQL 16</option>
+                </select>
+              </label>
+              <p className="text-sm text-ink-soft sm:col-span-3">
+                Runs on this server, reachable only by the project&apos;s services. Shipyard generates its password and gives
+                your services its address as <Mono>DATABASE_URL</Mono>. There are no automatic backups.
+              </p>
+            </>
+          ) : (
+            <>
+              <label className="flex flex-col gap-2">
+                <Label>Directory</Label>
                 <input
-                  type="number"
-                  min={1}
-                  max={65535}
-                  value={draft.port}
-                  onChange={(event) => setDraft({ ...draft, port: event.target.value })}
-                  placeholder="Detected"
-                  className={FIELD}
+                  value={draft.sourceDir}
+                  onChange={(event) => setDraft({ ...draft, sourceDir: event.target.value })}
+                  placeholder="apps/api"
+                  className={`${FIELD} font-mono`}
                 />
               </label>
-              <label className="flex items-center gap-3 text-sm sm:col-span-2">
-                <input
-                  type="checkbox"
-                  checked={draft.isPublic}
-                  onChange={(event) => setDraft({ ...draft, isPublic: event.target.checked })}
-                  className="size-4 accent-ink"
-                />
-                <span>
-                  <span className="font-semibold">Public</span>
-                  <span className="block text-ink-soft">Gets its own address. Otherwise only the project&apos;s other services can reach it.</span>
-                </span>
-              </label>
+              {draft.type === "WEB" && (
+                <>
+                  <label className="flex flex-col gap-2">
+                    <Label>Port</Label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={draft.port}
+                      onChange={(event) => setDraft({ ...draft, port: event.target.value })}
+                      placeholder="Detected"
+                      className={FIELD}
+                    />
+                  </label>
+                  <label className="flex items-center gap-3 text-sm sm:col-span-2">
+                    <input
+                      type="checkbox"
+                      checked={draft.isPublic}
+                      onChange={(event) => setDraft({ ...draft, isPublic: event.target.checked })}
+                      className="size-4 accent-ink"
+                    />
+                    <span>
+                      <span className="font-semibold">Public</span>
+                      <span className="block text-ink-soft">Gets its own address. Otherwise only the project&apos;s other services can reach it.</span>
+                    </span>
+                  </label>
             </>
           )}
           <label className="flex flex-col gap-2 sm:col-span-3">
@@ -374,15 +417,23 @@ export function ServicesPanel({
               className={`${FIELD} font-mono`}
             />
           </label>
+            </>
+          )}
           <div className="flex gap-3 sm:col-span-3">
             <Button type="submit" busy={busy === "add"}>
-              Add service
+              {draft.type === "POSTGRES" ? "Add database" : "Add service"}
             </Button>
             <Button variant="secondary" onClick={() => setAdding(false)}>
               Cancel
             </Button>
           </div>
         </form>
+      )}
+
+      {notice && (
+        <p role="status" className="mt-4 border-l-4 border-ink bg-primer px-4 py-3 text-sm">
+          {notice}
+        </p>
       )}
 
       {error && (

@@ -29,6 +29,8 @@ export const ShipyardLabel = {
   HEALTH_TIMEOUT_MS: "shipyard.health-timeout-ms",
   /** The service's name within its project. */
   SERVICE: "shipyard.service",
+  /** "docker": healthy when the image's own check (Docker HEALTHCHECK) says so, e.g. pg_isready. */
+  HEALTH_KIND: "shipyard.health-kind",
 } as const;
 
 /** How a container is health-checked. */
@@ -46,6 +48,8 @@ export interface ContainerState {
   exitCode: number | null;
   /** The kernel killed it for exceeding its memory limit. */
   oomKilled: boolean;
+  /** Docker's own health status, for containers created with a health command. */
+  health?: "starting" | "healthy" | "unhealthy" | null;
 }
 
 export type RestartPolicy = "NO" | "ON_FAILURE" | "UNLESS_STOPPED";
@@ -75,6 +79,8 @@ export interface ManagedContainer extends ContainerState {
   healthCheck: HealthCheckSettings;
   /** Published port the health check is sent to (the app's own, or a separate health port). */
   healthHostPort: number | null;
+  /** Checked by Docker with a command (HEALTH_KIND "docker"), not over HTTP; nothing is published. */
+  dockerHealthCheck: boolean;
 }
 
 export interface CreateContainerOptions {
@@ -97,6 +103,8 @@ export interface CreateContainerOptions {
   healthCheckPort?: number | null;
   /** Default: no limits, never restarted by Docker. */
   resources?: ContainerResources;
+  /** A command Docker runs inside the container to decide it is healthy (exit 0), every second. */
+  healthCommand?: string[];
 }
 
 export interface StartedContainer {
@@ -218,6 +226,34 @@ export class DockerService {
   }
 
   /** Pushes a local image to its registry; credentials go in the request, never in logs. */
+  /** Pulls a prebuilt image unless it is already here: the same tag gives the same image on every deploy. */
+  async ensureImage(imageName: string, onLog: (text: string) => void): Promise<void> {
+    const present = await this.docker
+      .getImage(imageName)
+      .inspect()
+      .then(
+        () => true,
+        (error: unknown) => {
+          if (isDockerNotFound(error)) return false;
+          throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not inspect image", error);
+        },
+      );
+    if (present) {
+      onLog(`Using ${imageName} (already on this server)\n`);
+      return;
+    }
+    onLog(`Pulling ${imageName}\n`);
+    try {
+      const stream = await this.docker.pull(imageName);
+      await new Promise<void>((resolve, reject) =>
+        this.docker.modem.followProgress(stream, (error: Error | null) => (error ? reject(error) : resolve())),
+      );
+    } catch (error) {
+      throw this.dockerError(ErrorCode.IMAGE_PULL_FAILED, `Could not pull ${imageName}`, error);
+    }
+    onLog(`Pulled ${imageName}\n`);
+  }
+
   async pushImage(imageName: string, credentials: RegistryCredentials | null, onLog: (text: string) => void): Promise<void> {
     let stream: NodeJS.ReadableStream;
     try {
@@ -267,6 +303,16 @@ export class DockerService {
           ...(options.containerPort === null ? [] : [`PORT=${options.containerPort}`]),
         ],
         ...(options.command ? { Cmd: options.command } : {}),
+        ...(options.healthCommand && {
+          Healthcheck: {
+            Test: ["CMD", ...options.healthCommand],
+            Interval: 1_000_000_000,
+            Timeout: 5_000_000_000,
+            Retries: 3,
+            // Failures while it initialises (a new database) don't count.
+            StartPeriod: 300_000_000_000,
+          },
+        }),
         Labels: options.labels,
         ExposedPorts: Object.fromEntries(ports.map((port) => [`${port}/tcp`, {}])),
         HostConfig: {
@@ -438,6 +484,8 @@ export class DockerService {
       healthCheck,
       healthHostPort: containerPort ? publishedPort(healthCheck.port ?? containerPort) : null,
       networks: Object.keys(info.NetworkSettings.Networks ?? {}),
+      dockerHealthCheck: labels[ShipyardLabel.HEALTH_KIND] === "docker",
+      health: (info.State.Health?.Status as ContainerState["health"]) ?? null,
       // A crash-looping container under a restart policy reports Running *and* Restarting.
       running: info.State.Running && !info.State.Restarting,
       exitCode: info.State.Running && !info.State.Restarting ? null : info.State.ExitCode,
@@ -446,8 +494,8 @@ export class DockerService {
   }
 
   async getContainerState(containerId: string): Promise<ContainerState> {
-    const { running, exitCode, oomKilled } = await this.inspectManagedContainer(containerId);
-    return { running, exitCode, oomKilled };
+    const { running, exitCode, oomKilled, health } = await this.inspectManagedContainer(containerId);
+    return { running, exitCode, oomKilled, health };
   }
 
   async getLogs(containerId: string, tail: number = DEFAULT_LOG_TAIL): Promise<LogChunk[]> {
@@ -542,9 +590,13 @@ export class DockerService {
     }
   }
 
+  /** Removes an image Shipyard built. Never a prebuilt one (postgres:17-alpine): other projects may use it. */
   async removeImage(imageName: string): Promise<void> {
     try {
-      await this.docker.getImage(imageName).remove({ force: true });
+      const image = this.docker.getImage(imageName);
+      const info = (await image.inspect()) as { Config?: { Labels?: Record<string, string> | null } };
+      if (info.Config?.Labels?.[ShipyardLabel.MANAGED] !== "true") return;
+      await image.remove({ force: true });
     } catch (error) {
       if (isDockerNotFound(error)) return;
       throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not remove image", error);

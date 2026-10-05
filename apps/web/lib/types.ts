@@ -102,7 +102,7 @@ export interface Project {
   updatedAt: string;
 }
 
-export type ServiceType = "WEB" | "WORKER";
+export type ServiceType = "WEB" | "WORKER" | "POSTGRES";
 
 export interface Service {
   id: string;
@@ -114,6 +114,8 @@ export interface Service {
   startCommand: string | null;
   port: number | null;
   public: boolean;
+  /** The prebuilt image a database runs, e.g. postgres:17-alpine; null for services built from the repository. */
+  image: string | null;
   /** Owns the project's own address. */
   primary: boolean;
   /** Declared in the repository's shipyard.yaml, or in the dashboard. */

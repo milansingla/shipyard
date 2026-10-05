@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { healthCheckPathSchema } from "../projects/project.schemas.js";
+import { DEFAULT_POSTGRES_VERSION, POSTGRES_VERSIONS } from "./postgres.js";
 
 /** A DNS label (its name on the project network), short enough to prefix a project's hostname. */
 export const serviceNameSchema = z
@@ -42,6 +43,20 @@ export const createServiceSchema = z
   .strictObject({ name: serviceNameSchema, type: z.enum(["WEB", "WORKER"]).default("WEB"), ...settings })
   .refine((input) => input.type === "WEB" || input.public !== true, { message: "Workers can't be public.", path: ["public"] });
 
+/** A PostgreSQL service: a name and a major version. Shipyard sets everything else. */
+export const createDatabaseSchema = z.strictObject({
+  name: serviceNameSchema,
+  type: z.literal("POSTGRES"),
+  version: z.union(POSTGRES_VERSIONS.map((v) => z.literal(v))).default(DEFAULT_POSTGRES_VERSION),
+  cpuLimit: settings.cpuLimit,
+  memoryLimitMb: settings.memoryLimitMb,
+});
+
+/** What can change on a database: its resources. Not its version (the data directory is version-specific). */
+export const updateDatabaseSchema = z
+  .strictObject({ cpuLimit: settings.cpuLimit, memoryLimitMb: settings.memoryLimitMb })
+  .refine((input) => Object.keys(input).length > 0, "Nothing to update.");
+
 export const updateServiceSchema = z
   .strictObject(settings)
   .refine((input) => Object.keys(input).length > 0, "Nothing to update.");
@@ -65,4 +80,5 @@ export const mountPathSchema = z
 export const createVolumeSchema = z.strictObject({ name: volumeNameSchema, mountPath: mountPathSchema });
 
 export type CreateServiceInput = z.infer<typeof createServiceSchema>;
+export type CreateDatabaseInput = z.infer<typeof createDatabaseSchema>;
 export type UpdateServiceInput = z.infer<typeof updateServiceSchema>;

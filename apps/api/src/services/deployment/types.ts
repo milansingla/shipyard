@@ -4,7 +4,8 @@ import type { DeploymentStatus } from "./status.js";
 
 /** Which service of a project a job deploys, and how. */
 export interface ServiceSpec {
-  type: "WEB" | "WORKER";
+  /** POSTGRES runs `image`; WEB and WORKER are built from the repository. */
+  type: "WEB" | "WORKER" | "POSTGRES";
   /** Directory in the repository to build ("." = the root). Validated by the caller and again by the engine. */
   sourceDir: string;
   buildCommand: string | null;
@@ -15,6 +16,15 @@ export interface ServiceSpec {
   /** The project's private network, and this service's name in it. */
   network: string;
   alias: string;
+  /** A prebuilt image to run instead of cloning and building the repository. */
+  image?: { name: string; healthCommand: string[] } | null;
+  /** Variables Shipyard sets itself; they win over the project's. */
+  environment?: Record<string, string>;
+  /**
+   * The service keeps state another copy must never share (a database's
+   * data directory): stop the old container before starting the new one.
+   */
+  stopFirst?: boolean;
 }
 
 /** What to deploy. Built by the caller from already-validated input. */

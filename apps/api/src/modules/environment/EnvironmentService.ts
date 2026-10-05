@@ -1,4 +1,4 @@
-import type { EnvironmentVariable, PrismaClient } from "../../db/prisma.js";
+import type { EnvironmentVariable, Prisma, PrismaClient } from "../../db/prisma.js";
 import { AppError, ErrorCode, NotFoundError, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import type { SecretBox } from "../../lib/secretBox.js";
@@ -122,6 +122,28 @@ export class EnvironmentService {
       if (row.target !== "RUNTIME" && !row.secret) environment.build[row.key] = value;
     }
     return environment;
+  }
+
+  /**
+   * Encrypted rows for variables Shipyard sets itself (a database's password
+   * and URL), to be written in the caller's transaction. No access check:
+   * the caller has done it.
+   */
+  sealedRows(
+    projectId: string,
+    variables: ReadonlyArray<{ serviceId: string | null; key: string; value: string; secret: boolean }>,
+  ): Prisma.EnvironmentVariableCreateManyInput[] {
+    return variables.map(({ serviceId, key, value, secret }) => {
+      const scope = serviceId ?? PROJECT_SCOPE;
+      return {
+        projectId,
+        scope,
+        key,
+        value: this.deps.secretBox.encrypt(value, sealContext(projectId, scope, key)),
+        secret,
+        target: "RUNTIME" as const,
+      };
+    });
   }
 
   /** "project", or the id of a service that belongs to the project. */

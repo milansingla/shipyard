@@ -305,6 +305,10 @@ the current one — the V2 rollback mechanism. With routing on, both redeploys
 and rollbacks switch traffic without downtime; restarting the *live*
 deployment does not (it is the same container).
 
+Databases (services that keep state no second copy may share) are the
+exception: their old server is stopped **before** the new one starts, and
+restarted if the new one fails. See [databases.md](databases.md#stop-first-never-two-servers-on-one-data-directory).
+
 ## Rollback
 
 `POST /api/deployments/:id/rollback`, or **Roll back** on a RUNNING or FAILED

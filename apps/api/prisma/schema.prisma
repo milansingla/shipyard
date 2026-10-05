@@ -283,6 +283,8 @@ enum ServiceType {
   WEB
   /// Background process: healthy when it keeps running; never routed.
   WORKER
+  /// A PostgreSQL server from the official image, on a volume; private, never built from the repository.
+  POSTGRES
 }
 
 /// One part of a project (frontend, backend, worker…), built from a
@@ -306,6 +308,8 @@ model Service {
   port         Int?
   /// Routed from outside. Only for web services.
   public       Boolean     @default(true)
+  /// Prebuilt image it runs instead of building the repository (POSTGRES: postgres:<major>-alpine).
+  image        String?
   /// Per-service overrides of the project's settings; null = the project's.
   healthCheckPath String?
   healthCheckPort Int?

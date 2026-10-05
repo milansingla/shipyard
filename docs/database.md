@@ -128,6 +128,12 @@ service added / changed / deleted, volume added / detached.
 Writes are best-effort (a failed audit write is logged as an error and
 doesn't undo the action); tamper-evidence and retention policies are V6.
 
+### Service type POSTGRES (`services.image`)
+
+A database service runs a prebuilt `image` (`postgres:<major>-alpine`)
+instead of building the repository; its password and URL are ordinary
+encrypted environment variables ([databases.md](databases.md)).
+
 ### Volume (`volumes`)
 
 A service's persistent directory: `name`, `mountPath` (each unique per

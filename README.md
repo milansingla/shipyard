@@ -121,7 +121,8 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `GET /api/auth/github/login` · `GET /api/auth/me` · `POST /api/auth/logout` | sign in (browser) · current user · sign out |
 | `GET /api/github/repos` · `GET /api/github/repos/:owner/:repo/branches` | repository & branch pickers |
 | `GET /api/audit-logs?projectId=&limit=&before=` | who did what (Activity page) |
-| `GET/POST /api/projects/:id/services` · `PATCH/DELETE /api/services/:id` · `POST /api/services/:id/deploy` | services — see [docs/services.md](docs/services.md) |
+| `GET/POST /api/projects/:id/services` · `PATCH/DELETE /api/services/:id` · `POST /api/services/:id/deploy` | services — see [docs/services.md](docs/services.md); `{"type": "POSTGRES"}` adds a database ([docs/databases.md](docs/databases.md)) |
+| `GET/POST /api/services/:id/volumes` · `DELETE /api/volumes/:id` | persistent volumes (detaching keeps the data) |
 | `GET/POST /api/organizations` · `…/:id/members` | teams and members — see [docs/teams.md](docs/teams.md) |
 | `GET/POST /api/api-keys` · `DELETE /api/api-keys/:id` | API keys for the CLI/scripts (`Authorization: Bearer shp_…`) |
 | `POST /api/projects`                       | create (`repositoryUrl`, optional `branch`, `name`) |
@@ -176,7 +177,8 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [Deployment engine](docs/deployment-engine.md) — pipeline, statuses, health checks, debugging
 - [Routing](docs/routing.md) — Traefik, stable hostnames, zero-downtime redeploys
 - [Configuration as code](docs/configuration.md) — `shipyard.yaml`, and which setting wins
-- [Services](docs/services.md) — multi-service projects, private networking, per-service settings
+- [Services](docs/services.md) — multi-service projects, private networking, per-service settings, volumes
+- [Databases](docs/databases.md) — self-hosted PostgreSQL services, `DATABASE_URL`, backups
 - [Teams & roles](docs/teams.md) — organizations, OWNER/ADMIN/DEVELOPER/VIEWER, what each may do
 - [Environment variables & secrets](docs/environment.md) — encrypted per-project config, runtime vs build
 - [Database](docs/database.md) — schema and persistence decisions

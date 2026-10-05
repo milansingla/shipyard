@@ -151,7 +151,13 @@ export default function ProjectPage() {
 
       <DomainsPanel projectId={p.id} canEdit={can(p.role, "ADMIN")} />
 
-      <EnvironmentPanel projectId={p.id} services={services.data ?? []} canEdit={can(p.role, "DEVELOPER")} />
+      {/* Remounted when services change: adding a database adds its variables. */}
+      <EnvironmentPanel
+        key={(services.data ?? []).map((service) => service.id).join()}
+        projectId={p.id}
+        services={services.data ?? []}
+        canEdit={can(p.role, "DEVELOPER")}
+      />
 
       <ProjectSettings project={p} canEdit={can(p.role, "ADMIN")} onSaved={() => void project.reload()} />
 

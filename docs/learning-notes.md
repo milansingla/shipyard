@@ -606,3 +606,24 @@ there would be wrong.
 host path to a container that runs untrusted code, and its ownership and
 existence depend on the host. A named volume is managed by Docker, created
 on demand and labelled, so Shipyard can find and remove only its own.
+
+## PostgreSQL services
+
+- **Zero downtime isn't always right**: for stateless apps, start the new
+  version before stopping the old. For a database, two servers on one data
+  directory can corrupt it, so the order flips: stop, start, and restart the
+  old one if the new one fails. The strategy belongs to the kind of service.
+- **Readiness from inside**: on macOS, Docker's port proxy accepts TCP
+  connections even before the app listens, so "the port is open" proves
+  nothing from the host. `pg_isready` run by Docker inside the container,
+  against 127.0.0.1, answers the real question.
+- **Secrets as plain configuration**: the generated password and URL are
+  ordinary encrypted variables, so they show up where every other setting
+  does, and nothing new had to be built to store or inject them.
+- **Self-hosted ≠ managed**: a container with a volume gives you a database,
+  not backups, failover, upgrades or monitoring. Say so where people decide.
+
+**Interview: why not let `docker pull` run on every deploy?** A tag like
+`postgres:17-alpine` moves when a new image is published. Pulling only when
+missing means every deploy of a service runs the same image; upgrading is a
+deliberate act, not a surprise during a restart.

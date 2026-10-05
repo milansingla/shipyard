@@ -4,6 +4,9 @@ import type { Logger } from "../../lib/logger.js";
 import { CONFIG_FILE_NAMES, type ConfiguredService, MAX_CONFIG_BYTES, parseShipyardConfig } from "../../services/config/shipyardConfig.js";
 import type { GitService } from "../../services/git/GitService.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
+import type { EnvironmentService } from "../environment/EnvironmentService.js";
+import { postgresVersionOf } from "./postgres.js";
+import { provisionPostgres } from "./PostgresProvisioner.js";
 import { MAX_VOLUMES_PER_SERVICE, dockerVolumeName } from "./VolumeService.js";
 
 type FileSetting =
@@ -38,6 +41,8 @@ const FILE_DEFAULTS: FileSettings = {
 
 export interface ConfigSyncDeps {
   prisma: PrismaClient;
+  /** Encrypts a new database's password; null without SHIPYARD_SECRET_KEY. */
+  environment?: Pick<EnvironmentService, "sealedRows"> | null;
   git: Pick<GitService, "readFile">;
   allowedGitHosts: readonly string[];
   logger: Logger;
@@ -69,6 +74,10 @@ export class ConfigSync {
 
     for (const service of configured) {
       const current = existing.find((candidate) => candidate.name === service.name);
+      if (service.database || current?.type === "POSTGRES") {
+        notes.push(...(await this.syncDatabase(project, current, service, file.name)));
+        continue;
+      }
       const wanted = fileValues(service);
       if (!current) {
         await this.assertAddressFree(project, service.name, file.name);
@@ -96,6 +105,52 @@ export class ConfigSync {
       notes.push(`service ${stale.name} is no longer in ${file.name}; it keeps its last settings. Delete it on the project page if it's gone for good`);
     }
     this.deps.logger.info({ projectId: project.id, file: file.name, notes }, "Synced services from configuration file");
+    return notes;
+  }
+
+  /**
+   * A `type: postgres` service: created with its volume, password and URL;
+   * afterwards only its resources follow the file. The version never changes
+   * (the data directory belongs to it), and a service never switches between
+   * being a database and being built from the repository.
+   */
+  private async syncDatabase(project: Project, current: Service | undefined, service: ConfiguredService, fileName: string): Promise<string[]> {
+    const { prisma } = this.deps;
+    if (!service.database) {
+      throw new AppError(ErrorCode.CONFIG_INVALID, `${fileName}: service "${service.name}" is a database here; it can't become a ${service.settings.type.toLowerCase()} service. Use another name.`, { statusCode: 422 });
+    }
+    if (current && current.type !== "POSTGRES") {
+      throw new AppError(ErrorCode.CONFIG_INVALID, `${fileName}: service "${service.name}" is already a ${current.type.toLowerCase()} service; it can't become a database. Use another name.`, { statusCode: 422 });
+    }
+    const resources = {
+      cpuLimit: service.settings.cpuLimit ?? null,
+      memoryLimitMb: service.settings.memoryLimitMb ?? null,
+    };
+    if (!current) {
+      if (!this.deps.environment) {
+        throw new AppError(ErrorCode.CONFIG_INVALID, `${fileName}: databases need SHIPYARD_SECRET_KEY to be set on the Shipyard server.`, { statusCode: 422 });
+      }
+      await this.assertAddressFree(project, service.name, fileName);
+      const { service: created, variable } = await provisionPostgres({ prisma, environment: this.deps.environment }, project, {
+        name: service.name,
+        version: service.database.version,
+        managedBy: "CONFIG_FILE",
+      });
+      if (resources.cpuLimit !== null || resources.memoryLimitMb !== null) await prisma.service.update({ where: { id: created.id }, data: resources });
+      return [`added database ${service.name} (PostgreSQL ${service.database.version}); its URL is in ${variable}`];
+    }
+    const notes: string[] = [];
+    const version = postgresVersionOf(current.image);
+    if (version !== service.database.version) {
+      notes.push(`database ${service.name} stays on PostgreSQL ${version}: moving to ${service.database.version} needs a dump and restore (see docs/databases.md)`);
+    }
+    const changes = Object.fromEntries(
+      (Object.keys(resources) as Array<keyof typeof resources>).filter((key) => current[key] !== resources[key] && !current.overrides.includes(key)).map((key) => [key, resources[key]]),
+    );
+    if (Object.keys(changes).length > 0 || current.managedBy !== "CONFIG_FILE") {
+      await prisma.service.update({ where: { id: current.id }, data: { ...changes, managedBy: "CONFIG_FILE" } });
+    }
+    if (Object.keys(changes).length > 0) notes.push(`updated ${service.name}: ${Object.keys(changes).join(", ")}`);
     return notes;
   }
 

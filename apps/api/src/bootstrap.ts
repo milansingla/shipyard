@@ -131,6 +131,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
       prisma,
       git: engineServices.git,
       allowedGitHosts: config.allowedGitHosts,
+      environment,
       logger: logger.child({ component: "config" }),
     }),
     engine: engineServices.engine,
@@ -167,7 +168,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     logger: logger.child({ component: "domains" }),
   });
 
-  const services = new ServiceService({ prisma, access, deployments, audit, logger: logger.child({ component: "services" }) });
+  const services = new ServiceService({ prisma, access, deployments, audit, environment, logger: logger.child({ component: "services" }) });
   const volumes = new VolumeService({ prisma, access, audit, logger: logger.child({ component: "volumes" }) });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
   return { ...engineServices, prisma, projects, deployments, environment, domains, audit, organizations, services, volumes, auth, webhooks };

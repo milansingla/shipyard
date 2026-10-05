@@ -6,6 +6,13 @@ import type { AuditService } from "../audit/AuditService.js";
 
 export const MAX_VOLUMES_PER_SERVICE = 10;
 
+/** A database's storage is Shipyard's to manage: detaching it would start an empty database. */
+function assertNotDatabase(service: { type: string }): void {
+  if (service.type === "POSTGRES") {
+    throw new ConflictError(ErrorCode.VOLUMES_EXIST, "A database's storage is managed by Shipyard. To remove its data, delete the database.");
+  }
+}
+
 export interface VolumeServiceDeps {
   prisma: PrismaClient;
   access: AccessService;
@@ -40,6 +47,7 @@ export class VolumeService {
 
   async create(serviceId: string, userId: string, input: { name: string; mountPath: string }): Promise<Volume> {
     const { service, project } = await this.service(serviceId, userId, OrgRole.ADMIN);
+    assertNotDatabase(service);
     const { prisma } = this.deps;
     if ((await prisma.volume.count({ where: { serviceId } })) >= MAX_VOLUMES_PER_SERVICE) {
       throw new ValidationError(`A service can have at most ${MAX_VOLUMES_PER_SERVICE} volumes.`);
@@ -70,6 +78,7 @@ export class VolumeService {
     const { service, project } = await this.service(volume.serviceId, userId, OrgRole.ADMIN).catch((error: unknown) => {
       throw error instanceof NotFoundError ? new NotFoundError(`Volume not found: ${volumeId}`) : error;
     });
+    assertNotDatabase(service);
     await this.deps.prisma.volume.delete({ where: { id: volumeId } });
     await this.deps.audit.record({
       action: "VOLUME_DELETED",

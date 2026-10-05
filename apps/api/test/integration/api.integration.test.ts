@@ -11,7 +11,7 @@ import { main as runCli } from "../../../cli/src/main.js";
 import { createApp } from "../../src/app.js";
 import type { RateLimits } from "../../src/middleware/rateLimit.js";
 import type { PrismaClient } from "../../src/db/prisma.js";
-import { NotFoundError } from "../../src/lib/errors.js";
+import { AppError, ErrorCode, NotFoundError } from "../../src/lib/errors.js";
 import { SecretBox } from "../../src/lib/secretBox.js";
 import { sessionCookieName } from "../../src/middleware/authenticate.js";
 import { AccessService } from "../../src/modules/access/AccessService.js";
@@ -157,11 +157,18 @@ const removedVolumes: string[] = [];
 /** Every job, in the order the fake engine ran them. */
 const jobs: DeploymentJob[] = [];
 
+/** run/stop/restart calls in order, to check what happens before what. */
+const engineEvents: string[] = [];
+/** Service names whose next runs fail (as if never healthy). */
+const failRuns = new Set<string>();
+
 /** Walks a deployment to RUNNING instantly, without Docker, routing it like the real engine. */
 const fakeEngine: EngineLike = {
   async run(job, observer = {}) {
     lastJob = job;
     jobs.push(job);
+    engineEvents.push(`run:${job.service?.alias ?? job.name}`);
+    if (failRuns.has(job.service?.alias ?? "")) throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, "Not ready within 120s.");
     const state: DeploymentState = {
       id: job.id,
       status: S.QUEUED,
@@ -194,10 +201,12 @@ const fakeEngine: EngineLike = {
     }
     return state;
   },
-  async stop() {
+  async stop(containerId) {
+    engineEvents.push(`stop:${containerId}`);
     return { containerName: "x", status: S.STOPPED, hostPort: null, deploymentUrl: null };
   },
   async restart(containerId, route, onStage = async () => {}) {
+    engineEvents.push(`restart:${containerId}`);
     for (const stage of [S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING]) await onStage(stage);
     const deploymentId = containerId.replace(/^container-/, "");
     if (!route) return { containerName: "x", status: S.RUNNING, hostPort: null, deploymentUrl: null };
@@ -290,6 +299,7 @@ beforeAll(async () => {
         },
       },
       allowedGitHosts: ["github.com"],
+      environment,
       logger: silentLogger,
     }),
     engine: fakeEngine,
@@ -318,7 +328,7 @@ beforeAll(async () => {
       environment,
       audit,
       organizations: new OrganizationService({ prisma, access, audit, logger: silentLogger }),
-      services: new ServiceService({ prisma, access, deployments, audit, logger: silentLogger }),
+      services: new ServiceService({ prisma, access, deployments, audit, environment, logger: silentLogger }),
       volumes: new VolumeService({ prisma, access, audit, logger: silentLogger }),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
@@ -350,6 +360,8 @@ beforeEach(async () => {
   jobs.length = 0;
   repoFiles.clear();
   removedVolumes.length = 0;
+  engineEvents.length = 0;
+  failRuns.clear();
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
   await prisma.auditLog.deleteMany();
@@ -1866,5 +1878,147 @@ describe("persistent volumes", () => {
     const log = (await call(alice, "GET", `/api/deployments/${second}/logs?type=build`)).body!.data.content as string;
     expect(log).toContain("volume uploads of web stays at /app/uploads");
     expect(await prisma.volume.findMany({ where: { serviceId }, select: { mountPath: true } })).toEqual([{ mountPath: "/app/uploads" }]);
+  });
+});
+
+describe("PostgreSQL services", () => {
+  async function project(cookie: string, repo: string): Promise<string> {
+    const res = await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` });
+    expect(res.status).toBe(201);
+    return res.body!.data.id as string;
+  }
+  const addDatabase = (cookie: string, projectId: string, body: object = {}) =>
+    call(cookie, "POST", `/api/projects/${projectId}/services`, { name: "db", type: "POSTGRES", ...body });
+  const running = (serviceId: string) => prisma.deployment.findMany({ where: { serviceId, status: "RUNNING" } });
+
+  it("adds a database: its own password, a URL for every service, started first, then left alone by project deploys", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "shop-db");
+    const created = await addDatabase(alice, projectId);
+    expect(created.status).toBe(201);
+    expect(created.body!.data).toMatchObject({ name: "db", type: "POSTGRES", image: "postgres:17-alpine", port: 5432, public: false, connectionVariable: "DATABASE_URL" });
+    const dbId = created.body!.data.id as string;
+
+    const variables = (await call(alice, "GET", `/api/projects/${projectId}/env`)).body!.data as Array<Record<string, unknown>>;
+    expect(variables.map((v) => [v.key, v.serviceId, v.secret, v.value])).toEqual([
+      ["DATABASE_URL", null, true, null],
+      ["POSTGRES_PASSWORD", dbId, true, null],
+    ]);
+    expect(await prisma.volume.findMany({ where: { serviceId: dbId }, select: { name: true, mountPath: true } })).toEqual([
+      { name: "data", mountPath: "/var/lib/postgresql/data" },
+    ]);
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(jobs.map((job) => job.service?.alias)).toEqual(["db", "web"]);
+    const [dbJob, webJob] = jobs;
+    expect(dbJob!.service).toMatchObject({ type: "POSTGRES", image: { name: "postgres:17-alpine" }, environment: { POSTGRES_USER: "app", POSTGRES_DB: "app" }, stopFirst: true });
+    expect(dbJob!.volumes).toEqual([{ name: `shipyard-${dbId}-data`, mountPath: "/var/lib/postgresql/data" }]);
+    const password = dbJob!.env!.runtime.POSTGRES_PASSWORD!;
+    expect(password).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(webJob!.env!.runtime.DATABASE_URL).toBe(`postgres://app:${password}@db:5432/app`);
+    expect(webJob!.env!.runtime.POSTGRES_PASSWORD).toBeUndefined(); // only the database gets it
+    expect(webJob!.env!.build.DATABASE_URL).toBeUndefined(); // secrets never reach a build
+
+    // A push or "Deploy" redeploys the apps, never restarts the database as a side effect.
+    jobs.length = 0;
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(jobs.map((job) => job.service?.alias)).toEqual(["web"]);
+    expect(await running(dbId)).toHaveLength(1);
+
+    // A second database gets its own variable.
+    const analytics = await addDatabase(alice, projectId, { name: "analytics", version: 16 });
+    expect(analytics.body!.data).toMatchObject({ image: "postgres:16-alpine", connectionVariable: "ANALYTICS_DATABASE_URL" });
+  });
+
+  it("redeploying a database stops the old server first, and brings it back if the new one fails", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "stop-first");
+    const dbId = (await addDatabase(alice, projectId)).body!.data.id as string;
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    const [first] = await running(dbId);
+
+    engineEvents.length = 0;
+    await call(alice, "POST", `/api/services/${dbId}/deploy`);
+    await deployments.waitForIdle();
+    expect(engineEvents).toEqual([`stop:${first!.containerId}`, "run:db"]); // never two servers on one data directory
+    const [second] = await running(dbId);
+    expect(second!.id).not.toBe(first!.id);
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: first!.id } })).status).toBe("STOPPED");
+
+    failRuns.add("db");
+    engineEvents.length = 0;
+    const failed = (await call(alice, "POST", `/api/services/${dbId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    expect(engineEvents).toEqual([`stop:${second!.containerId}`, "run:db", `restart:${second!.containerId}`]);
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: failed } })).status).toBe("FAILED");
+    expect((await running(dbId)).map((d) => d.id)).toEqual([second!.id]);
+    const events = (await call(alice, "GET", `/api/deployments/${second!.id}/events`)).body!.data as Array<Record<string, unknown>>;
+    expect(events.map((e) => e.message)).toContain("Restarted: its replacement failed");
+
+    // Rolling back stops the live server before the old one starts, too.
+    failRuns.clear();
+    engineEvents.length = 0;
+    expect((await call(alice, "POST", `/api/deployments/${second!.id}/rollback`)).status).toBe(200);
+    expect(engineEvents).toEqual([`stop:${second!.containerId}`, `restart:${first!.containerId}`]);
+  });
+
+  it("validates databases and who may add them", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = await project(alice, "db-rules");
+    for (const body of [{ version: 15 }, { version: "17" }, { sourceDir: "db" }, { public: true }, { name: "Bad_Name" }]) {
+      expect({ body, status: (await addDatabase(alice, projectId, body)).status }).toEqual({ body, status: 400 });
+    }
+    expect((await addDatabase(bob, projectId)).status).toBe(404);
+    const db = (await addDatabase(alice, projectId)).body!.data;
+    expect((await addDatabase(alice, projectId)).status).toBe(409);
+    expect((await call(alice, "PATCH", `/api/services/${db.id}`, { port: 6543 })).status).toBe(400);
+    expect((await call(alice, "PATCH", `/api/services/${db.id}`, { memoryLimitMb: 512 })).status).toBe(200);
+    // Its storage can't be detached or added to by hand.
+    const [data] = (await call(alice, "GET", `/api/services/${db.id}/volumes`)).body!.data as Array<Record<string, any>>;
+    expect((await call(alice, "DELETE", `/api/volumes/${data!.id}`)).status).toBe(409);
+    expect((await call(alice, "POST", `/api/services/${db.id}/volumes`, { name: "more", mountPath: "/more" })).status).toBe(409);
+    // A private service: no domain can point at it.
+    expect((await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: "db.example.com", serviceId: db.id })).status).toBe(400);
+  });
+
+  it("deleting a database needs deleteData=true, and takes its password and URL with it", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "drop-db");
+    const db = (await addDatabase(alice, projectId)).body!.data;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/API_KEY`, { value: "k" });
+
+    expect((await call(alice, "DELETE", `/api/services/${db.id}`)).status).toBe(409);
+    expect((await call(alice, "DELETE", `/api/services/${db.id}?deleteData=true`)).status).toBe(204);
+    expect(removedVolumes).toEqual([`shipyard-${db.id}-data`]);
+    const keys = (await prisma.environmentVariable.findMany({ where: { projectId }, select: { key: true } })).map((v) => v.key);
+    expect(keys).toEqual(["API_KEY"]);
+  });
+
+  it("shipyard.yaml declares databases; the version and the kind of a service never change from the file", async () => {
+    const alice = await sessionFor(ALICE);
+    repoFiles.set("yaml-db", "version: 1\nservices:\n  web: {}\n  db:\n    type: postgres\n    version: 16\n");
+    const projectId = await project(alice, "yaml-db");
+    const first = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    const db = await prisma.service.findFirstOrThrow({ where: { projectId, name: "db" } });
+    expect(db).toMatchObject({ type: "POSTGRES", image: "postgres:16-alpine", managedBy: "CONFIG_FILE" });
+    expect(await prisma.environmentVariable.count({ where: { projectId, key: "DATABASE_URL" } })).toBe(1);
+    const log = (await call(alice, "GET", `/api/deployments/${first}/logs?type=build`)).body!.data.content as string;
+    expect(log).toContain("added database db (PostgreSQL 16); its URL is in DATABASE_URL");
+
+    repoFiles.set("yaml-db", "version: 1\nservices:\n  web: {}\n  db:\n    type: postgres\n    version: 17\n");
+    const second = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    expect((await call(alice, "GET", `/api/deployments/${second}/logs?type=build`)).body!.data.content).toContain("db stays on PostgreSQL 16");
+    expect((await prisma.service.findUniqueOrThrow({ where: { id: db.id } })).image).toBe("postgres:16-alpine");
+
+    repoFiles.set("yaml-db", "version: 1\nservices:\n  web: {}\n  db:\n    source: db\n");
+    const res = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    expect(res.body!.data).toMatchObject({ status: "FAILED" });
+    expect(res.body!.data.errorMessage).toContain(`"db" is a database here; it can't become a web service`);
   });
 });

@@ -65,6 +65,8 @@ function harness(
     routed?: boolean;
     routeFails?: boolean;
     registry?: ImageRegistry;
+    /** What Docker's own health check reports (prebuilt images). */
+    dockerHealth?: "healthy" | "unhealthy";
   } = {},
 ): Harness {
   const calls: string[] = [];
@@ -112,12 +114,17 @@ function harness(
       if (opts.env && Object.keys(opts.env).length > 0) calls.push(`env:${JSON.stringify(opts.env)}`);
       if (opts.healthCheckPort) calls.push(`healthPort:${opts.healthCheckPort}`);
       if (opts.resources) calls.push(`resources:${JSON.stringify(opts.resources)}`);
+      if (opts.healthCommand) calls.push(`healthCommand:${opts.healthCommand.join(" ")}`);
+      if (opts.labels["shipyard.health-kind"]) calls.push(`healthKind:${opts.labels["shipyard.health-kind"]}`);
       if (opts.volumes?.length) calls.push(`mounts:${opts.volumes.map((v) => `${v.name}=${v.mountPath}`).join(",")}`);
       if (opts.containerPort === null) return { id: "container-id", hostPort: null, healthHostPort: null };
       return { id: "container-id", hostPort: 49153, healthHostPort: opts.healthCheckPort ? 49154 : 49153 };
     },
     async getContainerState() {
-      return { running: true, exitCode: null, oomKilled: false };
+      return { running: true, exitCode: null, oomKilled: false, health: options.dockerHealth ?? "healthy" };
+    },
+    async ensureImage(name: string) {
+      calls.push(`pull:${name}`);
     },
     async getLogs() {
       calls.push("logs");
@@ -437,6 +444,49 @@ describe("DeploymentEngine.run", () => {
     expect(h.calls).toContain("start:shipyard-hello-3f2a9c1e77b4:null:bridge"); // not on the proxy network
     expect(h.calls).toContain("private:shipyard-p-test=jobs");
     expect(h.calls.some((c) => c.startsWith("health:") || c.startsWith("route:"))).toBe(false);
+  });
+
+  it("runs a prebuilt database image: no clone or build, nothing published, ready when Docker's check passes", async () => {
+    const h = harness({ routed: true });
+    let systemLog = "";
+    const state = await h.engine.run(
+      job({
+        env: { runtime: { POSTGRES_PASSWORD: "s3cret", POSTGRES_USER: "evil" }, build: {} },
+        service: spec({
+          type: "POSTGRES",
+          alias: "db",
+          port: 5432,
+          public: false,
+          image: { name: "postgres:17-alpine", healthCommand: ["pg_isready", "-h", "127.0.0.1"] },
+          environment: { POSTGRES_USER: "app", POSTGRES_DB: "app" },
+          stopFirst: true,
+        }),
+      }),
+      { onLog: (source, text) => void (source === "system" && (systemLog += text)) },
+    );
+
+    expect(state).toMatchObject({ status: S.RUNNING, imageName: "postgres:17-alpine", containerPort: 5432, hostPort: null, deploymentUrl: null, commitSha: null });
+    expect(h.calls.some((c) => c.startsWith("clone:") || c.startsWith("build:"))).toBe(false);
+    expect(h.calls).toContain("pull:postgres:17-alpine");
+    expect(h.calls).toContain("start:shipyard-hello-3f2a9c1e77b4:null:bridge"); // null: nothing published
+    expect(h.calls).toContain("private:shipyard-p-test=db");
+    expect(h.calls).toContain("healthCommand:pg_isready -h 127.0.0.1");
+    expect(h.calls).toContain("healthKind:docker");
+    // Shipyard's own values win over the project's variables.
+    expect(h.calls).toContain('env:{"POSTGRES_PASSWORD":"s3cret","POSTGRES_USER":"app","POSTGRES_DB":"app"}');
+    expect(h.calls.some((c) => c.startsWith("health:") || c.startsWith("route:"))).toBe(false);
+    expect(systemLog).toContain("Ready: pg_isready succeeded");
+    expect(systemLog).toContain("reachable inside the project at db:5432");
+    expect(systemLog).not.toContain("s3cret");
+  });
+
+  it("fails a prebuilt image Docker reports unhealthy", async () => {
+    const h = harness({ dockerHealth: "unhealthy" });
+    const error = (await h.engine
+      .run(job({ service: spec({ type: "POSTGRES", port: 5432, public: false, image: { name: "postgres:17-alpine", healthCommand: ["true"] } }) }))
+      .catch((e: unknown) => e)) as DeploymentFailedError;
+    expect(error.code).toBe(ErrorCode.HEALTH_CHECK_FAILED);
+    expect(error.deployment.failedStage).toBe(S.HEALTH_CHECKING);
   });
 
   it("runs a private web service: health-checked, reachable by name, not routed", async () => {

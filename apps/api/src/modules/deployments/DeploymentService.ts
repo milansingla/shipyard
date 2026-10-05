@@ -242,8 +242,13 @@ export class DeploymentService {
       return this.recordConfigFailure(project, actorId, trigger, error);
     }
     const services = await this.services(projectId);
-    const selected = options.serviceIds ? services.filter((service) => options.serviceIds!.includes(service.id)) : services;
-    if (selected.length === 0) throw new NotFoundError("No such service in this project.");
+    const selected = options.serviceIds
+      ? services.filter((service) => options.serviceIds!.includes(service.id))
+      : await this.withoutRunningDatabases(services);
+    if (selected.length === 0) {
+      if (options.serviceIds) throw new NotFoundError("No such service in this project.");
+      throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "Nothing to deploy: the database is already running. Deploy it from its service to restart it.");
+    }
     this.lockProject(projectId);
 
     let deployments: Deployment[];
@@ -340,6 +345,7 @@ export class DeploymentService {
 
     this.lockProject(deployment.projectId);
     try {
+      const stopped = await this.stopForReplacement(deployment.serviceId, id, `Stopped to restart deployment ${displayId(id)}`);
       let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: userId, message: "Restart" });
       let result;
       try {
@@ -349,6 +355,7 @@ export class DeploymentService {
         });
       } catch (error) {
         await this.markFailed(id, error, current.status);
+        await this.revive(stopped);
         throw error;
       }
       const running = await this.moveTo(current, DeploymentStatus.RUNNING, {
@@ -389,6 +396,7 @@ export class DeploymentService {
     this.lockProject(project.id);
     try {
       const target = await this.findRollbackTarget(source);
+      const stopped = await this.stopForReplacement(target.serviceId, target.id, `Stopped to roll back to deployment ${displayId(target.id)}`);
       let current = await this.moveTo(target, DeploymentStatus.ROLLING_BACK, {}, {
         actorId: userId,
         message: `Rolling back from deployment ${displayId(source.id)}`,
@@ -403,6 +411,7 @@ export class DeploymentService {
         await this.markFailed(target.id, error, current.status);
         // Don't leave a half-started old version running next to the live one.
         await this.deps.engine.stop(target.containerId!).catch(() => {});
+        await this.revive(stopped);
         throw error;
       }
       const running = await this.moveTo(current, DeploymentStatus.RUNNING, {
@@ -609,6 +618,8 @@ export class DeploymentService {
     const primaryId = primaryServiceId(services);
     const order = (deployment: Deployment) => {
       const service = services.find((s) => s.id === deployment.serviceId)!;
+      // Databases first: the apps that connect to them start after.
+      if (service.type === "POSTGRES") return -1;
       return service.id === primaryId ? 2 : service.type === "WEB" && service.public ? 1 : 0;
     };
     for (const deployment of [...deployments].sort((a, b) => order(a) - order(b))) {
@@ -625,6 +636,7 @@ export class DeploymentService {
   ): Promise<void> {
     const logger = this.deps.logger.child({ deploymentId: deployment.id, projectId: project.id, service: service.name });
     let writer: BuildLogWriter | null = null;
+    let stopped: Deployment[] = [];
 
     try {
       writer = await this.deps.buildLogs.open(deployment.id);
@@ -649,6 +661,10 @@ export class DeploymentService {
         env: (await this.deps.environment?.forDeployment(project.id, service.id)) ?? undefined,
       };
 
+      if (job.service?.stopFirst) {
+        stopped = await this.stopForReplacement(service.id, deployment.id, `Stopped for deployment ${displayId(deployment.id)}`);
+        if (stopped.length > 0) logWriter.write(`Stopped the running ${service.name} first: two copies must never share its data\n`);
+      }
       await this.deps.engine.run(job, {
         onStatusChange: (state, previous) => this.persist(state, previous),
         onLog: (source, text) => logWriter.write(source === "runtime" ? prefixLines("[app] ", text) : text),
@@ -666,6 +682,10 @@ export class DeploymentService {
         }
         writer?.write(`ERROR: ${errorMessage(error)}\n`);
         await this.markFailed(deployment.id, error, DeploymentStatus.QUEUED);
+      }
+      if (stopped.length > 0) {
+        writer?.write(`Restarting the previous ${service.name}\n`);
+        await this.revive(stopped);
       }
     } finally {
       await writer?.close().catch((closeError: unknown) => logger.warn({ err: closeError }, "Could not close build log"));
@@ -750,7 +770,53 @@ export class DeploymentService {
     );
   }
 
-  /** Stops every other healthy deployment of the project, keeping containers for rollback. */
+  /**
+   * For services that keep state no second copy may share (a database's data
+   * directory): stops the running deployment BEFORE another one starts, and
+   * returns what it stopped, to bring back if the new one fails. Throws if it
+   * can't stop one: better no new deployment than two servers on one volume.
+   */
+  private async stopForReplacement(serviceId: string, keepId: string, message: string): Promise<Deployment[]> {
+    const service = await this.deps.prisma.service.findUnique({ where: { id: serviceId }, select: { type: true } });
+    if (service?.type !== "POSTGRES") return [];
+    const running = await this.deps.prisma.deployment.findMany({
+      where: { serviceId, id: { not: keepId }, status: { in: [DeploymentStatus.RUNNING, DeploymentStatus.HEALTHY] } },
+    });
+    const stopped: Deployment[] = [];
+    for (const deployment of running) stopped.push(await this.stopDeployment(deployment, { message }));
+    return stopped;
+  }
+
+  /** Brings back deployments stopped for a replacement that failed. Best effort: failures are recorded on them. */
+  private async revive(stopped: readonly Deployment[]): Promise<void> {
+    for (const previous of stopped) {
+      let current = await this.load(previous.id);
+      try {
+        current = await this.moveTo(current, DeploymentStatus.STARTING, {}, { message: "Restarted: its replacement failed" });
+        const result = await this.deps.engine.restart(previous.containerId!, null, async (stage) => {
+          current = await this.moveTo(current, stage);
+        });
+        await this.moveTo(current, DeploymentStatus.RUNNING, { hostPort: result.hostPort, deploymentUrl: null, errorMessage: null });
+      } catch (error) {
+        this.deps.logger.error({ err: error, deploymentId: previous.id }, "Could not bring back the previous deployment");
+        await this.markFailed(previous.id, error, current.status).catch(() => {});
+      }
+    }
+  }
+
+  /** A project deploy (button, push, CLI) leaves running databases alone: restarting one is never a side effect. */
+  private async withoutRunningDatabases(services: Service[]): Promise<Service[]> {
+    const running = await this.deps.prisma.deployment.findMany({
+      where: {
+        serviceId: { in: services.filter((service) => service.type === "POSTGRES").map((service) => service.id) },
+        status: { in: [DeploymentStatus.RUNNING, ...IN_PROGRESS_STATUSES] },
+      },
+      select: { serviceId: true },
+    });
+    const busy = new Set(running.map((deployment) => deployment.serviceId));
+    return services.filter((service) => !busy.has(service.id));
+  }
+
   /** Stops the service's other healthy deployments, keeping containers for rollback. */
   private async retireOthers(serviceId: string, keepId: string, reason?: string): Promise<void> {
     const others = await this.deps.prisma.deployment.findMany({

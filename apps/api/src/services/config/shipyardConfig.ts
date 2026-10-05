@@ -5,6 +5,7 @@ import { AppError, ErrorCode } from "../../lib/errors.js";
 import { healthCheckPathSchema } from "../../modules/projects/project.schemas.js";
 import { mountPathSchema, serviceNameSchema, sourceDirSchema, volumeNameSchema } from "../../modules/services/service.schemas.js";
 import { MAX_VOLUMES_PER_SERVICE } from "../../modules/services/VolumeService.js";
+import { DEFAULT_POSTGRES_VERSION, POSTGRES_VERSIONS, type PostgresVersion } from "../../modules/services/postgres.js";
 
 /** File names Shipyard looks for at the repository root, in order. */
 export const CONFIG_FILE_NAMES = ["shipyard.yaml", "shipyard.yml"] as const;
@@ -14,7 +15,9 @@ export const MAX_CONFIG_SERVICES = 20;
 const command = z.strictObject({ command: z.string().trim().min(1).max(1000).regex(/^[^\n\r\0]+$/, "must be a single line") });
 
 const serviceSchema = z.strictObject({
-  type: z.enum(["web", "worker"]).default("web"),
+  type: z.enum(["web", "worker", "postgres"]).default("web"),
+  /** postgres only: the major version. */
+  version: z.union(POSTGRES_VERSIONS.map((v) => z.literal(v))).optional(),
   source: sourceDirSchema.default("."),
   build: command.optional(),
   start: command.optional(),
@@ -65,6 +68,8 @@ export interface ConfiguredService {
     memoryLimitMb?: number;
   };
   volumes: { name: string; mountPath: string }[];
+  /** Set for `type: postgres`: a database Shipyard runs, not a build of the repository. */
+  database?: { version: PostgresVersion };
 }
 
 /**
@@ -89,6 +94,24 @@ export function parseShipyardConfig(source: string, fileName = "shipyard.yaml"):
   }
 
   return Object.entries(result.data.services).map(([name, service]) => {
+    if (service.type === "postgres") {
+      const extra =
+        (["build", "start", "port", "public", "healthCheck", "volumes"] as const).find((key) => service[key] !== undefined) ??
+        (service.source !== "." ? "source" : undefined);
+      if (extra) throw invalid(fileName, `is invalid at services.${name}.${extra}: a postgres service only takes version and resources`);
+      return {
+        name,
+        settings: {
+          type: "WEB" as const, // unused for databases; see `database`
+          sourceDir: ".",
+          ...(service.resources?.cpu !== undefined && { cpuLimit: service.resources.cpu }),
+          ...(service.resources?.memoryMb !== undefined && { memoryLimitMb: service.resources.memoryMb }),
+        },
+        volumes: [],
+        database: { version: service.version ?? DEFAULT_POSTGRES_VERSION },
+      };
+    }
+    if (service.version !== undefined) throw invalid(fileName, `is invalid at services.${name}.version: only postgres services have a version`);
     if (service.type === "worker" && service.public) throw invalid(fileName, `is invalid at services.${name}.public: workers can't be public`);
     const settings: ConfiguredService["settings"] = {
       type: service.type === "worker" ? "WORKER" : "WEB",

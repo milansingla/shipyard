@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import Docker from "dockerode";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -14,6 +16,9 @@ import { DeploymentStatus as S } from "../../src/services/deployment/status.js";
 import type { DeploymentJob, DeploymentState } from "../../src/services/deployment/types.js";
 import { DockerService } from "../../src/services/docker/DockerService.js";
 import { formatLogChunks } from "../../src/services/docker/logs.js";
+import { serviceSpec } from "../../src/modules/services/serviceRules.js";
+import { POSTGRES_DATA_PATH } from "../../src/modules/services/postgres.js";
+import type { Service } from "../../src/db/prisma.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
 import { DirectPortRouter } from "../../src/services/routing/Router.js";
@@ -380,6 +385,53 @@ describe("deployment engine against real Docker", () => {
       await expect(dockerode.getVolume(volumeName).inspect()).rejects.toMatchObject({ statusCode: 404 });
     } finally {
       await dockerode.getVolume(volumeName).remove().catch(() => {});
+    }
+  });
+
+  it("runs PostgreSQL from the official image: private, ready when pg_isready passes, data kept across a stop-first redeploy", async () => {
+    const projectId = randomUUID();
+    const serviceId = randomUUID();
+    const volumeName = `shipyard-${serviceId}-data`;
+    const password = randomUUID();
+    const spec = serviceSpec({ id: projectId }, { id: serviceId, name: "db", type: "POSTGRES", image: "postgres:17-alpine", port: 5432 } as Service);
+    const dbJob = (): DeploymentJob => ({
+      ...job("pg"),
+      service: spec,
+      volumes: [{ name: volumeName, mountPath: POSTGRES_DATA_PATH }],
+      env: { runtime: { POSTGRES_PASSWORD: password }, build: {} },
+    });
+    // psql inside the container, connecting over TCP to the service's name on the project network.
+    const psql = async (containerId: string, sql: string) =>
+      (
+        await promisify(execFile)("docker", ["exec", "-e", `PGPASSWORD=${password}`, containerId, "psql", "-h", "db", "-U", "app", "-d", "app", "-tAc", sql])
+      ).stdout.trim();
+    const service = engine(HELLO_APP); // the source is never cloned for a prebuilt image
+    try {
+      let log = "";
+      const first = await service.run(dbJob(), { onLog: (_source, text) => void (log += text) });
+      created.push(first);
+      expect(first).toMatchObject({ status: S.RUNNING, imageName: "postgres:17-alpine", containerPort: 5432, hostPort: null });
+      expect(log).toContain("nothing to clone or build");
+      expect(log).toContain("Ready: pg_isready succeeded");
+      expect(log).not.toContain(password);
+      const info = await dockerode.getContainer(first.containerId!).inspect();
+      expect(info.NetworkSettings.Ports ?? {}).toEqual({ "5432/tcp": null }); // exposed by the image, published nowhere
+      expect(info.NetworkSettings.Networks[spec.network]?.Aliases).toContain("db");
+      await psql(first.containerId!, "CREATE TABLE orders (id int); INSERT INTO orders VALUES (42);");
+
+      // What DeploymentService does for a database: stop the old server, then start the new one.
+      await service.stop(first.containerId!);
+      const second = await service.run(dbJob());
+      created.push(second);
+      expect(await psql(second.containerId!, "SELECT id FROM orders")).toBe("42");
+
+      // Cleaning up never deletes a prebuilt image other projects may use.
+      await docker.removeImage("postgres:17-alpine");
+      expect(await dockerode.getImage("postgres:17-alpine").inspect()).toMatchObject({ RepoTags: expect.arrayContaining(["postgres:17-alpine"]) });
+    } finally {
+      for (const record of created.splice(-2)) if (record.containerId) await docker.removeContainer(record.containerId);
+      await dockerode.getVolume(volumeName).remove().catch(() => {});
+      await docker.removeNetwork(spec.network);
     }
   });
 

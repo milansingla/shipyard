@@ -104,6 +104,7 @@ Details of the sign-in design: [github.md](github.md).
   too low breaks apps in confusing ways). Set them for anything you don't
   fully trust; disk and network bandwidth are not limited yet.
 - No egress restrictions for deployed containers.
+- PostgreSQL services have no backups or failover ([databases.md](databases.md)).
 - Volumes have no size limit: an app can fill the server's disk through one.
   Detached volumes keep their data until removed with `docker volume rm`.
 - All deployed apps share the `shipyard-edge` network and can reach each other

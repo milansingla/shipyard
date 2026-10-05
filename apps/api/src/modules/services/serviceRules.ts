@@ -1,6 +1,7 @@
 import type { Project, Service } from "../../db/prisma.js";
 import type { ContainerResources, HealthCheckSettings } from "../../services/docker/DockerService.js";
 import type { ServiceSpec } from "../../services/deployment/types.js";
+import { POSTGRES_DB, POSTGRES_PORT, POSTGRES_USER, postgresHealthCommand } from "./postgres.js";
 
 /**
  * Pure rules for services, shared by the deploy pipeline, routing and the API.
@@ -37,6 +38,21 @@ export function artifactName(project: Pick<Project, "slug">, service: Pick<Servi
 }
 
 export function serviceSpec(project: Pick<Project, "id">, service: Service): ServiceSpec {
+  if (service.type === "POSTGRES") {
+    return {
+      type: "POSTGRES",
+      sourceDir: ".",
+      buildCommand: null,
+      startCommand: null,
+      port: POSTGRES_PORT,
+      public: false,
+      network: projectNetworkName(project.id),
+      alias: service.name,
+      image: { name: service.image!, healthCommand: postgresHealthCommand() },
+      environment: { POSTGRES_USER, POSTGRES_DB },
+      stopFirst: true,
+    };
+  }
   return {
     type: service.type,
     sourceDir: service.sourceDir,

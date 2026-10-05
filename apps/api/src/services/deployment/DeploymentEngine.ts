@@ -41,6 +41,7 @@ export type EngineDocker = Pick<
   | "connectToNetwork"
   | "ensureNetwork"
   | "ensureVolume"
+  | "ensureImage"
   | "prepareVolumeOwnership"
   | "removeVolume"
   | "removeNetwork"
@@ -118,43 +119,63 @@ export class DeploymentEngine {
     let workspacePath: string | null = null;
 
     try {
-      // 1. Clone
-      await moveTo(DeploymentStatus.CLONING);
-      workspacePath = await this.deps.workspace.prepare(job.id);
-      const source = await this.deps.source.clone(job.repository, workspacePath, job.branch);
-      state.commitSha = source.commitSha;
-      log("system", `Cloned ${job.repository.cloneUrl} at ${source.commitSha.slice(0, 7)}\n`);
-
-      // 2. Detect: the repository's own Dockerfile, or one generated for a Node.js project.
-      await moveTo(DeploymentStatus.DETECTING);
       const service = job.service;
-      const buildDir = await resolveSourceDir(source.path, service?.sourceDir ?? ".");
+      const prebuilt = service?.image ?? null;
       const env = job.env ?? { runtime: {}, build: {} };
-      const plan = await prepareBuild(buildDir, (text) => log("system", text), Object.keys(env.build).sort(), {
-        buildCommand: service?.buildCommand,
-        startCommand: service?.startCommand,
-        port: service?.port,
-      });
-      log("system", describeEnvironment(env));
       const worker = service?.type === "WORKER";
-      state.containerPort = worker ? null : plan.containerPort;
-
-      // 3. Build
-      await moveTo(DeploymentStatus.BUILDING);
       const healthCheck = job.healthCheck ?? DEFAULT_HEALTH_CHECK;
-      const labels = this.labelsFor(job, state.containerPort, healthCheck);
-      await this.deps.docker.buildImage(
-        buildDir,
-        state.imageName,
-        labels,
-        (text) => log("build", text),
-        plan.dockerfile,
-        env.build,
-      );
-      await this.deps.registry.publish(state.imageName, (text) => log("build", text));
-      // Source is baked into the image now; the clone is no longer needed.
-      await this.deps.workspace.cleanup(workspacePath);
-      workspacePath = null;
+      let command: string[] | undefined;
+
+      if (prebuilt) {
+        // A prebuilt image (a database): nothing to clone, detect or build. The
+        // statuses still advance in order, so history reads the same.
+        await moveTo(DeploymentStatus.CLONING);
+        log("system", `Runs the prebuilt image ${prebuilt.name}: nothing to clone or build\n`);
+        await moveTo(DeploymentStatus.DETECTING);
+        log("system", describeEnvironment(env));
+        state.imageName = prebuilt.name;
+        state.containerPort = service!.port;
+        await moveTo(DeploymentStatus.BUILDING);
+        await this.deps.docker.ensureImage(prebuilt.name, (text) => log("build", text));
+      } else {
+        // 1. Clone
+        await moveTo(DeploymentStatus.CLONING);
+        workspacePath = await this.deps.workspace.prepare(job.id);
+        const source = await this.deps.source.clone(job.repository, workspacePath, job.branch);
+        state.commitSha = source.commitSha;
+        log("system", `Cloned ${job.repository.cloneUrl} at ${source.commitSha.slice(0, 7)}\n`);
+
+        // 2. Detect: the repository's own Dockerfile, or one generated for a Node.js project.
+        await moveTo(DeploymentStatus.DETECTING);
+        const buildDir = await resolveSourceDir(source.path, service?.sourceDir ?? ".");
+        const plan = await prepareBuild(buildDir, (text) => log("system", text), Object.keys(env.build).sort(), {
+          buildCommand: service?.buildCommand,
+          startCommand: service?.startCommand,
+          port: service?.port,
+        });
+        log("system", describeEnvironment(env));
+        state.containerPort = worker ? null : plan.containerPort;
+        command = plan.command;
+
+        // 3. Build
+        await moveTo(DeploymentStatus.BUILDING);
+        await this.deps.docker.buildImage(
+          buildDir,
+          state.imageName,
+          this.labelsFor(job, state.containerPort, healthCheck),
+          (text) => log("build", text),
+          plan.dockerfile,
+          env.build,
+        );
+        await this.deps.registry.publish(state.imageName, (text) => log("build", text));
+        // Source is baked into the image now; the clone is no longer needed.
+        await this.deps.workspace.cleanup(workspacePath);
+        workspacePath = null;
+      }
+      const labels = {
+        ...this.labelsFor(job, state.containerPort, healthCheck),
+        ...(prebuilt && { [ShipyardLabel.HEALTH_KIND]: "docker" }),
+      };
 
       // 4. Start
       await moveTo(DeploymentStatus.STARTING);
@@ -171,21 +192,26 @@ export class DeploymentEngine {
         volumes: job.volumes,
         imageName: state.imageName,
         containerName: state.containerName,
-        containerPort: state.containerPort,
+        // A prebuilt service is reached by name on the project network only: nothing is published.
+        containerPort: prebuilt ? null : state.containerPort,
         labels,
         network: routed ? this.deps.router.network : null,
         privateNetwork: service ? { name: service.network, alias: service.alias } : null,
-        command: plan.command,
-        env: env.runtime,
-        healthCheckPort: healthCheck.port,
+        command,
+        env: { ...env.runtime, ...service?.environment },
+        healthCheckPort: prebuilt ? null : healthCheck.port,
         resources: job.resources,
+        ...(prebuilt && { healthCommand: prebuilt.healthCommand }),
       });
       state.containerId = container.id;
       state.hostPort = container.hostPort;
 
       // 5. Health check: HTTP for web services; for workers, that the process keeps running.
       await moveTo(DeploymentStatus.HEALTH_CHECKING);
-      if (worker) {
+      if (prebuilt) {
+        const seconds = await this.waitDockerHealthy(container.id, healthCheck.timeoutMs);
+        log("system", `Ready: ${prebuilt.healthCommand[0]} succeeded after ${seconds}s\n`);
+      } else if (worker) {
         await this.waitWorkerSettles(container.id);
         log("system", `Worker kept running for ${Math.round(this.workerSettleMs / 1000)}s\n`);
       } else {
@@ -217,7 +243,9 @@ export class DeploymentEngine {
           "system",
           worker
             ? `Running (workers aren't routed)\n`
-            : `Running, private: reachable inside the project at http://${service.alias}:${state.containerPort}\n`,
+            : prebuilt
+              ? `Running, private: reachable inside the project at ${service.alias}:${state.containerPort}\n`
+              : `Running, private: reachable inside the project at http://${service.alias}:${state.containerPort}\n`,
         );
       }
       await moveTo(DeploymentStatus.RUNNING);
@@ -291,7 +319,8 @@ export class DeploymentEngine {
   ): Promise<ContainerActionResult> {
     const before = await this.deps.docker.inspectManagedContainer(containerReference);
     await this.deps.docker.restartContainer(before.id);
-    const worker = before.containerPort === 0;
+    // Workers and Docker-checked services publish nothing.
+    const worker = before.containerPort === 0 || before.dockerHealthCheck;
 
     // Docker may assign a different ephemeral host port after a restart, and
     // can report no port at all for a moment while it re-publishes them.
@@ -310,7 +339,9 @@ export class DeploymentEngine {
 
     // Checked the way it was when deployed (its labels), not with today's project settings.
     await onStage(DeploymentStatus.HEALTH_CHECKING);
-    if (worker) {
+    if (before.dockerHealthCheck) {
+      await this.waitDockerHealthy(after.id, after.healthCheck.timeoutMs);
+    } else if (worker) {
       await this.waitWorkerSettles(after.id);
     } else {
       await this.deps.healthCheck.waitUntilHealthy({
@@ -396,6 +427,33 @@ export class DeploymentEngine {
   }
 
   /** A worker is healthy once it has kept running for workerSettleMs; exiting earlier fails it with its exit code. */
+  /**
+   * Waits for Docker's own health check (the image's command, e.g. pg_isready)
+   * to pass. Returns the seconds it took. Fails if the container stops, Docker
+   * reports it unhealthy, or `timeoutMs` (default 2 minutes) passes.
+   */
+  private async waitDockerHealthy(containerId: string, timeoutMs: number | null): Promise<number> {
+    const started = Date.now();
+    const limit = timeoutMs ?? 120_000;
+    while (true) {
+      const state = await this.deps.docker.getContainerState(containerId);
+      if (state.health === "healthy") return Math.max(1, Math.round((Date.now() - started) / 1000));
+      if (!state.running) {
+        const how = state.oomKilled ? " because it ran out of memory" : state.exitCode === null ? "" : ` with code ${state.exitCode}`;
+        throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, `The container exited${how} before it was ready.`, { statusCode: 422 });
+      }
+      if (state.health === "unhealthy") {
+        throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, "Docker reports the container unhealthy: its readiness check keeps failing.", {
+          statusCode: 422,
+        });
+      }
+      if (Date.now() - started >= limit) {
+        throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, `Not ready within ${Math.round(limit / 1000)}s.`, { statusCode: 422 });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
   private async waitWorkerSettles(containerId: string): Promise<void> {
     const deadline = Date.now() + this.workerSettleMs;
     while (true) {

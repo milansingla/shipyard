@@ -5,7 +5,7 @@ import { idParamsSchema, parseInput } from "../../lib/validation.js";
 import { requireUser } from "../../middleware/authenticate.js";
 import { z } from "zod";
 
-import { createServiceSchema, createVolumeSchema, updateServiceSchema } from "./service.schemas.js";
+import { createDatabaseSchema, createServiceSchema, createVolumeSchema, updateServiceSchema } from "./service.schemas.js";
 import type { ServiceService } from "./ServiceService.js";
 import type { VolumeService } from "./VolumeService.js";
 
@@ -24,6 +24,10 @@ export function createServiceRouter(services: ServiceService, volumes: VolumeSer
   router.post("/projects/:id/services", async (req, res) => {
     const user = requireUser(req);
     const { id } = parseInput(idParamsSchema, req.params, "project id");
+    if ((req.body as { type?: unknown } | undefined)?.type === "POSTGRES") {
+      sendData(res, await services.createDatabase(id, user.id, parseInput(createDatabaseSchema, req.body, "database")), 201);
+      return;
+    }
     const input = parseInput(createServiceSchema, req.body, "service");
     sendData(res, await services.create(id, user.id, input), 201);
   });

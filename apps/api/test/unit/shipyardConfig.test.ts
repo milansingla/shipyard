@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { connectionUrl, connectionVariable, postgresVersionOf } from "../../src/modules/services/postgres.js";
 import { mountPathSchema } from "../../src/modules/services/service.schemas.js";
 import { parseShipyardConfig } from "../../src/services/config/shipyardConfig.js";
 
@@ -64,6 +65,10 @@ services:
     ["version: 1\nservices:\n  web:\n    volumes:\n      data: relative/path", "at services.web.volumes.data"],
     ["version: 1\nservices:\n  web:\n    volumes:\n      data: /etc/app", "system directory"],
     ["version: 1\nservices:\n  web:\n    volumes:\n      a: /data\n      b: /data", "share a mount path"],
+    ["version: 1\nservices:\n  db:\n    type: postgres\n    version: 12", "at services.db.version"],
+    ["version: 1\nservices:\n  db:\n    type: postgres\n    port: 5433", "only takes version and resources"],
+    ["version: 1\nservices:\n  db:\n    type: postgres\n    source: db", "only takes version and resources"],
+    ["version: 1\nservices:\n  web:\n    version: 17", "only postgres services have a version"],
   ])("explains what is wrong with %j", (source, message) => {
     expect(() => parseShipyardConfig(source)).toThrow(message);
   });
@@ -87,4 +92,25 @@ describe("volume mount paths", () => {
       expect(mountPathSchema.safeParse(p).success).toBe(false);
     },
   );
+});
+
+describe("postgres services", () => {
+  it("are declared with a version (default 17) and resources only", () => {
+    const [db, analytics] = parseShipyardConfig("version: 1\nservices:\n  db:\n    type: postgres\n  analytics:\n    type: postgres\n    version: 16\n    resources:\n      memoryMb: 256\n");
+    expect(db).toMatchObject({ name: "db", database: { version: 17 }, volumes: [] });
+    expect(analytics).toMatchObject({ database: { version: 16 }, settings: { memoryLimitMb: 256 } });
+  });
+
+  it("names the URL variable DATABASE_URL first, then after the service", () => {
+    expect(connectionVariable("db", new Set())).toBe("DATABASE_URL");
+    expect(connectionVariable("analytics-db", new Set(["DATABASE_URL"]))).toBe("ANALYTICS_DB_DATABASE_URL");
+    expect(connectionVariable("db", new Set(["DATABASE_URL", "DB_DATABASE_URL"]))).toBeNull();
+  });
+
+  it("builds the URL apps connect with, and reads versions only from Shipyard's own images", () => {
+    expect(connectionUrl("db", "pw")).toBe("postgres://app:pw@db:5432/app");
+    expect(postgresVersionOf("postgres:16-alpine")).toBe(16);
+    expect(postgresVersionOf("postgres:9-alpine")).toBeNull();
+    expect(postgresVersionOf("evil/postgres:17-alpine")).toBeNull();
+  });
 });

@@ -36,6 +36,9 @@ services:
     source: apps/worker
     start:
       command: node worker.js
+  db:
+    type: postgres          # a database: version and resources only
+    version: 17             # see databases.md
 ```
 
 ## When it is read
@@ -50,6 +53,11 @@ shallow clone downloads only that one file, before anything is built. Then:
   delete it on the project page;
 - the build log of each deployment starts with what changed
   (`shipyard.yaml: added service api`, `updated web: port`);
+- a `type: postgres` service is created with its password and URL
+  ([databases.md](databases.md)). Afterwards only its resources follow the
+  file: its version never changes, and a service never switches between
+  being a database and being built from the repository (the deploy fails,
+  saying so);
 - **volumes** the file declares are added. A volume taken out of the file,
   or given another path, stays as it is (the build log says so): moving or
   detaching stored data is done on the project page. See
