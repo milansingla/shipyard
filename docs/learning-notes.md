@@ -340,3 +340,65 @@ scale's water level was computed against a stretched container.
 | `useApi` (40 lines)       | TanStack Query / SWR          | Only load + poll needed; no cache invalidation yet |
 | Polling                   | SSE / WebSockets              | Simple and stateless; SSE for logs in V3          |
 | No component tests        | Testing Library / Playwright  | Logic is unit-tested; a Playwright suite is a V3 item |
+
+---
+
+## Milestone 6 — Deploy on push (GitHub webhooks)
+
+### Understand Before Interview
+
+#### Key concepts
+
+1. **HMAC signatures** — GitHub and Shipyard share a secret; GitHub sends
+   `HMAC-SHA256(secret, body)`. Matching proves the sender knows the secret and
+   the body wasn't changed.
+2. **Raw body** — the HMAC covers exact bytes. Parsing and re-serialising JSON
+   changes whitespace and key order, so verification must use the raw buffer.
+3. **Constant-time comparison** — `timingSafeEqual` takes the same time however
+   many bytes match, so an attacker can't guess the signature byte by byte.
+4. **At-least-once delivery → idempotency** — webhooks are retried; the
+   delivery id is a natural idempotency key. Insert first, act second.
+5. **Coalescing** — many triggers while busy collapse into one follow-up run of
+   the newest state (like a debounced build).
+6. **The payload selects, the database decides** — the webhook only says
+   *which* repository changed; what to clone comes from the stored project.
+
+#### Likely interview questions
+
+**How do you know a webhook really came from GitHub?**
+Verify `X-Hub-Signature-256` with HMAC-SHA256 over the raw body and the shared
+secret, in constant time, before reading anything else. Tested against GitHub's
+own published example (`webhooks.test.ts`).
+
+**What if GitHub delivers the same push twice?**
+`webhook_deliveries` has the delivery id as primary key. The insert happens
+before acting; a duplicate violates the key and returns "already handled". If
+handling throws, the row is deleted so GitHub's retry isn't wrongly skipped.
+
+**What happens if I push three times during a five-minute build?**
+The first push finds the project busy and sets a flag; the next two find the
+flag already set. When the build ends, the lock release sees the flag and
+starts ONE deploy of the branch head — which contains all three commits.
+
+**Why not deploy the exact commit SHA from the payload?**
+Shallow clones fetch a branch, not an arbitrary SHA. Deploying the branch head
+is what users expect anyway ("deploy the latest"), and with coalescing it is
+always at least as new as the push. The deployment records the commit it built.
+
+**Why return 200 before the deploy finishes?**
+GitHub times out after ~10 s and retries; builds take minutes. Accept, record,
+start in the background — same 202-style pattern as the API.
+
+**Could an attacker with the secret run their own code?**
+Only redeploy existing projects at their branch heads — the clone URL comes
+from the project row, never the payload. Still, the secret should be rotated if
+leaked; per-project secrets are a V3 item.
+
+#### Trade-offs to be able to defend
+
+| Decision                    | Alternative                      | Why this, for now                          |
+| --------------------------- | -------------------------------- | ------------------------------------------ |
+| One global webhook secret   | Per-project secrets              | One value to set; payload can't choose code |
+| Repository webhooks         | GitHub App (org-wide)            | No app registration; GitHub App in V3      |
+| In-memory "deploy again" flag | Persistent job queue           | Single process; push again after a restart |
+| Branch head, not payload SHA | `git fetch <sha>`               | Shallow clone simplicity; coalescing-friendly |

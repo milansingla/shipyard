@@ -65,6 +65,10 @@ describe("authentication", () => {
         exposeInternalErrors: false,
       }),
     );
+    const webhook = await fetch(`${base}/api/webhooks/github`, { method: "POST", body: "{}" });
+    expect(webhook.status).toBe(503);
+    expect(await webhook.json()).toMatchObject({ error: { code: "WEBHOOKS_NOT_CONFIGURED" } });
+
     for (const route of ["/api/projects", "/api/auth/me", "/api/auth/github/login", "/api/github/repos"]) {
       const res = await fetch(`${base}${route}`);
       expect({ route, status: res.status }).toEqual({ route, status: 503 });

@@ -26,6 +26,14 @@ enum DeploymentStatus {
   STOPPED
 }
 
+/// What started a deployment.
+enum DeploymentTrigger {
+  /// Someone clicked Deploy / Redeploy (dashboard or API).
+  MANUAL
+  /// A GitHub push webhook.
+  PUSH
+}
+
 /// A person who signed in with GitHub. GitHub is the only identity provider in V2.
 model User {
   id                String    @id @default(uuid()) @db.Uuid
@@ -90,6 +98,7 @@ model Deployment {
   projectId     String           @db.Uuid
   project       Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
   status        DeploymentStatus @default(PENDING)
+  trigger       DeploymentTrigger @default(MANUAL)
   /// Branch at the time of deployment (the project's branch may change later).
   branch        String
   commitSha     String?
@@ -108,4 +117,19 @@ model Deployment {
   @@index([projectId, createdAt(sort: Desc)])
   @@index([status])
   @@map("deployments")
+}
+
+/// Every GitHub webhook delivery Shipyard accepted, keyed by GitHub's delivery
+/// id. GitHub retries and redelivers with the same id, so inserting first makes
+/// processing idempotent: a duplicate insert means "already handled".
+model WebhookDelivery {
+  /// X-GitHub-Delivery (a GUID).
+  id         String   @id
+  event      String
+  /// Human-readable result, e.g. "deployed crop-prices-api; queued agrowatch".
+  outcome    String?
+  receivedAt DateTime @default(now())
+
+  @@index([receivedAt])
+  @@map("webhook_deliveries")
 }

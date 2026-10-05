@@ -45,6 +45,7 @@ history is what makes "what was running at 14:02?" and rollback possible.
 
 | Field                                 | Notes                                                        |
 | ------------------------------------- | ------------------------------------------------------------ |
+| `trigger`                             | `MANUAL` or `PUSH` (GitHub webhook) |
 | `status`                              | `DeploymentStatus` enum — see [deployment-engine.md](deployment-engine.md) |
 | `branch`                              | Copied from the project at deploy time (the project may change later) |
 | `commitSha`                           | Exact commit built; set after clone                          |
@@ -78,6 +79,13 @@ container is orphaned without a record.
 **Startup reconciliation.** Deployments run inside the API process. If it stops
 mid-deploy, rows stuck in CLONING/BUILDING/… are marked FAILED on the next start,
 and RUNNING rows are checked against Docker (`DeploymentService.reconcileOnStartup`).
+
+### WebhookDelivery
+One row per accepted GitHub webhook, keyed by GitHub's `X-GitHub-Delivery` id,
+with a human-readable `outcome`. The row is inserted **before** acting, so a
+retried or redelivered webhook hits the primary key and is skipped. If handling
+fails, the row is deleted again so GitHub's retry can succeed. Rows older than
+30 days are pruned at startup.
 
 ## Known limits
 

@@ -10,6 +10,7 @@ import { AuthService } from "./modules/auth/AuthService.js";
 import { BuildLogStore } from "./modules/deployments/BuildLogStore.js";
 import { DeploymentService } from "./modules/deployments/DeploymentService.js";
 import { ProjectService } from "./modules/projects/ProjectService.js";
+import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
 import { DockerService } from "./services/docker/DockerService.js";
@@ -29,6 +30,8 @@ export interface ApiServices extends EngineServices {
   deployments: DeploymentService;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
+  /** null when GITHUB_WEBHOOK_SECRET is not set. */
+  webhooks: { service: WebhookService; secret: string } | null;
 }
 
 /**
@@ -76,7 +79,14 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     logger: logger.child({ component: "projects" }),
   });
 
-  return { ...engineServices, prisma, projects, deployments, auth: createAuth(config, prisma, logger) };
+  const webhooks = config.githubWebhookSecret
+    ? {
+        service: new WebhookService({ prisma, deployments, logger: logger.child({ component: "webhooks" }) }),
+        secret: config.githubWebhookSecret,
+      }
+    : null;
+
+  return { ...engineServices, prisma, projects, deployments, auth: createAuth(config, prisma, logger), webhooks };
 }
 
 function createAuth(config: AppConfig, prisma: PrismaClient, logger: Logger): AppAuth | null {

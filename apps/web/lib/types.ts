@@ -21,10 +21,14 @@ export interface User {
   avatarUrl: string | null;
 }
 
+export type DeploymentTrigger = "MANUAL" | "PUSH";
+
 export interface Deployment {
   id: string;
   projectId: string;
   status: DeploymentStatus;
+  /** What started it: someone deploying, or a GitHub push. */
+  trigger: DeploymentTrigger;
   branch: string;
   commitSha: string | null;
   imageName: string | null;

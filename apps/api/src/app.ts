@@ -11,6 +11,8 @@ import { createDeploymentRouter } from "./modules/deployments/deployment.routes.
 import type { DeploymentService } from "./modules/deployments/DeploymentService.js";
 import { createGitHubRouter } from "./modules/github/github.routes.js";
 import { createProjectRouter } from "./modules/projects/project.routes.js";
+import { createWebhookRouter } from "./modules/webhooks/webhook.routes.js";
+import type { WebhookService } from "./modules/webhooks/WebhookService.js";
 import type { ProjectService } from "./modules/projects/ProjectService.js";
 import { createHealthRouter } from "./routes/health.js";
 import type { DockerService } from "./services/docker/DockerService.js";
@@ -32,6 +34,8 @@ export interface AppDeps {
   deployments?: DeploymentService;
   /** null/omitted = GitHub sign-in not configured: protected routes answer 503. */
   auth?: AppAuth | null;
+  /** GitHub push webhooks; null/omitted = not configured (503). */
+  webhooks?: { service: WebhookService; secret: string } | null;
   /** Origins allowed to make state-changing browser requests (the API's and the dashboard's). */
   allowedOrigins?: readonly string[];
   logger: Logger;
@@ -47,6 +51,8 @@ export function createApp(deps: AppDeps): Express {
   app.locals.authConfigured = Boolean(auth);
   app.use(requestLogger(logger)); // first, so even requests rejected by the body parser are logged
   app.use(originCheck(deps.allowedOrigins ?? []));
+  // Before express.json(): webhook signatures are verified over the raw body.
+  app.use("/api", createWebhookRouter(deps.webhooks?.service ?? null, deps.webhooks?.secret ?? null));
   app.use(express.json({ limit: "100kb" }));
 
   app.use("/api", createHealthRouter(docker));

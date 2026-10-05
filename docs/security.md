@@ -64,6 +64,10 @@ scanning.
 | Login CSRF / code interception     | OAuth `state` bound to an httpOnly cookie; PKCE S256                         | `AuthService` |
 | CSRF on API calls                  | `SameSite=Lax` session cookie + `Origin`/`Sec-Fetch-Site` check on POST/DELETE | `middleware/originCheck.ts` |
 | Session theft via XSS / DB leak    | `HttpOnly` cookie; DB stores sha256(token); server-side logout              | `AuthService` |
+| Forged push webhooks               | HMAC-SHA256 over the raw body, constant-time compare; verified before anything else is read | `modules/webhooks/signature.ts` |
+| Replayed / duplicated deliveries   | Delivery id stored before acting; duplicates are no-ops                      | `WebhookService` |
+| Webhook payload choosing what runs | Payload only *selects* projects; clone URL and branch come from the project | `WebhookService` |
+| Server paths in error messages     | git failures explained; workspace paths never shown                           | `GitService.explainGitFailure` |
 | GitHub token leak                  | AES-256-GCM at rest; never in API responses; scope `read:user`              | `lib/secretBox.ts` |
 
 Details of the sign-in design: [github.md](github.md).
@@ -80,5 +84,11 @@ Details of the sign-in design: [github.md](github.md).
   image layers; reclaim with `docker image prune`.
 - No memory/CPU limits on containers (would break some apps without per-project config).
 - No egress restrictions for deployed containers.
-- Webhook signature verification arrives with webhooks (M6) — HMAC-SHA256,
-  constant-time compare, raw body.
+- One webhook secret for all repositories: anyone who has it can make Shipyard
+  redeploy the **latest commit** of any project's branch (never other code —
+  the clone URL comes from the project, not the payload). Per-project secrets
+  are a V3 item. Rotate it by changing `GITHUB_WEBHOOK_SECRET` and every
+  repository's webhook.
+- A push received while Shipyard restarts mid-deploy is not replayed (the
+  "deploy again when done" mark is in memory). Push again, or redeliver from
+  GitHub's webhook page.

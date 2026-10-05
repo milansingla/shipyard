@@ -15,6 +15,8 @@ import { AuthService } from "../../src/modules/auth/AuthService.js";
 import { BuildLogStore } from "../../src/modules/deployments/BuildLogStore.js";
 import { DeploymentService, type EngineLike } from "../../src/modules/deployments/DeploymentService.js";
 import { ProjectService } from "../../src/modules/projects/ProjectService.js";
+import { signGitHubPayload } from "../../src/modules/webhooks/signature.js";
+import { WebhookService } from "../../src/modules/webhooks/WebhookService.js";
 import { DeploymentStatus as S } from "../../src/services/deployment/status.js";
 import type { DeploymentState } from "../../src/services/deployment/types.js";
 import { GitHubClient } from "../../src/services/github/GitHubClient.js";
@@ -99,6 +101,9 @@ function repo(owner: string, name: string, isPrivate: boolean) {
   };
 }
 
+/** While set, every fake deployment pauses after CLONING until it resolves. */
+let holdRuns: Promise<void> | null = null;
+
 /** Walks a deployment to RUNNING instantly, without Docker. */
 const fakeEngine: EngineLike = {
   async run(job, observer = {}) {
@@ -121,6 +126,7 @@ const fakeEngine: EngineLike = {
       const previous = state.status;
       state.status = status;
       await observer.onStatusChange?.(state, previous);
+      if (status === S.CLONING && holdRuns) await holdRuns;
     }
     return state;
   },
@@ -140,6 +146,7 @@ const fakeEngine: EngineLike = {
 };
 
 const APP_URL = "http://localhost:3000";
+const WEBHOOK_SECRET = "integration-test-webhook-secret";
 const SESSION_COOKIE = sessionCookieName(false);
 const ALICE = { id: 1001, login: "alice" };
 const BOB = { id: 2002, login: "bob" };
@@ -201,6 +208,10 @@ beforeAll(async () => {
       projects,
       deployments,
       auth: { service: auth, github, sessionCookie: SESSION_COOKIE, secureCookies: false, appUrl: APP_URL },
+      webhooks: {
+        service: new WebhookService({ prisma, deployments, logger: silentLogger }),
+        secret: WEBHOOK_SECRET,
+      },
       allowedOrigins: [api, APP_URL],
       logger: silentLogger,
       exposeInternalErrors: true,
@@ -209,8 +220,10 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
+  holdRuns = null;
   await deployments.waitForIdle();
   await resetTables(prisma);
+  await prisma.webhookDelivery.deleteMany();
 });
 
 afterAll(async () => {
@@ -467,5 +480,135 @@ describe("repository selection", () => {
     const res = await call(alice, "GET", "/api/github/repos");
     expect(res.status).toBe(401);
     expect(res.body!.error.message).toContain("Sign in again");
+  });
+});
+
+describe("GitHub push webhooks", () => {
+  function pushPayload(owner: string, name: string, ref: string, extra: Record<string, unknown> = {}) {
+    return {
+      ref,
+      after: "7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+      deleted: false,
+      repository: { name, owner: { login: owner, name: owner } },
+      ...extra,
+    };
+  }
+
+  async function deliver(
+    payload: unknown,
+    options: { event?: string; delivery?: string; secret?: string; contentType?: string } = {},
+  ) {
+    const body = JSON.stringify(payload);
+    const res = await fetch(`${api}/api/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "content-type": options.contentType ?? "application/json",
+        "x-github-event": options.event ?? "push",
+        "x-github-delivery": options.delivery ?? randomUUID(),
+        "x-hub-signature-256": signGitHubPayload(options.secret ?? WEBHOOK_SECRET, body),
+      },
+      body,
+    });
+    return { status: res.status, body: (await res.json()) as Record<string, any> };
+  }
+
+  async function createProject(cookie: string, repositoryUrl: string, branch: string, name?: string) {
+    const res = await call(cookie, "POST", "/api/projects", { repositoryUrl, branch, name });
+    expect(res.status).toBe(201);
+    return res.body!.data.id as string;
+  }
+
+  it("answers GitHub's ping", async () => {
+    const res = await deliver({ zen: "Design for failure." }, { event: "ping" });
+    expect(res).toEqual({ status: 200, body: { data: { duplicate: false, outcome: "pong" } } });
+  });
+
+  it("deploys every project tracking the pushed repository and branch, and nothing else", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const main = await createProject(alice, "https://github.com/Acme/Shop", "main", "shop");
+    const otherBranch = await createProject(alice, "https://github.com/acme/shop", "develop", "shop-dev");
+    const otherRepo = await createProject(alice, "https://github.com/acme/blog", "main", "blog");
+    const bobsCopy = await createProject(bob, "https://github.com/acme/shop", "main", "bobs-shop");
+
+    // Lower-case in the payload, mixed case in the project: GitHub names are case-insensitive.
+    const res = await deliver(pushPayload("acme", "shop", "refs/heads/main"));
+    expect(res.status).toBe(200);
+    expect(res.body.data.outcome).toBe("7fd1a60 on main: deploying shop; deploying bobs-shop");
+    await deployments.waitForIdle();
+
+    const triggered = await prisma.deployment.findMany({ select: { projectId: true, trigger: true, status: true } });
+    expect(triggered.sort((a, b) => a.projectId.localeCompare(b.projectId))).toEqual(
+      [main, bobsCopy].sort().map((projectId) => ({ projectId, trigger: "PUSH", status: S.RUNNING })),
+    );
+    expect(triggered.some((d) => d.projectId === otherBranch || d.projectId === otherRepo)).toBe(false);
+  });
+
+  it("refuses a delivery with a wrong signature and does nothing", async () => {
+    const alice = await sessionFor(ALICE);
+    await createProject(alice, "https://github.com/acme/shop", "main");
+    const res = await deliver(pushPayload("acme", "shop", "refs/heads/main"), { secret: "an-attacker-guessed-this-secret" });
+    expect(res.status).toBe(401);
+    expect(await prisma.deployment.count()).toBe(0);
+    expect(await prisma.webhookDelivery.count()).toBe(0);
+  });
+
+  it("handles a redelivered webhook once", async () => {
+    const alice = await sessionFor(ALICE);
+    await createProject(alice, "https://github.com/acme/shop", "main");
+    const delivery = randomUUID();
+
+    const first = await deliver(pushPayload("acme", "shop", "refs/heads/main"), { delivery });
+    await deployments.waitForIdle();
+    const second = await deliver(pushPayload("acme", "shop", "refs/heads/main"), { delivery });
+
+    expect(first.body.data.duplicate).toBe(false);
+    expect(second.body.data).toEqual({ duplicate: true, outcome: "already handled" });
+    expect(await prisma.deployment.count()).toBe(1);
+  });
+
+  it.each([
+    ["a tag push", pushPayload("acme", "shop", "refs/tags/v1.0.0"), "push", "not a branch"],
+    ["a deleted branch", pushPayload("acme", "shop", "refs/heads/main", { deleted: true }), "push", "branch deleted"],
+    ["an unknown repository", pushPayload("acme", "unknown", "refs/heads/main"), "push", "no project deploys"],
+    ["another event type", { action: "opened" }, "pull_request", "only acts on push"],
+  ])("ignores %s", async (_case, payload, event, reason) => {
+    const alice = await sessionFor(ALICE);
+    await createProject(alice, "https://github.com/acme/shop", "main");
+    const res = await deliver(payload, { event });
+    expect(res.status).toBe(200);
+    expect(res.body.data.outcome).toContain(reason);
+    expect(await prisma.deployment.count()).toBe(0);
+  });
+
+  it("queues a push that arrives mid-deploy and deploys it once the current deploy ends", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await createProject(alice, "https://github.com/acme/shop", "main");
+
+    let release!: () => void;
+    holdRuns = new Promise((resolve) => (release = resolve));
+    expect((await call(alice, "POST", `/api/projects/${projectId}/deploy`)).status).toBe(202);
+
+    // Three quick pushes while the manual deploy is running…
+    for (let i = 0; i < 3; i += 1) {
+      const res = await deliver(pushPayload("acme", "shop", "refs/heads/main"));
+      expect(res.body.data.outcome).toContain("queued shop");
+    }
+    holdRuns = null;
+    release();
+    await deployments.waitForIdle();
+
+    // …cost exactly one follow-up deployment, triggered by push.
+    const history = await prisma.deployment.findMany({ where: { projectId }, orderBy: { createdAt: "asc" } });
+    expect(history.map((d) => [d.trigger, d.status])).toEqual([
+      ["MANUAL", S.STOPPED], // retired when the newer one went live
+      ["PUSH", S.RUNNING],
+    ]);
+  });
+
+  it("rejects form-encoded deliveries with instructions", async () => {
+    const res = await deliver({}, { contentType: "application/x-www-form-urlencoded" });
+    expect(res.status).toBe(415);
+    expect(res.body.error.message).toContain("application/json");
   });
 });

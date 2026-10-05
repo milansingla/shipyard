@@ -128,7 +128,10 @@ export default function DeploymentPage() {
             <Fact label="Branch">
               <Mono>{d.branch}</Mono>
             </Fact>
-            <Fact label="Started">{relativeTime(d.createdAt)}</Fact>
+            <Fact label="Started">
+              {relativeTime(d.createdAt)}
+              <span className="text-ink-soft"> · {d.trigger === "PUSH" ? "by a push" : "manually"}</span>
+            </Fact>
             <Fact label="Duration">
               <span className="tabular-nums">{duration(d.startedAt, d.finishedAt)}</span>
             </Fact>

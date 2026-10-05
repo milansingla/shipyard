@@ -111,3 +111,52 @@ not the broad `repo` OAuth scope. Planned after V2.
 | `OAUTH_FAILED` (400) | Cancelled, state mismatch, expired/reused code |
 | `FORBIDDEN` (403) | GitHub account not on the allowlist, or a state-changing request from another site |
 | `GITHUB_ERROR` (502/503) | GitHub unreachable, unexpected response, or rate limit |
+
+## Deploy on push (webhooks)
+
+Code: [`modules/webhooks/`](../apps/api/src/modules/webhooks/)
+
+**Setup, once per repository**
+
+1. Put a random secret in `.env`: `GITHUB_WEBHOOK_SECRET=$(openssl rand -hex 32)`
+   (paste the generated value) and restart the API.
+2. GitHub repository → **Settings → Webhooks → Add webhook**:
+   - Payload URL: `<dashboard URL>/api/webhooks/github` (the project page shows it)
+   - Content type: `application/json`
+   - Secret: the same value
+   - Events: **Just the push event**
+3. GitHub sends a `ping`; the delivery should show a green tick and `pong`.
+
+GitHub has to reach the URL. On a laptop, forward it with a tunnel:
+`npx smee-client --url https://smee.io/<channel> --target http://localhost:3000/api/webhooks/github`
+(use the smee.io URL as the Payload URL), or `cloudflared tunnel --url http://localhost:3000`.
+
+**What happens on a push**
+
+```
+POST /api/webhooks/github
+  │ X-Hub-Signature-256 = HMAC-SHA256(secret, raw body)?   no → 401, nothing read or stored
+  │ X-GitHub-Delivery already recorded?                    yes → 200 "already handled"
+  │ event = ping → "pong" · other events → ignored
+  │ push to refs/heads/<branch>? (tags, deletions → ignored)
+  ▼
+every project with that repository (case-insensitive) AND branch
+  ├─ idle → new deployment, trigger PUSH
+  └─ busy → marked; ONE deploy of the latest commit runs when the current one ends
+```
+
+- The route reads the **raw** body (it is mounted before `express.json()`):
+  the signature covers exact bytes, and re-serialised JSON would not match.
+- The response is 200 as soon as deployments are *started*; GitHub only
+  waits ~10 s and doesn't care about the build.
+- Coalescing: five pushes during a build produce one more deployment, of the
+  branch's newest commit — not five.
+- Deployments record their trigger; the dashboard marks push deployments.
+
+| Response | Meaning |
+| --- | --- |
+| 200 `pong` / `deploying …` / `queued …` / `ignored: …` | Accepted; the outcome is also stored |
+| 200 `duplicate: true` | GitHub retried a delivery already handled |
+| 401 | Signature missing or wrong — check the secret matches `.env` |
+| 415 | Webhook content type is form-encoded; set `application/json` |
+| 503 `WEBHOOKS_NOT_CONFIGURED` | `GITHUB_WEBHOOK_SECRET` is not set |

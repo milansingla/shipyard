@@ -31,10 +31,12 @@ export function createErrorHandler(logger: Logger, exposeInternalErrors: boolean
       return;
     }
 
-    // Malformed JSON body from express.json().
-    if (isBodyParserError(error)) {
-      const body: ErrorBody = { error: { code: ErrorCode.VALIDATION_ERROR, message: "Malformed request body." } };
-      res.status(400).json(body);
+    // Malformed (400) or oversized (413) body, from express.json() / express.raw().
+    const bodyError = bodyParserStatus(error);
+    if (bodyError !== null) {
+      const message = bodyError === 413 ? "Request body is too large." : "Malformed request body.";
+      const body: ErrorBody = { error: { code: ErrorCode.VALIDATION_ERROR, message } };
+      res.status(bodyError).json(body);
       return;
     }
 
@@ -49,7 +51,8 @@ export function createErrorHandler(logger: Logger, exposeInternalErrors: boolean
   };
 }
 
-function isBodyParserError(error: unknown): boolean {
+function bodyParserStatus(error: unknown): 400 | 413 | null {
   const candidate = error as { type?: string; status?: number } | null;
-  return candidate?.status === 400 && typeof candidate.type === "string";
+  if (typeof candidate?.type !== "string") return null;
+  return candidate.status === 400 || candidate.status === 413 ? candidate.status : null;
 }

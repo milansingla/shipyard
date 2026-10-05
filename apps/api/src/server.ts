@@ -12,6 +12,7 @@ const services = createApiServices(config, requireDatabaseUrl(config), logger);
 await services.prisma.$connect();
 await services.deployments.reconcileOnStartup();
 await services.auth?.service.deleteExpiredSessions();
+await services.webhooks?.service.pruneDeliveries();
 if (!services.auth) {
   logger.warn("GitHub sign-in is not configured: project and deployment endpoints will answer 503. See .env.example.");
 }
@@ -21,6 +22,7 @@ const app = createApp({
   projects: services.projects,
   deployments: services.deployments,
   auth: services.auth,
+  webhooks: services.webhooks,
   allowedOrigins: [config.publicUrl, config.appUrl],
   logger: logger.child({ component: "http" }),
   exposeInternalErrors: config.env !== "production",

@@ -11,7 +11,8 @@ GitHub repo → clone → detect → docker build → container → health check
 > repository and branch, deploy, and follow each deployment's stages and logs.
 > Behind it: a REST API with background deployments, per-user projects,
 > deployment history in PostgreSQL, and Dockerfile generation for Node.js apps.
-> Push-to-deploy webhooks and Traefik routing are next.
+> Pushes to a project's branch deploy automatically via GitHub webhooks.
+> Traefik routing (stable hostnames, zero-downtime switching) is next.
 > See [the roadmap](#roadmap).
 
 ## Requirements
@@ -112,6 +113,7 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `POST /api/deployments/:id/stop`           | stop (idempotent)                                 |
 | `POST /api/deployments/:id/restart`        | restart + health check; on an old deployment = rollback |
 | `POST /api/deployments/:id/redeploy`       | new deployment of the same project (202)          |
+| `POST /api/webhooks/github`                | GitHub push webhook (HMAC-signed; no session)     |
 
 Everything except `/api/health` and sign-in requires a session; you only see
 your own projects. Responses are `{ "data": … }` or
@@ -157,5 +159,5 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [x] **M3** Node.js project detection + Dockerfile generation
 - [x] **M4** GitHub OAuth, repository & branch selection
 - [x] **M5** Next.js dashboard
-- [ ] **M6** GitHub webhooks (auto-deploy on push)
+- [x] **M6** GitHub webhooks (auto-deploy on push)
 - [ ] **M7** Traefik routing, zero-downtime redeploy

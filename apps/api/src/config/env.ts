@@ -39,6 +39,8 @@ const envSchema = z.object({
   /** Comma-separated GitHub logins allowed to sign in, or "*" for anyone. Required with GitHub sign-in. */
   SHIPYARD_ALLOWED_GITHUB_USERS: z.string().optional(),
   GITHUB_CLIENT_ID: z.string().optional(),
+  /** Shared secret for GitHub push webhooks. Unset = webhooks disabled (503). */
+  GITHUB_WEBHOOK_SECRET: z.string().min(20, "must be at least 20 characters (`openssl rand -hex 32`)").optional(),
   GITHUB_CLIENT_SECRET: z.string().optional(),
 });
 
@@ -78,6 +80,8 @@ export interface AppConfig {
     /** Secure cookies whenever the API is served over HTTPS. */
     secureCookies: boolean;
   };
+  /** null = push webhooks disabled. */
+  githubWebhookSecret: string | null;
 }
 
 /** Pure: turns an env-like object into validated config. Throws on invalid input. */
@@ -125,6 +129,7 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     },
     publicUrl,
     appUrl: trimTrailingSlash(parsed.SHIPYARD_APP_URL ?? publicUrl),
+    githubWebhookSecret: parsed.GITHUB_WEBHOOK_SECRET ?? null,
     auth: {
       ...parseAuth(parsed),
       sessionTtlMs: parsed.SHIPYARD_SESSION_TTL_HOURS * 60 * 60 * 1000,

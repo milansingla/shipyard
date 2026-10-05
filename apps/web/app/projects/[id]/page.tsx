@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
@@ -115,6 +115,8 @@ export default function ProjectPage() {
         )}
       </div>
 
+      <PushDeploySetup branch={p.branch} />
+
       <h2 className="mt-12 font-display text-2xl font-bold uppercase tracking-wide">Deployments</h2>
       {history.data?.length === 0 && <p className="mt-4 text-ink-soft">No deployments yet. Deploy the latest commit to start.</p>}
       {history.data && history.data.length > 0 && (
@@ -139,6 +141,11 @@ export default function ProjectPage() {
                     <Link href={`/deployments/${d.id}`} className="font-mono underline decoration-rivet underline-offset-4 group-hover:decoration-ink">
                       {shortId(d.id)}
                     </Link>
+                    {d.trigger === "PUSH" && (
+                      <span className="ml-2 rounded-sm border border-rivet px-1.5 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-ink-soft">
+                        push
+                      </span>
+                    )}
                   </td>
                   <td className="py-3 pr-4">
                     <Mono>{shortSha(d.commitSha)}</Mono>
@@ -152,5 +159,44 @@ export default function ProjectPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/** How to make pushes deploy this project. Collapsed: it's set up once per repository. */
+function PushDeploySetup({ branch }: { branch: string }) {
+  // The webhook URL is this dashboard's own origin: it proxies /api to the API.
+  const [origin, setOrigin] = useState("");
+  useEffect(() => setOrigin(window.location.origin), []);
+  const payloadUrl = `${origin}/api/webhooks/github`;
+
+  return (
+    <details className="mt-8 border-y border-rivet py-4 [&_summary::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer items-center justify-between gap-4 text-sm">
+        <span>
+          <span className="font-semibold">Deploy on push</span>
+          <span className="ml-2 text-ink-soft">Each push to {branch} deploys automatically, once the webhook is set up.</span>
+        </span>
+        <span aria-hidden className="text-ink-soft">Set up ▾</span>
+      </summary>
+      <div className="mt-4 grid gap-4 text-sm sm:grid-cols-[12rem_1fr]">
+        <p className="text-ink-soft sm:col-span-2">
+          In the GitHub repository, open <strong>Settings → Webhooks → Add webhook</strong> and enter:
+        </p>
+        <Label>Payload URL</Label>
+        <Mono className="break-all">{payloadUrl}</Mono>
+        <Label>Content type</Label>
+        <Mono>application/json</Mono>
+        <Label>Secret</Label>
+        <span>
+          The value of <Mono>GITHUB_WEBHOOK_SECRET</Mono> in this server&apos;s <Mono>.env</Mono>
+        </span>
+        <Label>Events</Label>
+        <span>Just the push event</span>
+        <p className="text-ink-soft sm:col-span-2">
+          GitHub must be able to reach this URL. On your own machine, forward it with a tunnel (for example{" "}
+          <Mono>smee.io</Mono> or <Mono>cloudflared tunnel</Mono>) and use the tunnel&apos;s URL instead.
+        </p>
+      </div>
+    </details>
   );
 }

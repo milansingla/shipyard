@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { type Deployment, type PrismaClient, type Project } from "../../db/prisma.js";
+import { type Deployment, DeploymentTrigger, type PrismaClient, type Project } from "../../db/prisma.js";
 import { ConflictError, ErrorCode, NotFoundError, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { DeploymentEngine, DeploymentFailedError } from "../../services/deployment/DeploymentEngine.js";
@@ -22,6 +22,12 @@ export interface DeploymentServiceDeps {
 }
 
 export type LogType = "build" | "runtime";
+
+/** What happened to a push-triggered deploy request. */
+export type PushDeployResult =
+  | { outcome: "started"; deployment: Deployment }
+  /** A deploy/restart of the project was running; one follow-up deploy will run when it ends. */
+  | { outcome: "queued" };
 
 export interface DeploymentLogs {
   type: LogType;
@@ -48,6 +54,11 @@ const IN_PROGRESS: DeploymentStatus[] = [
  * - deploys run in the background; the API returns immediately
  * - after a crash/restart of Shipyard, stored statuses are reconciled with Docker
  *
+ * Pushes that arrive while a project is busy are coalesced: the project is
+ * marked, and ONE deploy of the branch's latest commit starts when the lock is
+ * released — ten quick pushes cost one extra build, not ten, and none is lost.
+ * The mark is in memory (lost if Shipyard restarts mid-deploy; push again).
+ *
  * Authorization: every public method takes the acting user's id and only
  * finds deployments of that user's projects; anything else is a 404.
  *
@@ -56,6 +67,8 @@ const IN_PROGRESS: DeploymentStatus[] = [
  */
 export class DeploymentService {
   private readonly busyProjects = new Set<string>();
+  /** Projects that received a push while busy; see deployOnPush. */
+  private readonly pushWhileBusy = new Set<string>();
   private readonly pending = new Set<Promise<unknown>>();
 
   constructor(private readonly deps: DeploymentServiceDeps) {}
@@ -102,7 +115,11 @@ export class DeploymentService {
    * Creates a PENDING deployment for the project's configured branch and starts
    * the pipeline in the background. Returns immediately; poll GET /deployments/:id.
    */
-  async deploy(projectId: string, ownerId: string): Promise<Deployment> {
+  async deploy(
+    projectId: string,
+    ownerId: string,
+    trigger: DeploymentTrigger = DeploymentTrigger.MANUAL,
+  ): Promise<Deployment> {
     const project = await this.getProject(projectId, ownerId);
     this.lockProject(projectId);
 
@@ -113,6 +130,7 @@ export class DeploymentService {
         data: {
           id,
           projectId,
+          trigger,
           branch: project.branch,
           ...DeploymentEngine.artifactNames({ id, name: project.slug }),
         },
@@ -124,6 +142,18 @@ export class DeploymentService {
 
     this.track(this.execute(project, deployment).finally(() => this.unlockProject(projectId)));
     return deployment;
+  }
+
+  /**
+   * Deploys after a GitHub push. Unlike deploy(), a busy project is not an
+   * error: the push is remembered and deployed when the current work ends.
+   */
+  async deployOnPush(projectId: string, ownerId: string): Promise<PushDeployResult> {
+    if (this.busyProjects.has(projectId)) {
+      this.pushWhileBusy.add(projectId);
+      return { outcome: "queued" };
+    }
+    return { outcome: "started", deployment: await this.deploy(projectId, ownerId, DeploymentTrigger.PUSH) };
   }
 
   /** Deploys the latest commit of the same project/branch as an existing deployment. */
@@ -410,6 +440,20 @@ export class DeploymentService {
 
   private unlockProject(projectId: string): void {
     this.busyProjects.delete(projectId);
+    if (this.pushWhileBusy.delete(projectId)) this.track(this.deployQueuedPush(projectId));
+  }
+
+  /** Runs the deploy a push asked for while the project was busy. */
+  private async deployQueuedPush(projectId: string): Promise<void> {
+    try {
+      // Unscoped lookup: the push's signature was verified when it arrived; the deploy runs as the project's owner.
+      const project = await this.deps.prisma.project.findUnique({ where: { id: projectId } });
+      if (!project) return; // deleted in the meantime
+      const result = await this.deployOnPush(project.id, project.ownerId);
+      this.deps.logger.info({ projectId, outcome: result.outcome }, "Deployed a push received during a previous deploy");
+    } catch (error) {
+      this.deps.logger.error({ err: error, projectId }, "Could not deploy a queued push");
+    }
   }
 
   private track(promise: Promise<unknown>): void {

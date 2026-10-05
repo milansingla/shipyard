@@ -35,6 +35,7 @@
 | Component            | Knows about                         | Does NOT know about        |
 | -------------------- | ----------------------------------- | -------------------------- |
 | `AuthService`        | OAuth flow, sessions, allowlist     | projects, Docker           |
+| `WebhookService`     | signed GitHub deliveries, idempotency, which projects a push deploys | Docker, sessions |
 | `GitHubClient`       | GitHub HTTP API, response validation | database, sessions        |
 | `DeploymentService`  | database, ownership, project lock, retiring old deployments | git flags, Docker API |
 | `DeploymentEngine`   | step order, statuses, failure policy for one run | database, other deployments |
