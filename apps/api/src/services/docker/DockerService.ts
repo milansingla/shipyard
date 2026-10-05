@@ -1,10 +1,9 @@
-import path from "node:path";
-
 import type Docker from "dockerode";
 import tar from "tar-fs";
 
 import { AppError, ErrorCode, NotFoundError, ValidationError, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
+import { createContextFilter } from "./buildContext.js";
 import { type BuildEvent, interpretBuildEvent } from "./buildOutput.js";
 import { type LogChunk, demuxDockerLogs } from "./logs.js";
 import { isValidContainerReference } from "./naming.js";
@@ -81,7 +80,7 @@ export class DockerService {
 
   /**
    * Builds an image from `contextDir`. Resolves only if Docker reports no error.
-   * `onLog` receives raw build output as it streams.
+   * `onLog` receives raw build output as it streams. `dockerfile` is relative to the context.
    * Cancelled after `buildTimeoutMs`: closing the connection makes Docker abort the build.
    */
   async buildImage(
@@ -89,11 +88,9 @@ export class DockerService {
     imageName: string,
     labels: Record<string, string>,
     onLog: (text: string) => void,
+    dockerfile = "Dockerfile",
   ): Promise<void> {
-    // The .git directory is never needed for the build and can be large.
-    const context = tar.pack(contextDir, {
-      ignore: (name) => path.relative(contextDir, name).split(path.sep)[0] === ".git",
-    });
+    const context = tar.pack(contextDir, { ignore: await createContextFilter(contextDir, dockerfile) });
 
     const abort = new AbortController();
     let stream: NodeJS.ReadableStream;
@@ -101,6 +98,7 @@ export class DockerService {
       // tar-fs returns a streamx stream: pipe-compatible at runtime, but not typed as a Node ReadableStream.
       stream = await this.docker.buildImage(context as unknown as NodeJS.ReadableStream, {
         t: imageName,
+        dockerfile,
         labels,
         rm: true,
         forcerm: true, // remove intermediate containers even when the build fails
