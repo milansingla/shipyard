@@ -2,6 +2,7 @@ import { type CookieOptions, Router } from "express";
 import { z } from "zod";
 
 import { readCookie } from "../../lib/cookies.js";
+import { AppError } from "../../lib/errors.js";
 import { sendData } from "../../lib/http.js";
 import { parseInput } from "../../lib/validation.js";
 import { requireUser } from "../../middleware/authenticate.js";
@@ -43,11 +44,17 @@ export function createAuthRouter(auth: AuthService, options: AuthRouterOptions):
     // One attempt per login cookie, whatever the outcome.
     res.clearCookie(LOGIN_COOKIE, loginCookie);
 
-    const { sessionToken, expiresAt } = await auth.completeLogin({
-      ...query,
-      loginCookie: readCookie(req.headers.cookie, LOGIN_COOKIE),
-    });
-    res.cookie(options.sessionCookie, sessionToken, { ...sessionCookie, expires: expiresAt });
+    let session;
+    try {
+      session = await auth.completeLogin({ ...query, loginCookie: readCookie(req.headers.cookie, LOGIN_COOKIE) });
+    } catch (error) {
+      // The browser is mid-navigation: send it back to the dashboard with a code it can explain,
+      // instead of leaving the user on a raw JSON error.
+      if (!(error instanceof AppError)) throw error;
+      res.redirect(302, `${options.appUrl}/?${new URLSearchParams({ signin_error: error.code }).toString()}`);
+      return;
+    }
+    res.cookie(options.sessionCookie, session.sessionToken, { ...sessionCookie, expires: session.expiresAt });
     res.redirect(302, `${options.appUrl}/`);
   });
 

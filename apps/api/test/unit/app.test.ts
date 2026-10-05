@@ -65,9 +65,11 @@ describe("authentication", () => {
         exposeInternalErrors: false,
       }),
     );
-    const res = await fetch(`${base}/api/projects`);
-    expect(res.status).toBe(503);
-    expect(await res.json()).toMatchObject({ error: { code: "AUTH_NOT_CONFIGURED" } });
+    for (const route of ["/api/projects", "/api/auth/me", "/api/auth/github/login", "/api/github/repos"]) {
+      const res = await fetch(`${base}${route}`);
+      expect({ route, status: res.status }).toEqual({ route, status: 503 });
+      expect(await res.json()).toMatchObject({ error: { code: "AUTH_NOT_CONFIGURED" } });
+    }
   });
 });
 

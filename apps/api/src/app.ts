@@ -2,7 +2,7 @@ import express, { type Express } from "express";
 
 import type { Logger } from "./lib/logger.js";
 import { createErrorHandler, notFoundHandler } from "./middleware/errorHandler.js";
-import { authenticate } from "./middleware/authenticate.js";
+import { authenticate, requireUser } from "./middleware/authenticate.js";
 import { originCheck } from "./middleware/originCheck.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { createAuthRouter } from "./modules/auth/auth.routes.js";
@@ -54,6 +54,10 @@ export function createApp(deps: AppDeps): Express {
     app.use("/api", authenticate(auth.service, auth.sessionCookie));
     app.use("/api", createAuthRouter(auth.service, auth));
     app.use("/api", createGitHubRouter(auth.service, auth.github));
+  } else {
+    // Answer sign-in routes with the setup instructions (503) rather than a bare 404,
+    // so the dashboard can tell the operator what to configure.
+    app.use(["/api/auth", "/api/github"], (req) => void requireUser(req));
   }
   if (projects && deployments) {
     app.use("/api", createProjectRouter(projects, deployments));

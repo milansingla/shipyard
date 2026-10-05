@@ -303,8 +303,9 @@ describe("GitHub sign-in", () => {
 
   it("refuses GitHub accounts not in SHIPYARD_ALLOWED_GITHUB_USERS, creating nothing", async () => {
     const callback = await signIn(MALLORY);
-    expect(callback.status).toBe(403);
-    expect(await callback.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+    expect(callback.status).toBe(302);
+    expect(callback.headers.get("location")).toBe(`${APP_URL}/?signin_error=FORBIDDEN`);
+    expect(callback.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(false);
     expect(await prisma.user.count()).toBe(0);
     expect(await prisma.session.count()).toBe(0);
   });
@@ -322,21 +323,20 @@ describe("GitHub sign-in", () => {
 
   it("rejects a callback whose state doesn't match (login CSRF)", async () => {
     const callback = await signIn(ALICE, { state: "A".repeat(43) });
-    expect(callback.status).toBe(400);
-    expect(await callback.json()).toMatchObject({ error: { code: "OAUTH_FAILED" } });
+    expect(callback.headers.get("location")).toBe(`${APP_URL}/?signin_error=OAUTH_FAILED`);
     expect(await prisma.session.count()).toBe(0);
   });
 
   it("rejects a callback from a browser that didn't start the sign-in", async () => {
     const callback = await signIn(ALICE, { dropLoginCookie: true });
-    expect(callback.status).toBe(400);
+    expect(callback.headers.get("location")).toBe(`${APP_URL}/?signin_error=OAUTH_FAILED`);
     expect(await prisma.user.count()).toBe(0);
   });
 
-  it("reports a cancelled sign-in clearly", async () => {
-    const res = await call(null, "GET", "/api/auth/github/callback?error=access_denied");
-    expect(res.status).toBe(400);
-    expect(res.body?.error.message).toContain("cancelled");
+  it("sends a cancelled sign-in back to the dashboard with a code it can explain", async () => {
+    const res = await fetch(`${api}/api/auth/github/callback?error=access_denied`, { redirect: "manual" });
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe(`${APP_URL}/?signin_error=OAUTH_FAILED`);
   });
 
   it("logout ends the session server-side", async () => {
