@@ -8,7 +8,7 @@ import { AppError, ErrorCode, NotFoundError, ValidationError, errorMessage } fro
 import type { Logger } from "../../lib/logger.js";
 import { createContextFilter } from "./buildContext.js";
 import { type BuildEvent, interpretBuildEvent } from "./buildOutput.js";
-import { type LogChunk, type LogStream, demuxDockerLogs } from "./logs.js";
+import { type LogChunk, type LogStream, demuxDockerLogs, formatLogChunks } from "./logs.js";
 import type { RegistryCredentials } from "../registry/ImageRegistry.js";
 import { isValidContainerReference } from "./naming.js";
 
@@ -108,6 +108,30 @@ export interface CreateContainerOptions {
   /** A command Docker runs inside the container to decide it is healthy (exit 0), every second. */
   healthCommand?: string[];
 }
+
+/** A command run to completion in a throwaway container (a cron run). */
+export interface OneOffContainerOptions {
+  imageName: string;
+  containerName: string;
+  command: string[];
+  env: Record<string, string>;
+  labels: Record<string, string>;
+  /** The project's private network, so it reaches the project's services by name. */
+  network: string;
+  resources?: ContainerResources;
+  timeoutMs: number;
+}
+
+export interface OneOffResult {
+  /** null when it was killed for running too long. */
+  exitCode: number | null;
+  timedOut: boolean;
+  oomKilled: boolean;
+  /** The last 64 KB of stdout and stderr. */
+  output: string;
+}
+
+const ONE_OFF_OUTPUT_BYTES = 64 * 1024;
 
 export interface StartedContainer {
   id: string;
@@ -562,6 +586,60 @@ export class DockerService {
       // 304 = already stopped. Stopping is idempotent from our point of view.
       if (dockerStatusCode(error) === 304) return;
       throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not stop container", error);
+    }
+  }
+
+  /**
+   * Runs `command` in a new container of `imageName` until it exits or
+   * `timeoutMs` passes (then it is killed), keeps the tail of its output and
+   * removes the container. Nothing is published.
+   */
+  async runToCompletion(options: OneOffContainerOptions): Promise<OneOffResult> {
+    await this.assertNetworkExists(options.network);
+    let container: Docker.Container;
+    try {
+      container = await this.docker.createContainer({
+        Image: options.imageName,
+        name: options.containerName,
+        Cmd: options.command,
+        Env: Object.entries(options.env).map(([key, value]) => `${key}=${value}`),
+        Labels: { ...options.labels, [ShipyardLabel.MANAGED]: "true" },
+        HostConfig: {
+          NetworkMode: options.network,
+          ...resourceConfig(options.resources ? { ...options.resources, restartPolicy: "NO" } : undefined),
+          LogConfig: RUNTIME_LOG_CONFIG,
+          SecurityOpt: ["no-new-privileges:true"],
+          PidsLimit: 512,
+        },
+      });
+      await container.start();
+    } catch (error) {
+      throw this.dockerError(ErrorCode.CONTAINER_START_FAILED, "Could not start the job's container", error);
+    }
+
+    try {
+      let timer: NodeJS.Timeout | undefined;
+      const timedOut = await Promise.race([
+        container.wait().then(() => false),
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(true), options.timeoutMs);
+        }),
+      ]).finally(() => clearTimeout(timer));
+      if (timedOut) {
+        await container.kill().catch(() => {});
+        await container.wait().catch(() => {});
+      }
+      const info = await container.inspect();
+      const buffer = await container.logs({ stdout: true, stderr: true, follow: false });
+      const output = formatLogChunks(demuxDockerLogs(buffer));
+      return {
+        exitCode: timedOut ? null : info.State.ExitCode,
+        timedOut,
+        oomKilled: info.State.OOMKilled === true,
+        output: output.length > ONE_OFF_OUTPUT_BYTES ? `…\n${output.slice(-ONE_OFF_OUTPUT_BYTES)}` : output,
+      };
+    } finally {
+      await this.removeContainer(container.id);
     }
   }
 

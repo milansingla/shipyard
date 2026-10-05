@@ -140,6 +140,14 @@ What a service asks for, and what each deployment started. Check
 constraints keep it in 1–10 and at 1 for databases. Replica containers aren't
 rows: they are found by their `shipyard.deployment-id` label.
 
+### CronJob, CronRun (`cron_jobs`, `cron_runs`)
+
+A job: service, schedule (UTC), command, timeout (10 s–24 h, a check
+constraint), `enabled`, and `nextRunAt`, which the scheduler claims with a
+conditional update so each occurrence runs once. A run: status, trigger,
+the deployment whose image it ran, times, exit code, the last 64 KB of
+output. 50 runs are kept per job. Both cascade with their project/service.
+
 ### Volume (`volumes`)
 
 A service's persistent directory: `name`, `mountPath` (each unique per

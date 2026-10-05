@@ -40,6 +40,11 @@ services:
   db:
     type: postgres          # a database: version and resources only
     version: 17             # see databases.md
+cron:                       # see cron.md
+  cleanup:
+    schedule: "0 3 * * *"   # UTC
+    command: npm run cleanup
+    service: web            # default: web, else the first service
 ```
 
 ## When it is read
@@ -59,6 +64,9 @@ shallow clone downloads only that one file, before anything is built. Then:
   file: its version never changes, and a service never switches between
   being a database and being built from the repository (the deploy fails,
   saying so);
+- **cron jobs** are created or updated (schedule, command, timeout,
+  service); pausing or resuming one stays a dashboard decision, and jobs
+  taken out of the file keep running until deleted on the project page;
 - **volumes** the file declares are added. A volume taken out of the file,
   or given another path, stays as it is (the build log says so): moving or
   detaching stored data is done on the project page. See

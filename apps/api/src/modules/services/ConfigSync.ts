@@ -1,7 +1,14 @@
 import type { PrismaClient, Project, Service } from "../../db/prisma.js";
 import { AppError, ErrorCode } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
-import { CONFIG_FILE_NAMES, type ConfiguredService, MAX_CONFIG_BYTES, parseShipyardConfig } from "../../services/config/shipyardConfig.js";
+import { nextRun, parseCron } from "../../lib/cron.js";
+import {
+  CONFIG_FILE_NAMES,
+  type ConfiguredCronJob,
+  type ConfiguredService,
+  MAX_CONFIG_BYTES,
+  parseShipyardFile,
+} from "../../services/config/shipyardConfig.js";
 import type { GitService } from "../../services/git/GitService.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { EnvironmentService } from "../environment/EnvironmentService.js";
@@ -68,7 +75,7 @@ export class ConfigSync {
     const repository = parseRepositoryUrl(project.repositoryUrl, this.deps.allowedGitHosts);
     const file = await this.deps.git.readFile(repository, project.branch, CONFIG_FILE_NAMES, MAX_CONFIG_BYTES);
     if (!file) return [];
-    const configured = parseShipyardConfig(file.content, file.name);
+    const { services: configured, cron } = parseShipyardFile(file.content, file.name);
 
     const { prisma } = this.deps;
     const existing = await prisma.service.findMany({ where: { projectId: project.id } });
@@ -106,7 +113,48 @@ export class ConfigSync {
     for (const stale of existing.filter((s) => s.managedBy === "CONFIG_FILE" && !configured.some((c) => c.name === s.name))) {
       notes.push(`service ${stale.name} is no longer in ${file.name}; it keeps its last settings. Delete it on the project page if it's gone for good`);
     }
+    notes.push(...(await this.syncCronJobs(project, cron, file.name)));
     this.deps.logger.info({ projectId: project.id, file: file.name, notes }, "Synced services from configuration file");
+    return notes;
+  }
+
+  /**
+   * Cron jobs: created or updated from the file (schedule, command, timeout,
+   * service). Whether one is enabled stays a dashboard decision. Jobs the file
+   * no longer declares are kept and reported, like services.
+   */
+  private async syncCronJobs(project: Project, configured: ConfiguredCronJob[], fileName: string): Promise<string[]> {
+    const { prisma } = this.deps;
+    const existing = await prisma.cronJob.findMany({ where: { projectId: project.id } });
+    const services = await prisma.service.findMany({ where: { projectId: project.id }, select: { id: true, name: true } });
+    const notes: string[] = [];
+    for (const job of configured) {
+      const serviceId = services.find((service) => service.name === job.service)!.id;
+      const wanted = { serviceId, schedule: job.schedule, command: job.command, timeoutSeconds: job.timeoutSeconds ?? 3600 };
+      const current = existing.find((candidate) => candidate.name === job.name);
+      if (!current) {
+        await prisma.cronJob.create({
+          data: { projectId: project.id, name: job.name, ...wanted, managedBy: "CONFIG_FILE", nextRunAt: nextRun(parseCron(job.schedule), new Date()) },
+        });
+        notes.push(`added cron job ${job.name} (${job.schedule})`);
+        continue;
+      }
+      const changed = (Object.keys(wanted) as Array<keyof typeof wanted>).filter((key) => current[key] !== wanted[key]);
+      if (changed.length > 0 || current.managedBy !== "CONFIG_FILE") {
+        await prisma.cronJob.update({
+          where: { id: current.id },
+          data: {
+            ...wanted,
+            managedBy: "CONFIG_FILE",
+            ...(changed.includes("schedule") && current.enabled && { nextRunAt: nextRun(parseCron(job.schedule), new Date()) }),
+          },
+        });
+      }
+      if (changed.length > 0) notes.push(`updated cron job ${job.name}: ${changed.join(", ")}`);
+    }
+    for (const stale of existing.filter((job) => job.managedBy === "CONFIG_FILE" && !configured.some((c) => c.name === job.name))) {
+      notes.push(`cron job ${stale.name} is no longer in ${fileName}; it keeps running. Delete it on the project page if it's gone for good`);
+    }
     return notes;
   }
 

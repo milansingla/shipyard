@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { connectionUrl, connectionVariable, postgresVersionOf } from "../../src/modules/services/postgres.js";
 import { mountPathSchema } from "../../src/modules/services/service.schemas.js";
-import { parseShipyardConfig } from "../../src/services/config/shipyardConfig.js";
+import { parseShipyardConfig, parseShipyardFile } from "../../src/services/config/shipyardConfig.js";
 
 describe("shipyard.yaml", () => {
   it("maps services to Shipyard's settings, leaving out what the file doesn't set", () => {
@@ -69,6 +69,9 @@ services:
     ["version: 1\nservices:\n  db:\n    type: postgres\n    port: 5433", "only takes version and resources"],
     ["version: 1\nservices:\n  db:\n    type: postgres\n    source: db", "only takes version and resources"],
     ["version: 1\nservices:\n  web:\n    version: 17", "only postgres services have a version"],
+    ["version: 1\nservices:\n  web: {}\ncron:\n  nightly:\n    schedule: \"61 * * * *\"\n    command: x", "at cron.nightly.schedule"],
+    ["version: 1\nservices:\n  web: {}\ncron:\n  nightly:\n    schedule: \"@daily\"\n    service: api\n    command: x", "\"api\" isn't a service in this file"],
+    ["version: 1\nservices:\n  web: {}\n  db:\n    type: postgres\ncron:\n  vacuum:\n    schedule: \"@daily\"\n    service: db\n    command: x", "not a database's"],
   ])("explains what is wrong with %j", (source, message) => {
     expect(() => parseShipyardConfig(source)).toThrow(message);
   });
@@ -112,5 +115,17 @@ describe("postgres services", () => {
     expect(postgresVersionOf("postgres:16-alpine")).toBe(16);
     expect(postgresVersionOf("postgres:9-alpine")).toBeNull();
     expect(postgresVersionOf("evil/postgres:17-alpine")).toBeNull();
+  });
+});
+
+describe("cron jobs in shipyard.yaml", () => {
+  it("default to the web service, and keep what the file says", () => {
+    const { cron } = parseShipyardFile(
+      'version: 1\nservices:\n  api: {}\n  web: {}\ncron:\n  cleanup:\n    schedule: "0 0 * * *"\n    command: npm run cleanup\n  report:\n    service: api\n    schedule: "@hourly"\n    command: node report.js\n    timeoutSeconds: 60\n',
+    );
+    expect(cron).toEqual([
+      { name: "cleanup", service: "web", schedule: "0 0 * * *", command: "npm run cleanup" },
+      { name: "report", service: "api", schedule: "@hourly", command: "node report.js", timeoutSeconds: 60 },
+    ]);
   });
 });

@@ -113,6 +113,7 @@ model Project {
   environmentVariables EnvironmentVariable[]
   domains         ProjectDomain[]
   services        Service[]
+  cronJobs     CronJob[]
 
   @@index([organizationId, createdAt(sort: Desc)])
   @@map("projects")
@@ -199,6 +200,10 @@ enum AuditAction {
   SERVICE_DELETED
   VOLUME_CREATED
   VOLUME_DELETED
+  CRON_JOB_CREATED
+  CRON_JOB_CHANGED
+  CRON_JOB_DELETED
+  CRON_JOB_RUN
 }
 
 /// Who did what, append-only. Kept when the project is deleted (no foreign
@@ -327,9 +332,75 @@ model Service {
   deployments  Deployment[]
   domains      ProjectDomain[]
   volumes      Volume[]
+  cronJobs     CronJob[]
 
   @@unique([projectId, name])
   @@map("services")
+}
+
+/// A command run on a schedule in a short-lived container of a service's
+/// live image, with its variables, on the project network.
+model CronJob {
+  id             String     @id @default(uuid()) @db.Uuid
+  projectId      String     @db.Uuid
+  project        Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  serviceId      String     @db.Uuid
+  service        Service    @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  /// Lowercase label, unique within the project.
+  name           String
+  /// 5-field cron expression or macro, UTC.
+  schedule       String
+  /// One line, run with `sh -c`.
+  command        String
+  enabled        Boolean    @default(true)
+  timeoutSeconds Int        @default(3600)
+  /// When it fires next; null while disabled. Claimed with a conditional update, so it runs once.
+  nextRunAt      DateTime?
+  managedBy      ServiceSource @default(DASHBOARD)
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  runs           CronRun[]
+
+  @@unique([projectId, name])
+  @@index([enabled, nextRunAt])
+  @@map("cron_jobs")
+}
+
+enum CronRunStatus {
+  RUNNING
+  SUCCEEDED
+  /// Exited non-zero, or couldn't start.
+  FAILED
+  /// Killed after timeoutSeconds.
+  TIMED_OUT
+  /// Not started: the previous run was still going, or nothing is deployed.
+  SKIPPED
+}
+
+enum CronRunTrigger {
+  SCHEDULE
+  MANUAL
+}
+
+model CronRun {
+  id            String         @id @default(uuid()) @db.Uuid
+  cronJobId     String         @db.Uuid
+  cronJob       CronJob        @relation(fields: [cronJobId], references: [id], onDelete: Cascade)
+  status        CronRunStatus  @default(RUNNING)
+  trigger       CronRunTrigger @default(SCHEDULE)
+  /// The deployment whose image it ran.
+  deploymentId  String?        @db.Uuid
+  scheduledFor  DateTime?
+  startedAt     DateTime       @default(now())
+  finishedAt    DateTime?
+  exitCode      Int?
+  /// The last 64 KB of its output (stdout and stderr).
+  output        String         @default("")
+  errorMessage  String?
+  containerName String?
+
+  @@index([cronJobId, startedAt])
+  @@map("cron_runs")
 }
 
 /// When a variable is available: to the running app, to `docker build`, or both.

@@ -644,3 +644,21 @@ deliberate act, not a surprise during a restart.
 replicas first (and is confirmed), so no new requests reach the old ones;
 then `docker stop` sends SIGTERM and waits 10s, letting requests already in
 flight finish before the process exits.
+
+## Cron jobs
+
+- **The database as the lock**: "claim this occurrence" is one conditional
+  UPDATE (`WHERE nextRunAt = <what I read>`). If two schedulers race, one
+  updates a row and the other updates none: no separate lock service needed.
+- **Catch up once**: computing the next occurrence from *now* rather than from
+  the missed one turns a backlog after downtime into a single run instead of
+  a burst.
+- **Never overlap**: a job that runs longer than its interval is skipped, not
+  stacked; overlapping cleanups are a classic source of deadlocks.
+- **Reuse the deployed image**: a job runs exactly the code that is live,
+  with the same variables and network, so "works in the app, fails in cron"
+  can't come from a different build.
+
+**Interview: why 5-field cron in UTC only?** Time zones bring daylight-saving
+gaps (a 02:30 job that doesn't exist one night, or runs twice another).
+UTC has neither; converting a local time is the user's explicit choice.

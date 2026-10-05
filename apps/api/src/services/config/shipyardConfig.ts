@@ -6,6 +6,13 @@ import { healthCheckPathSchema } from "../../modules/projects/project.schemas.js
 import { mountPathSchema, serviceNameSchema, sourceDirSchema, volumeNameSchema } from "../../modules/services/service.schemas.js";
 import { MAX_VOLUMES_PER_SERVICE } from "../../modules/services/VolumeService.js";
 import { MAX_REPLICAS } from "../docker/naming.js";
+import {
+  MAX_CRON_JOBS_PER_PROJECT,
+  cronCommandSchema,
+  cronJobNameSchema,
+  cronScheduleSchema,
+  cronTimeoutSchema,
+} from "../../modules/cron/cron.schemas.js";
 import { DEFAULT_POSTGRES_VERSION, POSTGRES_VERSIONS, type PostgresVersion } from "../../modules/services/postgres.js";
 
 /** File names Shipyard looks for at the repository root, in order. */
@@ -45,13 +52,39 @@ const serviceSchema = z.strictObject({
     .optional(),
 });
 
+const cronSchema = z.strictObject({
+  /** The service whose image and variables it runs with. Default: "web", else the first service. */
+  service: serviceNameSchema.optional(),
+  schedule: cronScheduleSchema,
+  command: cronCommandSchema,
+  timeoutSeconds: cronTimeoutSchema.optional(),
+});
+
 const configSchema = z.strictObject({
   version: z.literal(1),
   services: z
     .record(serviceNameSchema, serviceSchema)
     .refine((services) => Object.keys(services).length > 0, "declare at least one service")
     .refine((services) => Object.keys(services).length <= MAX_CONFIG_SERVICES, `at most ${MAX_CONFIG_SERVICES} services`),
+  cron: z
+    .record(cronJobNameSchema, cronSchema)
+    .refine((jobs) => Object.keys(jobs).length <= MAX_CRON_JOBS_PER_PROJECT, `at most ${MAX_CRON_JOBS_PER_PROJECT} cron jobs`)
+    .optional(),
 });
+
+/** A cron job as shipyard.yaml declares it. */
+export interface ConfiguredCronJob {
+  name: string;
+  service: string;
+  schedule: string;
+  command: string;
+  timeoutSeconds?: number;
+}
+
+export interface ShipyardFile {
+  services: ConfiguredService[];
+  cron: ConfiguredCronJob[];
+}
 
 /** One service as shipyard.yaml declares it, in the Service model's terms. Absent = not set by the file. */
 export interface ConfiguredService {
@@ -81,6 +114,11 @@ export interface ConfiguredService {
  * Aliases are capped: a small file can't expand into a huge document.
  */
 export function parseShipyardConfig(source: string, fileName = "shipyard.yaml"): ConfiguredService[] {
+  return parseShipyardFile(source, fileName).services;
+}
+
+/** The whole file: services and cron jobs. */
+export function parseShipyardFile(source: string, fileName = "shipyard.yaml"): ShipyardFile {
   let document: unknown;
   try {
     document = parse(source, { maxAliasCount: 50, prettyErrors: false });
@@ -96,7 +134,21 @@ export function parseShipyardConfig(source: string, fileName = "shipyard.yaml"):
     throw invalid(fileName, `is invalid${at}: ${issue.message}`);
   }
 
-  return Object.entries(result.data.services).map(([name, service]) => {
+  const services = parseServices(result.data.services, fileName);
+  const names = services.map((service) => service.name);
+  const fallback = names.includes("web") ? "web" : names[0]!;
+  const cron = Object.entries(result.data.cron ?? {}).map(([name, job]) => {
+    const service = job.service ?? fallback;
+    const target = services.find((candidate) => candidate.name === service);
+    if (!target) throw invalid(fileName, `is invalid at cron.${name}.service: "${service}" isn't a service in this file`);
+    if (target.database) throw invalid(fileName, `is invalid at cron.${name}.service: cron jobs run in a web service's or worker's image, not a database's`);
+    return { name, service, schedule: job.schedule, command: job.command, ...(job.timeoutSeconds !== undefined && { timeoutSeconds: job.timeoutSeconds }) };
+  });
+  return { services, cron };
+}
+
+function parseServices(declared: z.infer<typeof configSchema>["services"], fileName: string): ConfiguredService[] {
+  return Object.entries(declared).map(([name, service]) => {
     if (service.type === "postgres") {
       const extra =
         (["build", "start", "port", "public", "replicas", "healthCheck", "volumes"] as const).find((key) => service[key] !== undefined) ??

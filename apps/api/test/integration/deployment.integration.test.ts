@@ -435,6 +435,37 @@ describe("deployment engine against real Docker", () => {
     }
   });
 
+  it("runs a one-off command to completion (a cron run): exit code, output, timeout, nothing left behind", async () => {
+    const network = `shipyard-p-it${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    await docker.ensureNetwork(network, {});
+    const run = (name: string, command: string[], timeoutMs = 30_000) =>
+      docker.runToCompletion({
+        imageName: "node:24-alpine",
+        containerName: `shipyard-it-cron-${name}-${randomUUID().slice(0, 8)}`,
+        command,
+        env: { GREETING: "hello" },
+        labels: {},
+        network,
+        timeoutMs,
+      });
+    try {
+      const failed = await run("fail", ["sh", "-c", "echo $GREETING; echo oops >&2; exit 3"]);
+      expect(failed).toMatchObject({ exitCode: 3, timedOut: false });
+      expect(failed.output).toContain("hello");
+      expect(failed.output).toContain("oops");
+
+      const started = Date.now();
+      const slow = await run("slow", ["sleep", "60"], 1_500);
+      expect(slow).toMatchObject({ exitCode: null, timedOut: true });
+      expect(Date.now() - started).toBeLessThan(15_000);
+
+      const left = await dockerode.listContainers({ all: true, filters: { name: ["shipyard-it-cron-"] } });
+      expect(left).toEqual([]);
+    } finally {
+      await docker.removeNetwork(network);
+    }
+  });
+
   it("runs a multi-service project: web reaches the private api by name, the worker just runs", async () => {
     const network = `shipyard-p-it${randomUUID().replace(/-/g, "").slice(0, 8)}`;
     const service = engine(MULTI_SERVICE_APP);

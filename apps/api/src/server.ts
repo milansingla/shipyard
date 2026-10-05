@@ -11,6 +11,7 @@ const services = createApiServices(config, requireDatabaseUrl(config), logger);
 // by a previous run (e.g. a deploy that was BUILDING when the process died).
 await services.prisma.$connect();
 await services.deployments.reconcileOnStartup();
+await services.cron.reconcileOnStartup();
 await services.auth?.service.deleteExpiredSessions();
 await services.webhooks?.service.pruneDeliveries();
 if (!services.auth) {
@@ -27,6 +28,7 @@ const app = createApp({
   organizations: services.organizations,
   services: services.services,
   volumes: services.volumes,
+  cron: services.cron,
   auth: services.auth,
   webhooks: services.webhooks,
   allowedOrigins: [config.publicUrl, config.appUrl],
@@ -35,12 +37,15 @@ const app = createApp({
   trustProxy: config.trustProxy,
 });
 
+services.cron.start();
+
 const server = app.listen(config.port, config.host, () => {
   logger.info({ host: config.host, port: config.port, env: config.env }, `Shipyard API listening on http://${config.host}:${config.port}`);
 });
 
 function shutdown(signal: NodeJS.Signals): void {
   logger.info({ signal }, "Shutting down");
+  services.cron.stop();
   // In-flight deploys are not awaited (a build can take minutes); they are
   // marked FAILED by reconcileOnStartup() on the next start.
   server.close((error) => {

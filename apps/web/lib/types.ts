@@ -225,3 +225,37 @@ export interface Page<T> {
   items: T[];
   hasNextPage: boolean;
 }
+
+export type CronRunStatus = "RUNNING" | "SUCCEEDED" | "FAILED" | "TIMED_OUT" | "SKIPPED";
+
+/** One run of a cron job. `output` (the last 64 KB) only comes with a single run. */
+export interface CronRun {
+  id: string;
+  cronJobId: string;
+  status: CronRunStatus;
+  trigger: "SCHEDULE" | "MANUAL";
+  deploymentId: string | null;
+  scheduledFor: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  exitCode: number | null;
+  errorMessage: string | null;
+  output?: string;
+}
+
+/** A command run on a schedule (UTC) in a service's live image. */
+export interface CronJob {
+  id: string;
+  projectId: string;
+  serviceId: string;
+  serviceName: string;
+  name: string;
+  schedule: string;
+  command: string;
+  enabled: boolean;
+  timeoutSeconds: number;
+  /** null while paused. */
+  nextRunAt: string | null;
+  managedBy: "DASHBOARD" | "CONFIG_FILE";
+  lastRun: CronRun | null;
+}

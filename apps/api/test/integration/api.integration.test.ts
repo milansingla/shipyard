@@ -19,6 +19,9 @@ import { OrganizationService } from "../../src/modules/access/OrganizationServic
 import { ConfigSync } from "../../src/modules/services/ConfigSync.js";
 import { ServiceService } from "../../src/modules/services/ServiceService.js";
 import { VolumeService } from "../../src/modules/services/VolumeService.js";
+import { projectNetworkName } from "../../src/modules/services/serviceRules.js";
+import { type CronRunner, CronService } from "../../src/modules/cron/CronService.js";
+import type { OneOffContainerOptions, OneOffResult } from "../../src/services/docker/DockerService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
@@ -253,6 +256,20 @@ let api: string;
 let dataDir: string;
 let deployments: DeploymentService;
 let environment: EnvironmentService;
+let cron: CronService;
+
+/** Stands in for Docker when a cron job runs: records what it was asked, answers `cronResult`. */
+const cronCalls: OneOffContainerOptions[] = [];
+let cronResult: OneOffResult = { exitCode: 0, timedOut: false, oomKilled: false, output: "cleaned 3 rows\n" };
+let holdCron: Promise<void> | null = null;
+const cronRunner: CronRunner = {
+  async runToCompletion(options) {
+    cronCalls.push(options);
+    if (holdCron) await holdCron;
+    return cronResult;
+  },
+  async removeContainer() {},
+};
 let audit: AuditService;
 let access: AccessService;
 
@@ -331,6 +348,7 @@ beforeAll(async () => {
       organizations: new OrganizationService({ prisma, access, audit, logger: silentLogger }),
       services: new ServiceService({ prisma, access, deployments, audit, environment, logger: silentLogger }),
       volumes: new VolumeService({ prisma, access, audit, logger: silentLogger }),
+      cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
         service: auth,
@@ -363,6 +381,9 @@ beforeEach(async () => {
   removedVolumes.length = 0;
   engineEvents.length = 0;
   failRuns.clear();
+  cronCalls.length = 0;
+  cronResult = { exitCode: 0, timedOut: false, oomKilled: false, output: "cleaned 3 rows\n" };
+  holdCron = null;
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
   await prisma.auditLog.deleteMany();
@@ -2053,5 +2074,159 @@ describe("replicas", () => {
     await call(alice, "POST", `/api/projects/${projectId}/deploy`);
     await deployments.waitForIdle();
     expect(lastJob?.replicas).toBe(2);
+  });
+});
+
+describe("cron jobs", () => {
+  async function deployedProject(cookie: string, repo: string) {
+    const projectId = (await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` })).body!.data.id as string;
+    await call(cookie, "PUT", `/api/projects/${projectId}/env/DATABASE_URL`, { value: "postgres://x", secret: true });
+    await call(cookie, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    const [web] = (await call(cookie, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    return { projectId, serviceId: web!.id as string };
+  }
+  const addJob = (cookie: string, projectId: string, body: object) => call(cookie, "POST", `/api/projects/${projectId}/cron-jobs`, body);
+
+  it("runs a job when it is due, once, in the service's live image, with its variables, on the project network", async () => {
+    const alice = await sessionFor(ALICE);
+    const { projectId, serviceId } = await deployedProject(alice, "cron-app");
+    const created = await addJob(alice, projectId, { name: "cleanup", serviceId, schedule: "0 3 * * *", command: "npm run cleanup" });
+    expect(created.status).toBe(201);
+    const job = created.body!.data;
+    expect(new Date(job.nextRunAt).getUTCHours()).toBe(3);
+
+    // Not due yet: nothing happens.
+    expect(await cron.tick(new Date(new Date(job.nextRunAt).getTime() - 60_000))).toBe(0);
+
+    // Due: two ticks at the same moment (two processes, say) start it once.
+    const due = new Date(new Date(job.nextRunAt).getTime() + 1_000);
+    const started = await Promise.all([cron.tick(due), cron.tick(due)]);
+    expect(started[0]! + started[1]!).toBe(1);
+    await cron.waitForIdle();
+
+    expect(cronCalls).toHaveLength(1);
+    const live = await prisma.deployment.findFirstOrThrow({ where: { serviceId, status: "RUNNING" } });
+    expect(cronCalls[0]).toMatchObject({
+      imageName: live.imageName,
+      command: ["sh", "-c", "npm run cleanup"],
+      network: projectNetworkName(projectId),
+      env: { DATABASE_URL: "postgres://x" },
+      timeoutMs: 3_600_000,
+    });
+    const runs = (await call(alice, "GET", `/api/cron-jobs/${job.id}/runs`)).body!.data as Array<Record<string, any>>;
+    expect(runs).toMatchObject([{ status: "SUCCEEDED", exitCode: 0, trigger: "SCHEDULE", deploymentId: live.id }]);
+    expect(runs[0]!.output).toBeUndefined(); // the list leaves output out
+    expect((await call(alice, "GET", `/api/cron-runs/${runs[0]!.id}`)).body!.data.output).toBe("cleaned 3 rows\n");
+
+    // The next occurrence is a day later.
+    const after = await prisma.cronJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(after.nextRunAt!.getTime() - new Date(job.nextRunAt).getTime()).toBe(24 * 3_600_000);
+  });
+
+  it("records failures, timeouts, and runs it can't start, saying why", async () => {
+    const alice = await sessionFor(ALICE);
+    const { projectId, serviceId } = await deployedProject(alice, "cron-fail");
+    const job = (await addJob(alice, projectId, { name: "report", serviceId, schedule: "@hourly", command: "node report.js", timeoutSeconds: 30 })).body!.data;
+
+    cronResult = { exitCode: 2, timedOut: false, oomKilled: false, output: "Error: no such table\n" };
+    await call(alice, "POST", `/api/cron-jobs/${job.id}/run`);
+    await cron.waitForIdle();
+    cronResult = { exitCode: null, timedOut: true, oomKilled: false, output: "" };
+    await call(alice, "POST", `/api/cron-jobs/${job.id}/run`);
+    await cron.waitForIdle();
+
+    // A run still going: the next one is skipped, never overlapped.
+    cronResult = { exitCode: 0, timedOut: false, oomKilled: false, output: "" };
+    let release!: () => void;
+    holdCron = new Promise((resolve) => (release = resolve));
+    const first = await call(alice, "POST", `/api/cron-jobs/${job.id}/run`);
+    expect(first.status).toBe(202);
+    expect(first.body!.data.status).toBe("RUNNING");
+    const second = await call(alice, "POST", `/api/cron-jobs/${job.id}/run`);
+    expect(second.body!.data).toMatchObject({ status: "SKIPPED", errorMessage: "The previous run was still running." });
+    release();
+    await cron.waitForIdle();
+
+    const runs = (await call(alice, "GET", `/api/cron-jobs/${job.id}/runs`)).body!.data as Array<Record<string, any>>;
+    expect(runs.map((r) => [r.status, r.exitCode, r.errorMessage]).reverse()).toEqual([
+      ["FAILED", 2, "Exited with code 2."],
+      ["TIMED_OUT", null, "Killed after 30s (its timeout)."],
+      ["SUCCEEDED", 0, null],
+      ["SKIPPED", null, "The previous run was still running."],
+    ]);
+
+    // Nothing deployed: skipped, not failed silently.
+    const fresh = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/cron-undeployed" })).body!.data.id as string;
+    const [web] = (await call(alice, "GET", `/api/projects/${fresh}/services`)).body!.data as Array<Record<string, any>>;
+    const idle = (await addJob(alice, fresh, { name: "x", serviceId: web!.id, schedule: "@daily", command: "true" })).body!.data;
+    const skipped = await call(alice, "POST", `/api/cron-jobs/${idle.id}/run`);
+    expect(skipped.body!.data.errorMessage).toContain("has no running deployment");
+  });
+
+  it("validates jobs; admins manage them, developers run them, viewers read; strangers get 404", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const carol = await sessionFor(CAROL);
+    const orgId = (await call(alice, "POST", "/api/organizations", { name: "Cron Team" })).body!.data.id as string;
+    await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "bob", role: "DEVELOPER" });
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/cron-team", organizationId: orgId })).body!.data.id as string;
+    const [web] = (await call(alice, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    const db = (await call(alice, "POST", `/api/projects/${projectId}/services`, { name: "db", type: "POSTGRES" })).body!.data;
+
+    for (const body of [
+      { name: "Bad", serviceId: web!.id, schedule: "@daily", command: "x" },
+      { name: "a", serviceId: web!.id, schedule: "every day", command: "x" },
+      { name: "a", serviceId: web!.id, schedule: "@daily", command: "a\nb" },
+      { name: "a", serviceId: web!.id, schedule: "@daily", command: "x", timeoutSeconds: 5 },
+      { name: "a", serviceId: db.id, schedule: "@daily", command: "x" },
+      { name: "a", serviceId: "00000000-0000-4000-8000-000000000000", schedule: "@daily", command: "x" },
+    ]) {
+      expect({ body, status: (await addJob(alice, projectId, body)).status }).toEqual({ body, status: 400 });
+    }
+    expect((await addJob(bob, projectId, { name: "a", serviceId: web!.id, schedule: "@daily", command: "x" })).status).toBe(403);
+    const job = (await addJob(alice, projectId, { name: "a", serviceId: web!.id, schedule: "@daily", command: "x" })).body!.data;
+    expect((await addJob(alice, projectId, { name: "a", serviceId: web!.id, schedule: "@daily", command: "x" })).status).toBe(409);
+
+    expect((await call(bob, "GET", `/api/projects/${projectId}/cron-jobs`)).status).toBe(200);
+    expect((await call(bob, "POST", `/api/cron-jobs/${job.id}/run`)).status).toBe(202);
+    expect((await call(bob, "PATCH", `/api/cron-jobs/${job.id}`, { enabled: false })).status).toBe(403);
+    expect((await call(carol, "GET", `/api/cron-jobs/${job.id}/runs`)).status).toBe(404);
+    expect((await call(carol, "POST", `/api/cron-jobs/${job.id}/run`)).status).toBe(404);
+
+    // Disabled: never due. Enabled again: due from now on.
+    expect((await call(alice, "PATCH", `/api/cron-jobs/${job.id}`, { enabled: false })).body!.data.nextRunAt).toBeNull();
+    expect((await call(alice, "PATCH", `/api/cron-jobs/${job.id}`, { enabled: true })).body!.data.nextRunAt).not.toBeNull();
+    expect((await call(alice, "DELETE", `/api/cron-jobs/${job.id}`)).status).toBe(204);
+    expect(await prisma.auditLog.count({ where: { action: { in: ["CRON_JOB_CREATED", "CRON_JOB_CHANGED", "CRON_JOB_DELETED", "CRON_JOB_RUN"] } } })).toBe(5);
+  });
+
+  it("a run interrupted by a restart is marked FAILED at startup", async () => {
+    const alice = await sessionFor(ALICE);
+    const { projectId, serviceId } = await deployedProject(alice, "cron-restart");
+    const job = (await addJob(alice, projectId, { name: "slow", serviceId, schedule: "@daily", command: "sleep 100" })).body!.data;
+    await prisma.cronRun.create({ data: { cronJobId: job.id, status: "RUNNING", containerName: "shipyard-x" } });
+    expect(await cron.reconcileOnStartup()).toBe(1);
+    expect(await prisma.cronRun.findFirstOrThrow({ where: { cronJobId: job.id } })).toMatchObject({
+      status: "FAILED",
+      errorMessage: "Interrupted: Shipyard restarted while it ran.",
+    });
+  });
+
+  it("shipyard.yaml declares cron jobs", async () => {
+    const alice = await sessionFor(ALICE);
+    repoFiles.set("yaml-cron", 'version: 1\nservices:\n  web: {}\ncron:\n  cleanup:\n    schedule: "0 0 * * *"\n    command: npm run cleanup\n');
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/yaml-cron" })).body!.data.id as string;
+    const first = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    const jobs = (await call(alice, "GET", `/api/projects/${projectId}/cron-jobs`)).body!.data as Array<Record<string, any>>;
+    expect(jobs).toMatchObject([{ name: "cleanup", serviceName: "web", schedule: "0 0 * * *", command: "npm run cleanup", managedBy: "CONFIG_FILE", enabled: true }]);
+    expect((await call(alice, "GET", `/api/deployments/${first}/logs?type=build`)).body!.data.content).toContain("added cron job cleanup (0 0 * * *)");
+
+    repoFiles.set("yaml-cron", 'version: 1\nservices:\n  web: {}\ncron:\n  cleanup:\n    schedule: "@hourly"\n    command: npm run cleanup\n');
+    await call(alice, "PATCH", `/api/cron-jobs/${jobs[0]!.id}`, { enabled: false }); // a dashboard decision the file leaves alone
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(await prisma.cronJob.findUniqueOrThrow({ where: { id: jobs[0]!.id } })).toMatchObject({ schedule: "@hourly", enabled: false, nextRunAt: null });
   });
 });
