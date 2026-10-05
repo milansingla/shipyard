@@ -6,7 +6,11 @@ import { idParamsSchema, parseInput } from "../../lib/validation.js";
 import { requireUser } from "../../middleware/authenticate.js";
 import type { DomainService } from "./DomainService.js";
 
-const addDomainSchema = z.strictObject({ hostname: z.string().trim().min(1).max(253) });
+const addDomainSchema = z.strictObject({
+  hostname: z.string().trim().min(1).max(253),
+  /** A public web service of the project; omitted = the primary one. */
+  serviceId: z.uuid().optional(),
+});
 const domainParamsSchema = z.object({ id: z.uuid(), hostname: z.string().min(1).max(253) });
 
 export function createDomainRouter(domains: DomainService): Router {
@@ -22,8 +26,8 @@ export function createDomainRouter(domains: DomainService): Router {
   router.post("/projects/:id/domains", async (req, res) => {
     const user = requireUser(req);
     const { id } = parseInput(idParamsSchema, req.params, "project id");
-    const { hostname } = parseInput(addDomainSchema, req.body, "domain");
-    sendData(res, await domains.add(id, user.id, hostname), 201);
+    const { hostname, serviceId } = parseInput(addDomainSchema, req.body, "domain");
+    sendData(res, await domains.add(id, user.id, hostname, serviceId ?? null), 201);
   });
 
   router.delete("/projects/:id/domains/:hostname", async (req, res) => {

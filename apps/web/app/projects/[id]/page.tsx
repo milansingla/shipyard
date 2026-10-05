@@ -6,12 +6,13 @@ import { useEffect, useState } from "react";
 
 import { DomainsPanel } from "@/components/DomainsPanel";
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
+import { ServicesPanel } from "@/components/ServicesPanel";
 import { ProjectSettings } from "@/components/ProjectSettings";
 import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
-import type { Deployment, ProjectWithLatestDeployment } from "@/lib/types";
+import type { Deployment, ProjectWithLatestDeployment, Service } from "@/lib/types";
 import { can } from "@/lib/roles";
 import { useApi } from "@/lib/useApi";
 
@@ -19,6 +20,9 @@ export default function ProjectPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const project = useApi<ProjectWithLatestDeployment>(`/projects/${id}`);
+  const services = useApi<Service[]>(`/projects/${id}/services`, {
+    pollMs: (list) => (list.some((s) => s.latestDeployment && isInProgress(s.latestDeployment.status)) ? 3_000 : null),
+  });
   const history = useApi<Deployment[]>(`/projects/${id}/deployments?limit=50`, {
     pollMs: (list) => (list.some((d) => isInProgress(d.status)) ? 3_000 : null),
   });
@@ -64,7 +68,10 @@ export default function ProjectPage() {
   }
   if (!project.data) return null;
   const p = project.data;
-  const running = history.data?.find((d) => d.status === "RUNNING");
+  const serviceName = new Map((services.data ?? []).map((service) => [service.id, service.name]));
+  const multiService = serviceName.size > 1;
+  const primary = services.data?.find((service) => service.primary);
+  const running = history.data?.find((d) => d.status === "RUNNING" && (!primary || d.serviceId === primary.id));
   const runningUrl = safeHttpUrl(running?.deploymentUrl ?? null);
 
   return (
@@ -130,9 +137,17 @@ export default function ProjectPage() {
 
       <PushDeploySetup branch={p.branch} />
 
+      <ServicesPanel
+        projectId={p.id}
+        services={services}
+        canDeploy={can(p.role, "DEVELOPER")}
+        canEdit={can(p.role, "ADMIN")}
+        onDeployed={(deployment) => router.push(`/deployments/${deployment.id}`)}
+      />
+
       <DomainsPanel projectId={p.id} canEdit={can(p.role, "ADMIN")} />
 
-      <EnvironmentPanel projectId={p.id} canEdit={can(p.role, "DEVELOPER")} />
+      <EnvironmentPanel projectId={p.id} services={services.data ?? []} canEdit={can(p.role, "DEVELOPER")} />
 
       <ProjectSettings project={p} canEdit={can(p.role, "ADMIN")} onSaved={() => void project.reload()} />
 
@@ -143,7 +158,7 @@ export default function ProjectPage() {
           <table className="w-full min-w-[40rem] text-left text-sm">
             <thead className="border-b border-rivet">
               <tr>
-                {["Status", "Deployment", "Commit", "Started", "Duration"].map((h) => (
+                {["Status", "Deployment", ...(multiService ? ["Service"] : []), "Commit", "Started", "Duration"].map((h) => (
                   <th key={h} scope="col" className="py-2 pr-4 font-normal">
                     <Label>{h}</Label>
                   </th>
@@ -166,6 +181,7 @@ export default function ProjectPage() {
                       </span>
                     )}
                   </td>
+                  {multiService && <td className="py-3 pr-4">{serviceName.get(d.serviceId) ?? "—"}</td>}
                   <td className="py-3 pr-4">
                     <Mono>{shortSha(d.commitSha)}</Mono>
                   </td>

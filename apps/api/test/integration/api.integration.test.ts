@@ -16,6 +16,7 @@ import { SecretBox } from "../../src/lib/secretBox.js";
 import { sessionCookieName } from "../../src/middleware/authenticate.js";
 import { AccessService } from "../../src/modules/access/AccessService.js";
 import { OrganizationService } from "../../src/modules/access/OrganizationService.js";
+import { ServiceService } from "../../src/modules/services/ServiceService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
@@ -145,11 +146,14 @@ const removedContainers = new Set<string>();
 
 /** The last job the fake engine was asked to run (to see what it would hand to Docker). */
 let lastJob: DeploymentJob | null = null;
+/** Every job, in the order the fake engine ran them. */
+const jobs: DeploymentJob[] = [];
 
 /** Walks a deployment to RUNNING instantly, without Docker, routing it like the real engine. */
 const fakeEngine: EngineLike = {
   async run(job, observer = {}) {
     lastJob = job;
+    jobs.push(job);
     const state: DeploymentState = {
       id: job.id,
       status: S.QUEUED,
@@ -168,8 +172,12 @@ const fakeEngine: EngineLike = {
     };
     for (const status of [S.CLONING, S.DETECTING, S.BUILDING, S.STARTING, S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING, S.RUNNING]) {
       if (status === S.RUNNING) {
-        await fakeRouter.activate({ name: job.name, deploymentId: job.id, containerName: state.containerName, containerPort: 3000 });
-        state.deploymentUrl = fakeRouter.urlFor(job.name, 49_999);
+        // Like the real engine: only public web services are routed, under their route name.
+        if (job.service?.public ?? true) {
+          const routeName = job.routeName ?? job.name;
+          await fakeRouter.activate({ name: routeName, aliases: job.domains, deploymentId: job.id, containerName: state.containerName, containerPort: 3000 });
+          state.deploymentUrl = fakeRouter.urlFor(routeName, 49_999);
+        }
       }
       const previous = state.status;
       state.status = status;
@@ -184,6 +192,7 @@ const fakeEngine: EngineLike = {
   async restart(containerId, route, onStage = async () => {}) {
     for (const stage of [S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING]) await onStage(stage);
     const deploymentId = containerId.replace(/^container-/, "");
+    if (!route) return { containerName: "x", status: S.RUNNING, hostPort: null, deploymentUrl: null };
     await fakeRouter.activate({ name: route.name, aliases: route.aliases, deploymentId, containerName: "x", containerPort: 3000 });
     return { containerName: "x", status: S.RUNNING, hostPort: 49_998, deploymentUrl: fakeRouter.urlFor(route.name, 49_998) };
   },
@@ -196,6 +205,7 @@ const fakeEngine: EngineLike = {
     return { running: true, exitCode: null, hostPort: 49_999 };
   },
   async ensureRoutable() {},
+  async removeNetwork() {},
   artifactNames: (job) => ({ imageName: `shipyard/${job.name}:x`, containerName: `shipyard-${job.name}-x` }),
   async followLogs(_containerId, _tail, onChunk, signal) {
     onChunk({ stream: "stdout", text: "hello\n" });
@@ -286,6 +296,7 @@ beforeAll(async () => {
       environment,
       audit,
       organizations: new OrganizationService({ prisma, access, audit, logger: silentLogger }),
+      services: new ServiceService({ prisma, access, deployments, audit, logger: silentLogger }),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
         service: auth,
@@ -313,6 +324,7 @@ beforeEach(async () => {
   liveRoutes.clear();
   liveAliases.clear();
   removedContainers.clear();
+  jobs.length = 0;
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
   await prisma.auditLog.deleteMany();
@@ -1493,3 +1505,141 @@ describe("shipyard CLI against the API", () => {
     }
   });
 });
+
+describe("multi-service projects", () => {
+  async function project(cookie: string, repo: string): Promise<string> {
+    const res = await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` });
+    expect(res.status).toBe(201);
+    return res.body!.data.id as string;
+  }
+  const addService = (cookie: string, projectId: string, body: object) => call(cookie, "POST", `/api/projects/${projectId}/services`, body);
+
+  it("deploys every service, internal ones first, routing only public web services", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "stack");
+    const services = (await call(alice, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    expect(services).toMatchObject([{ name: "web", type: "WEB", public: true, primary: true, routeName: "stack" }]);
+
+    expect((await addService(alice, projectId, { name: "api", sourceDir: "api", port: 4000, public: false, startCommand: "node server.js" })).status).toBe(201);
+    expect((await addService(alice, projectId, { name: "jobs", type: "WORKER", sourceDir: "worker" })).status).toBe(201);
+    expect((await addService(alice, projectId, { name: "admin", sourceDir: "admin" })).status).toBe(201);
+
+    const deployed = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    expect(deployed.status).toBe(202);
+    await deployments.waitForIdle();
+    const web = services[0]!;
+    expect(deployed.body!.data.serviceId).toBe(web.id); // the primary's deployment comes back
+
+    // Internal services first, the primary last.
+    expect(jobs.map((job) => job.service?.alias)).toEqual(["api", "jobs", "admin", "web"]);
+    const network = jobs[0]!.service!.network;
+    expect(jobs.every((job) => job.service!.network === network)).toBe(true);
+    expect(jobs[0]).toMatchObject({ service: { sourceDir: "api", port: 4000, public: false, startCommand: "node server.js" } });
+    expect(jobs[1]!.service).toMatchObject({ type: "WORKER", public: false });
+
+    // Only public web services get an address.
+    expect(new Map(liveRoutes)).toEqual(
+      new Map([
+        ["admin-stack", jobs[2]!.id],
+        ["stack", jobs[3]!.id],
+      ]),
+    );
+    const listed = (await call(alice, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    const admin = listed.find((service) => service.name === "admin")!;
+    await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: "admin.example.com", serviceId: admin.id });
+    expect(liveAliases.get("admin-stack")).toEqual(["admin.example.com"]);
+    expect(liveAliases.get("stack")).toEqual([]);
+    expect(listed.map((s) => [s.name, s.routeName, s.latestDeployment.status])).toEqual([
+      ["web", "stack", "RUNNING"],
+      ["api", null, "RUNNING"],
+      ["jobs", null, "RUNNING"],
+      ["admin", "admin-stack", "RUNNING"],
+    ]);
+  });
+
+  it("gives each service the project's variables, overridden by its own", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "scoped");
+    const api = (await addService(alice, projectId, { name: "api", public: false })).body!.data;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/LOG_LEVEL`, { value: "info" });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/LOG_LEVEL?service=${api.id}`, { value: "debug" });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/DB_URL?service=${api.id}`, { value: "postgres://x", secret: true });
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    const envOf = (alias: string) => jobs.find((job) => job.service?.alias === alias)!.env!.runtime;
+    expect(envOf("api")).toEqual({ LOG_LEVEL: "debug", DB_URL: "postgres://x" });
+    expect(envOf("web")).toEqual({ LOG_LEVEL: "info" });
+
+    const listed = (await call(alice, "GET", `/api/projects/${projectId}/env`)).body!.data as Array<Record<string, any>>;
+    expect(listed.map((v) => [v.key, v.serviceId])).toEqual([
+      ["DB_URL", api.id],
+      ["LOG_LEVEL", api.id],
+      ["LOG_LEVEL", null],
+    ]);
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}/env/LOG_LEVEL?service=${api.id}`)).status).toBe(204);
+    expect((await call(alice, "GET", `/api/projects/${projectId}/env`)).body!.data).toHaveLength(2);
+  });
+
+  it("validates services and who may change them", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = await project(alice, "rules");
+
+    for (const body of [
+      { name: "Bad_Name" },
+      { name: "a--b" },
+      { name: "w", type: "WORKER", public: true },
+      { name: "up", sourceDir: "../outside" },
+      { name: "cmd", startCommand: "node a.js\nrm -rf /" },
+    ]) {
+      expect({ body, status: (await addService(alice, projectId, body)).status }).toEqual({ body, status: 400 });
+    }
+    expect((await addService(alice, projectId, { name: "web" })).status).toBe(409);
+    expect((await addService(bob, projectId, { name: "api" })).status).toBe(404);
+
+    const only = ((await call(alice, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>)[0]!;
+    expect((await call(alice, "DELETE", `/api/services/${only.id}`)).status).toBe(409); // a project keeps one service
+  });
+
+  it("never lets two things share an address", async () => {
+    const alice = await sessionFor(ALICE);
+    const shop = await project(alice, "shop");
+    await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/admin-shop" });
+    // A service "admin" in "shop" would be served at admin-shop: taken by a project.
+    expect((await addService(alice, shop, { name: "admin" })).status).toBe(409);
+    expect((await addService(alice, shop, { name: "api" })).status).toBe(201);
+    // …and the other way round: a project can't take a service's address.
+    expect((await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/api-shop" })).status).toBe(409);
+  });
+
+  it("deploys, rolls back and deletes one service without touching the others", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "solo");
+    const api = (await addService(alice, projectId, { name: "api", public: false })).body!.data;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/ONLY_API?service=${api.id}`, { value: "1" });
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    jobs.length = 0;
+    const second = await call(alice, "POST", `/api/services/${api.id}/deploy`);
+    expect(second.status).toBe(202);
+    await deployments.waitForIdle();
+    expect(jobs.map((job) => job.service?.alias)).toEqual(["api"]);
+
+    // A domain can point at a specific public web service, not a private one.
+    expect((await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: "api.example.com", serviceId: api.id })).status).toBe(400);
+
+    const webRunning = await prisma.deployment.findFirstOrThrow({ where: { projectId, status: "RUNNING", service: { name: "web" } } });
+    const rolledBack = await call(alice, "POST", `/api/deployments/${second.body!.data.id}/rollback`);
+    expect(rolledBack.status).toBe(200);
+    expect(rolledBack.body!.data.serviceId).toBe(api.id);
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: webRunning.id } })).status).toBe("RUNNING"); // untouched
+
+    expect((await call(alice, "DELETE", `/api/services/${api.id}`)).status).toBe(204);
+    expect(await prisma.deployment.count({ where: { serviceId: api.id } })).toBe(0);
+    expect(await prisma.environmentVariable.count({ where: { projectId, scope: api.id } })).toBe(0);
+    expect(await prisma.deployment.count({ where: { projectId } })).toBe(1); // web's deployment remains
+  });
+});
+

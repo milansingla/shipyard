@@ -11,6 +11,8 @@ export const MAX_DOMAINS_PER_PROJECT = 20;
 
 export interface DomainView {
   hostname: string;
+  /** The web service it routes to; null = the project's primary one. */
+  serviceId: string | null;
   url: string;
   createdAt: Date;
 }
@@ -46,7 +48,7 @@ export class DomainService {
   }
 
   /** Needs ADMIN: a domain decides where real traffic goes. */
-  async add(projectId: string, userId: string, input: string): Promise<DomainView> {
+  async add(projectId: string, userId: string, input: string, serviceId: string | null = null): Promise<DomainView> {
     const project = await this.deps.access.project(projectId, userId, OrgRole.ADMIN);
     const { publicDomain, prisma } = this.deps;
     if (!publicDomain) {
@@ -63,13 +65,18 @@ export class DomainService {
     if (hostname === publicDomain || hostname.endsWith(`.${publicDomain}`)) {
       throw new ValidationError(`Addresses under ${publicDomain} are Shipyard's own; each project already has one.`);
     }
+    if (serviceId) {
+      const service = await prisma.service.findFirst({ where: { id: serviceId, projectId } });
+      if (!service) throw new NotFoundError(`Service not found: ${serviceId}`);
+      if (service.type !== "WEB" || !service.public) throw new ValidationError("Domains can only point at a public web service.");
+    }
     if ((await prisma.projectDomain.count({ where: { projectId } })) >= MAX_DOMAINS_PER_PROJECT) {
       throw new ValidationError(`A project can have at most ${MAX_DOMAINS_PER_PROJECT} custom domains.`);
     }
 
     let domain;
     try {
-      domain = await prisma.projectDomain.create({ data: { projectId, hostname } });
+      domain = await prisma.projectDomain.create({ data: { projectId, hostname, serviceId } });
     } catch (error) {
       // Don't reveal whose project it is.
       if (isUniqueViolation(error)) throw new ConflictError(ErrorCode.DOMAIN_TAKEN, `${hostname} is already used by a project.`);
@@ -95,9 +102,10 @@ export class DomainService {
     await this.deps.deployments.refreshRoute(projectId);
   }
 
-  private view(domain: { hostname: string; createdAt: Date }): DomainView {
+  private view(domain: { hostname: string; serviceId: string | null; createdAt: Date }): DomainView {
     return {
       hostname: domain.hostname,
+      serviceId: domain.serviceId,
       url: `${this.deps.https ? "https" : "http"}://${domain.hostname}`,
       createdAt: domain.createdAt,
     };

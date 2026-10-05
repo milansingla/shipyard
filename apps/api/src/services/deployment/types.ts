@@ -2,6 +2,21 @@ import type { ContainerResources, HealthCheckSettings } from "../docker/DockerSe
 import type { RepositoryRef } from "../git/repositoryUrl.js";
 import type { DeploymentStatus } from "./status.js";
 
+/** Which service of a project a job deploys, and how. */
+export interface ServiceSpec {
+  type: "WEB" | "WORKER";
+  /** Directory in the repository to build ("." = the root). Validated by the caller and again by the engine. */
+  sourceDir: string;
+  buildCommand: string | null;
+  startCommand: string | null;
+  port: number | null;
+  /** Route it from outside (web services only). */
+  public: boolean;
+  /** The project's private network, and this service's name in it. */
+  network: string;
+  alias: string;
+}
+
 /** What to deploy. Built by the caller from already-validated input. */
 export interface DeploymentJob {
   id: string;
@@ -10,6 +25,10 @@ export interface DeploymentJob {
   branch: string | null;
   /** Human-readable base for image/container names (project slug or repo name). */
   name: string;
+  /** Route name (first hostname label); default `name`. */
+  routeName?: string;
+  /** Default: a public web service built from the repository root (one-service projects, the CLI). */
+  service?: ServiceSpec;
   /** Extra Docker labels, e.g. the owning project's id. */
   labels?: Record<string, string>;
   /** How to decide the app is healthy. Default: "/" on the app's port, server-default timeout. */

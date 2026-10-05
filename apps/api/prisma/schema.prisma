@@ -112,6 +112,7 @@ model Project {
   deployments     Deployment[]
   environmentVariables EnvironmentVariable[]
   domains         ProjectDomain[]
+  services        Service[]
 
   @@index([organizationId, createdAt(sort: Desc)])
   @@map("projects")
@@ -193,6 +194,9 @@ enum AuditAction {
   MEMBER_ADDED
   MEMBER_ROLE_CHANGED
   MEMBER_REMOVED
+  SERVICE_CREATED
+  SERVICE_CHANGED
+  SERVICE_DELETED
 }
 
 /// Who did what, append-only. Kept when the project is deleted (no foreign
@@ -237,10 +241,56 @@ model ProjectDomain {
   project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
   /// Lower-case. Unique across all projects: one hostname, one app.
   hostname  String   @unique
+  /// The web service it routes to; null = the project's primary web service.
+  serviceId String?  @db.Uuid
+  service   Service? @relation(fields: [serviceId], references: [id], onDelete: Cascade)
   createdAt DateTime @default(now())
 
   @@index([projectId])
   @@map("project_domains")
+}
+
+enum ServiceType {
+  /// Serves HTTP on its port: health-checked over HTTP, routable.
+  WEB
+  /// Background process: healthy when it keeps running; never routed.
+  WORKER
+}
+
+/// One part of a project (frontend, backend, worker…), built from a
+/// directory of the repository and deployed as its own container. Services of
+/// a project reach each other by name (http://backend:3000) on a private
+/// network; only public web services are reachable from outside.
+model Service {
+  id           String      @id @default(uuid()) @db.Uuid
+  projectId    String      @db.Uuid
+  project      Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// DNS label: its hostname inside the project network.
+  name         String
+  type         ServiceType @default(WEB)
+  /// Directory to build, relative to the repository root.
+  sourceDir    String      @default(".")
+  /// Override detection (used with a generated Dockerfile).
+  buildCommand String?
+  /// Override the start command (also with the repository's Dockerfile).
+  startCommand String?
+  /// Override the detected port (web services).
+  port         Int?
+  /// Routed from outside. Only for web services.
+  public       Boolean     @default(true)
+  /// Per-service overrides of the project's settings; null = the project's.
+  healthCheckPath String?
+  healthCheckPort Int?
+  healthCheckTimeoutSeconds Int?
+  cpuLimit     Float?
+  memoryLimitMb Int?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  deployments  Deployment[]
+  domains      ProjectDomain[]
+
+  @@unique([projectId, name])
+  @@map("services")
 }
 
 /// When a variable is available: to the running app, to `docker build`, or both.
@@ -258,6 +308,8 @@ model EnvironmentVariable {
   id        String                    @id @default(uuid()) @db.Uuid
   projectId String                    @db.Uuid
   project   Project                   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// "project" = every service; otherwise a service id, whose value wins for that service.
+  scope     String                    @default("project")
   key       String
   /// SecretBox ciphertext ("v1:…"), never plaintext.
   value     String
@@ -266,7 +318,7 @@ model EnvironmentVariable {
   createdAt DateTime                  @default(now())
   updatedAt DateTime                  @updatedAt
 
-  @@unique([projectId, key])
+  @@unique([projectId, scope, key])
   @@map("environment_variables")
 }
 
@@ -277,6 +329,10 @@ model Deployment {
   id            String           @id @default(uuid()) @db.Uuid
   projectId     String           @db.Uuid
   project       Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// The service this deployment runs. Every deployment has one (the
+  /// multi-service migration gave older ones their project's "web" service).
+  serviceId     String           @db.Uuid
+  service       Service          @relation(fields: [serviceId], references: [id], onDelete: Cascade)
   status        DeploymentStatus @default(QUEUED)
   trigger       DeploymentTrigger @default(MANUAL)
   /// Branch at the time of deployment (the project's branch may change later).
@@ -299,6 +355,7 @@ model Deployment {
   events        DeploymentEvent[]
 
   @@index([projectId, createdAt(sort: Desc)])
+  @@index([serviceId, createdAt(sort: Desc)])
   @@index([status])
   @@map("deployments")
 }

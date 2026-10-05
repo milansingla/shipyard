@@ -22,6 +22,8 @@ import { createEnvironmentRouter } from "./modules/environment/environment.route
 import type { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { createGitHubRouter } from "./modules/github/github.routes.js";
 import { createProjectRouter } from "./modules/projects/project.routes.js";
+import { createServiceRouter } from "./modules/services/service.routes.js";
+import type { ServiceService } from "./modules/services/ServiceService.js";
 import { createWebhookRouter } from "./modules/webhooks/webhook.routes.js";
 import type { WebhookService } from "./modules/webhooks/WebhookService.js";
 import type { ProjectService } from "./modules/projects/ProjectService.js";
@@ -49,6 +51,7 @@ export interface AppDeps {
   domains?: DomainService;
   audit?: AuditService;
   organizations?: OrganizationService;
+  services?: ServiceService;
   /** null/omitted = GitHub sign-in not configured: protected routes answer 503. */
   auth?: AppAuth | null;
   /** GitHub push webhooks; null/omitted = not configured (503). */
@@ -106,6 +109,7 @@ export function createApp(deps: AppDeps): Express {
     if (deps.domains) app.use("/api", createDomainRouter(deps.domains));
     if (deps.audit) app.use("/api", createAuditRouter(deps.audit));
     if (deps.organizations) app.use("/api", createOrganizationRouter(deps.organizations));
+    if (deps.services) app.use("/api", createServiceRouter(deps.services));
   }
 
   app.use(notFoundHandler);

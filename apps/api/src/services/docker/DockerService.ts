@@ -27,6 +27,8 @@ export const ShipyardLabel = {
   HEALTH_PATH: "shipyard.health-path",
   HEALTH_PORT: "shipyard.health-port",
   HEALTH_TIMEOUT_MS: "shipyard.health-timeout-ms",
+  /** The service's name within its project. */
+  SERVICE: "shipyard.service",
 } as const;
 
 /** How a container is health-checked. */
@@ -78,7 +80,12 @@ export interface ManagedContainer extends ContainerState {
 export interface CreateContainerOptions {
   imageName: string;
   containerName: string;
-  containerPort: number;
+  /** null = a worker: no port, nothing published. */
+  containerPort: number | null;
+  /** The project's private network, where `alias` (the service name) resolves to this container. */
+  privateNetwork?: { name: string; alias: string } | null;
+  /** Overrides the image's command (exec form). */
+  command?: string[];
   labels: Record<string, string>;
   /** Docker network to attach the container to (instead of the default bridge), e.g. the proxy's. */
   network?: string | null;
@@ -92,9 +99,10 @@ export interface CreateContainerOptions {
 
 export interface StartedContainer {
   id: string;
-  hostPort: number;
+  /** null for workers (nothing published). */
+  hostPort: number | null;
   /** Where to send health checks: hostPort, or the separate health port's published port. */
-  healthHostPort: number;
+  healthHostPort: number | null;
 }
 
 interface DockerServiceOptions {
@@ -235,9 +243,16 @@ export class DockerService {
   }
 
   async createAndStartContainer(options: CreateContainerOptions): Promise<StartedContainer> {
-    const ports = [options.containerPort];
-    if (options.healthCheckPort && options.healthCheckPort !== options.containerPort) ports.push(options.healthCheckPort);
-    if (options.network) await this.assertNetworkExists(options.network);
+    const ports = options.containerPort === null ? [] : [options.containerPort];
+    if (options.containerPort !== null && options.healthCheckPort && options.healthCheckPort !== options.containerPort) {
+      ports.push(options.healthCheckPort);
+    }
+    // The private (project) network first: it's where the service's name resolves.
+    const networks = [
+      ...(options.privateNetwork ? [{ name: options.privateNetwork.name, aliases: [options.privateNetwork.alias] }] : []),
+      ...(options.network ? [{ name: options.network, aliases: [] as string[] }] : []),
+    ];
+    for (const network of networks) await this.assertNetworkExists(network.name);
 
     let container: Docker.Container;
     try {
@@ -245,7 +260,11 @@ export class DockerService {
         Image: options.imageName,
         name: options.containerName,
         // PORT last: if a key appears twice, Docker keeps the last one.
-        Env: [...Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`), `PORT=${options.containerPort}`],
+        Env: [
+          ...Object.entries(options.env ?? {}).map(([key, value]) => `${key}=${value}`),
+          ...(options.containerPort === null ? [] : [`PORT=${options.containerPort}`]),
+        ],
+        ...(options.command ? { Cmd: options.command } : {}),
         Labels: options.labels,
         ExposedPorts: Object.fromEntries(ports.map((port) => [`${port}/tcp`, {}])),
         HostConfig: {
@@ -257,12 +276,17 @@ export class DockerService {
               [{ HostIp: index === 0 ? this.options.publishHost : "127.0.0.1", HostPort: "" }],
             ]),
           ),
-          ...(options.network ? { NetworkMode: options.network } : {}),
+          ...(networks[0] ? { NetworkMode: networks[0].name } : {}),
           ...resourceConfig(options.resources),
           LogConfig: RUNTIME_LOG_CONFIG,
           SecurityOpt: ["no-new-privileges:true"],
           PidsLimit: 512,
         },
+        ...(networks.length > 0 && {
+          NetworkingConfig: {
+            EndpointsConfig: Object.fromEntries(networks.map((network) => [network.name, { Aliases: network.aliases }])),
+          },
+        }),
       });
       await container.start();
     } catch (error) {
@@ -270,11 +294,41 @@ export class DockerService {
     }
 
     const managed = await this.inspectManagedContainer(container.id);
-    if (managed.hostPort === null || managed.healthHostPort === null) {
+    if (options.containerPort !== null && (managed.hostPort === null || managed.healthHostPort === null)) {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Docker did not assign a host port.");
     }
     return { id: container.id, hostPort: managed.hostPort, healthHostPort: managed.healthHostPort };
   }
+
+  /** Creates a Shipyard-managed bridge network if it doesn't exist yet. Idempotent. */
+  async ensureNetwork(name: string, labels: Record<string, string>): Promise<void> {
+    try {
+      await this.docker.getNetwork(name).inspect();
+      return;
+    } catch (error) {
+      if (!isDockerNotFound(error)) throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not inspect Docker network", error);
+    }
+    try {
+      await this.docker.createNetwork({ Name: name, Driver: "bridge", Labels: { ...labels, [ShipyardLabel.MANAGED]: "true" } });
+    } catch (error) {
+      // Created concurrently by another deploy: fine.
+      if (dockerStatusCode(error) !== 409) throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not create Docker network", error);
+    }
+  }
+
+  /** Removes a Shipyard-managed network. Missing networks are ignored. */
+  async removeNetwork(name: string): Promise<void> {
+    try {
+      const network = this.docker.getNetwork(name);
+      const info = (await network.inspect()) as { Labels?: Record<string, string> };
+      if (info.Labels?.[ShipyardLabel.MANAGED] !== "true") return; // never someone else's
+      await network.remove();
+    } catch (error) {
+      if (isDockerNotFound(error)) return;
+      throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not remove Docker network", error);
+    }
+  }
+
 
   /**
    * Looks up a container by name or id and verifies Shipyard created it.
@@ -299,8 +353,9 @@ export class DockerService {
       throw new NotFoundError(`Container not found: ${reference}`);
     }
 
-    const containerPort = Number(labels[ShipyardLabel.CONTAINER_PORT]);
+    const containerPort = Number(labels[ShipyardLabel.CONTAINER_PORT] ?? 0);
     const publishedPort = (port: number): number | null => {
+      if (!port) return null; // a worker: no port
       const binding = info.NetworkSettings.Ports?.[`${port}/tcp`]?.[0];
       return binding?.HostPort ? Number(binding.HostPort) : null;
     };
@@ -318,7 +373,7 @@ export class DockerService {
       containerPort,
       hostPort: publishedPort(containerPort),
       healthCheck,
-      healthHostPort: publishedPort(healthCheck.port ?? containerPort),
+      healthHostPort: containerPort ? publishedPort(healthCheck.port ?? containerPort) : null,
       networks: Object.keys(info.NetworkSettings.Networks ?? {}),
       // A crash-looping container under a restart policy reports Running *and* Restarting.
       running: info.State.Running && !info.State.Restarting,

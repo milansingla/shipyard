@@ -17,6 +17,15 @@ export interface BuildPlan {
   dockerfile: string;
   containerPort: number;
   source: "repository" | "generated";
+  /** Start command to run instead of the image's (a configured one, with the repository's Dockerfile). */
+  command?: string[];
+}
+
+/** What a service configures instead of detecting it (shipyard.yaml or the dashboard). */
+export interface BuildOverrides {
+  buildCommand?: string | null;
+  startCommand?: string | null;
+  port?: number | null;
 }
 
 /**
@@ -31,23 +40,32 @@ export async function prepareBuild(
   log: (text: string) => void,
   /** Build variable names, declared as ARGs in a generated Dockerfile. */
   buildArgNames: readonly string[] = [],
+  overrides: BuildOverrides = {},
 ): Promise<BuildPlan> {
   const dockerfile = await detectDockerfile(sourceDir);
   if (dockerfile) {
-    const containerPort = dockerfile.exposedPort ?? DEFAULT_CONTAINER_PORT;
+    const containerPort = overrides.port ?? dockerfile.exposedPort ?? DEFAULT_CONTAINER_PORT;
     log(
-      dockerfile.exposedPort === null
-        ? `Dockerfile has no EXPOSE; assuming port ${containerPort}\n`
-        : `Dockerfile exposes port ${containerPort}\n`,
+      overrides.port
+        ? `Using the configured port ${containerPort}\n`
+        : dockerfile.exposedPort === null
+          ? `Dockerfile has no EXPOSE; assuming port ${containerPort}\n`
+          : `Dockerfile exposes port ${containerPort}\n`,
     );
-    return { dockerfile: DOCKERFILE_NAME, containerPort, source: "repository" };
+    if (overrides.buildCommand) log("note: the build command is ignored: the repository's Dockerfile decides the build.\n");
+    return {
+      dockerfile: DOCKERFILE_NAME,
+      containerPort,
+      source: "repository",
+      ...(overrides.startCommand && { command: ["sh", "-c", overrides.startCommand] }),
+    };
   }
 
-  const node = await detectNodeProject(sourceDir);
+  const node = await detectNodeProject(sourceDir, { startCommand: overrides.startCommand });
   if (!node) {
     throw new AppError(
       ErrorCode.DOCKERFILE_NOT_FOUND,
-      "No Dockerfile or package.json found at the repository root. Shipyard can generate a Dockerfile " +
+      "No Dockerfile or package.json found in the service's directory. Shipyard can generate a Dockerfile " +
         "for Node.js projects; for anything else, add a Dockerfile.",
       { statusCode: 422 },
     );
@@ -56,14 +74,15 @@ export async function prepareBuild(
   log(`No Dockerfile found; detected a Node.js project (${node.packageManager}, Node ${node.nodeMajor})\n`);
   for (const note of node.notes) log(`  note: ${note}\n`);
 
-  const contents = generateNodeDockerfile(node, DEFAULT_CONTAINER_PORT, buildArgNames);
+  const port = overrides.port ?? DEFAULT_CONTAINER_PORT;
+  const contents = generateNodeDockerfile(node, port, buildArgNames, overrides.buildCommand ?? null);
   await writeNewFile(sourceDir, GENERATED_DOCKERFILE_NAME, contents);
   if (await writeNewFile(sourceDir, ".dockerignore", GENERATED_DOCKERIGNORE, { ifExists: "skip" })) {
     log("Added a default .dockerignore (node_modules, .git)\n");
   }
   log(`Generated Dockerfile:\n${contents.replace(/^/gm, "  ")}`);
 
-  return { dockerfile: GENERATED_DOCKERFILE_NAME, containerPort: DEFAULT_CONTAINER_PORT, source: "generated" };
+  return { dockerfile: GENERATED_DOCKERFILE_NAME, containerPort: port, source: "generated" };
 }
 
 /**

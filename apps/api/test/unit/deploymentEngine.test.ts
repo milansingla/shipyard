@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AppError, ErrorCode } from "../../src/lib/errors.js";
 import {
   DeploymentEngine,
+  type DeploymentEngineDeps,
   DeploymentFailedError,
   type EngineDocker,
 } from "../../src/services/deployment/DeploymentEngine.js";
@@ -106,9 +107,12 @@ function harness(
     },
     async createAndStartContainer(opts) {
       calls.push(`start:${opts.containerName}:${opts.containerPort}:${opts.network ?? "bridge"}`);
+      if (opts.privateNetwork) calls.push(`private:${opts.privateNetwork.name}=${opts.privateNetwork.alias}`);
+      if (opts.command) calls.push(`command:${JSON.stringify(opts.command)}`);
       if (opts.env && Object.keys(opts.env).length > 0) calls.push(`env:${JSON.stringify(opts.env)}`);
       if (opts.healthCheckPort) calls.push(`healthPort:${opts.healthCheckPort}`);
       if (opts.resources) calls.push(`resources:${JSON.stringify(opts.resources)}`);
+      if (opts.containerPort === null) return { id: "container-id", hostPort: null, healthHostPort: null };
       return { id: "container-id", hostPort: 49153, healthHostPort: opts.healthCheckPort ? 49154 : 49153 };
     },
     async getContainerState() {
@@ -124,6 +128,10 @@ function harness(
     inspectManagedContainer: unused,
     restartContainer: unused,
     followLogs: unused,
+    async ensureNetwork(name: string) {
+      calls.push(`network:${name}`);
+    },
+    removeNetwork: unused,
     connectToNetwork: unused,
     removeContainer: unused,
     removeImage: unused,
@@ -158,6 +166,7 @@ function harness(
     workspace: new WorkspaceService(workspaceRoot),
     router,
     registry: options.registry ?? new LocalRegistry(),
+    workerSettleMs: 30,
     logger: silentLogger,
   });
 
@@ -383,6 +392,74 @@ describe("DeploymentEngine.run", () => {
     expect(h.calls.findIndex((c) => c.startsWith("build:"))).toBeLessThan(h.calls.findIndex((c) => c.startsWith("start:")));
     expect(buildLog).toContain("Pushed ghcr.io/acme/hello:3f2a9c1e77b4");
     expect(buildLog).not.toContain("s3cret");
+  });
+
+  const spec = (overrides: Partial<NonNullable<DeploymentJob["service"]>> = {}) => ({
+    type: "WEB" as const,
+    sourceDir: ".",
+    buildCommand: null,
+    startCommand: null,
+    port: null,
+    public: true,
+    network: "shipyard-p-test",
+    alias: "api",
+    ...overrides,
+  });
+
+  it("runs a worker: no port, healthy once it keeps running, never routed", async () => {
+    const h = harness({ routed: true });
+    const state = await h.engine.run(job({ service: spec({ type: "WORKER", public: false, alias: "jobs" }) }));
+
+    expect(state).toMatchObject({ status: S.RUNNING, containerPort: null, hostPort: null, deploymentUrl: null });
+    expect(h.calls).toContain("start:shipyard-hello-3f2a9c1e77b4:null:bridge"); // not on the proxy network
+    expect(h.calls).toContain("private:shipyard-p-test=jobs");
+    expect(h.calls.some((c) => c.startsWith("health:") || c.startsWith("route:"))).toBe(false);
+  });
+
+  it("runs a private web service: health-checked, reachable by name, not routed", async () => {
+    const h = harness({ routed: true });
+    const state = await h.engine.run(job({ service: spec({ public: false, port: 4000 }) }));
+
+    expect(state).toMatchObject({ status: S.RUNNING, containerPort: 4000, deploymentUrl: null });
+    expect(h.calls).toContain("network:shipyard-p-test");
+    expect(h.calls).toContain("private:shipyard-p-test=api");
+    expect(h.calls.some((c) => c.startsWith("health:"))).toBe(true);
+    expect(h.calls.some((c) => c.startsWith("route:"))).toBe(false);
+  });
+
+  it("routes a public service under its route name, and runs a configured start command", async () => {
+    const h = harness({ routed: true });
+    const state = await h.engine.run(job({ routeName: "admin-hello", service: spec({ alias: "admin", startCommand: "node admin.js" }) }));
+    expect(state.deploymentUrl).toBe("http://admin-hello.localhost");
+    expect(h.calls).toContain('command:["sh","-c","node admin.js"]'); // with the repository's Dockerfile
+  });
+
+  it.each([
+    ["missing", "nope", "doesn't exist"],
+    ["a file", "Dockerfile", "is not a directory"],
+  ])("refuses a service directory that is %s", async (_case, sourceDir, message) => {
+    const h = harness();
+    const error = (await h.engine.run(job({ service: spec({ sourceDir }) })).catch((e: unknown) => e)) as DeploymentFailedError;
+    expect(error.message).toContain(message);
+    expect(error.deployment.failedStage).toBe(S.DETECTING);
+  });
+
+  it("refuses a service directory that is a symlink out of the repository", async () => {
+    const outside = await fs.mkdtemp(path.join(tmpRoot, "outside-"));
+    const h = harness({ files: {} });
+    // The fake clone writes files; add the symlink through a source that also creates it.
+    const engine = new DeploymentEngine({
+      ...(h.engine as unknown as { deps: DeploymentEngineDeps }).deps,
+      source: {
+        async clone(_repo, destination) {
+          await fs.mkdir(destination, { recursive: true });
+          await fs.symlink(outside, path.join(destination, "escape"));
+          return { path: destination, commitSha: COMMIT };
+        },
+      },
+    });
+    const error = (await engine.run(job({ service: spec({ sourceDir: "escape" }) })).catch((e: unknown) => e)) as DeploymentFailedError;
+    expect(error.message).toContain("points outside the repository");
   });
 
   it("a failing observer fails the deployment instead of being ignored", async () => {

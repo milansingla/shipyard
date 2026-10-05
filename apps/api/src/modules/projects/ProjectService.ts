@@ -49,6 +49,7 @@ export class ProjectService {
 
     const name = input.name ?? repository.name;
     const slug = toDockerSlug(name);
+    await this.assertAddressFree(slug);
 
     try {
       const project = await this.deps.prisma.project.create({
@@ -61,6 +62,8 @@ export class ProjectService {
           repositoryOwner: repository.owner,
           repositoryName: repository.name,
           branch,
+          // Every project starts with one public web service at the repository root.
+          services: { create: { name: "web" } },
         },
       });
       this.deps.logger.info({ projectId: project.id, organizationId: organization.id, slug, branch }, "Project created");
@@ -127,6 +130,23 @@ export class ProjectService {
     });
     this.deps.logger.info({ projectId: id }, "Project deleted");
     await this.deps.audit.record({ action: "PROJECT_DELETED", actorId: userId, project });
+  }
+
+  /**
+   * A non-primary public service is served at <service>-<slug>. A new project's
+   * slug must not equal such an address of an existing project.
+   */
+  private async assertAddressFree(slug: string): Promise<void> {
+    const splits = [...slug.matchAll(/-/g)].map((match) => match.index!);
+    for (const at of splits) {
+      const clash = await this.deps.prisma.service.findFirst({
+        where: { name: slug.slice(0, at), project: { slug: slug.slice(at + 1) } },
+        select: { id: true },
+      });
+      if (clash) {
+        throw new ConflictError(ErrorCode.PROJECT_ALREADY_EXISTS, `"${slug}" is already the address of another project's service. Choose a different name.`);
+      }
+    }
   }
 
   private async latestDeployment(projectId: string): Promise<Deployment | null> {

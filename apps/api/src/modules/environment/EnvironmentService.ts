@@ -10,6 +10,8 @@ import { MAX_ENV_VARS_PER_PROJECT, type SetEnvVarInput } from "./environment.sch
 /** What the API returns. A secret's value is never sent back, only that it is set. */
 export interface EnvironmentVariableView {
   key: string;
+  /** null = every service of the project; otherwise the one service it applies to. */
+  serviceId: string | null;
   /** null for secrets. */
   value: string | null;
   secret: boolean;
@@ -46,29 +48,39 @@ export class EnvironmentService {
   /** VIEWERs see names and settings only; values need DEVELOPER (secrets: never). */
   async list(projectId: string, userId: string): Promise<EnvironmentVariableView[]> {
     const { role } = await this.deps.access.project(projectId, userId);
-    const rows = await this.deps.prisma.environmentVariable.findMany({ where: { projectId }, orderBy: { key: "asc" } });
+    const rows = await this.deps.prisma.environmentVariable.findMany({
+      where: { projectId },
+      orderBy: [{ key: "asc" }, { scope: "asc" }],
+    });
     const showValues = atLeast(role, OrgRole.DEVELOPER);
     return rows.map((row) => ({ ...this.view(row, showValues) }));
   }
 
-  /** Creates or replaces a variable. */
-  async set(projectId: string, userId: string, key: string, input: SetEnvVarInput): Promise<EnvironmentVariableView> {
+  /** Creates or replaces a variable, for every service or (serviceId) just one. */
+  async set(
+    projectId: string,
+    userId: string,
+    key: string,
+    input: SetEnvVarInput,
+    serviceId: string | null = null,
+  ): Promise<EnvironmentVariableView> {
     const project = await this.deps.access.project(projectId, userId, OrgRole.DEVELOPER);
     const { prisma, secretBox } = this.deps;
+    const scope = await this.scopeFor(projectId, serviceId);
 
-    const exists = await prisma.environmentVariable.findUnique({ where: { projectId_key: { projectId, key } } });
+    const exists = await prisma.environmentVariable.findUnique({ where: { projectId_scope_key: { projectId, scope, key } } });
     if (!exists && (await prisma.environmentVariable.count({ where: { projectId } })) >= MAX_ENV_VARS_PER_PROJECT) {
       throw new ValidationError(`A project can have at most ${MAX_ENV_VARS_PER_PROJECT} environment variables.`);
     }
 
     const data = {
-      value: secretBox.encrypt(input.value, sealContext(projectId, key)),
+      value: secretBox.encrypt(input.value, sealContext(projectId, scope, key)),
       secret: input.secret,
       target: input.target,
     };
     const row = await prisma.environmentVariable.upsert({
-      where: { projectId_key: { projectId, key } },
-      create: { projectId, key, ...data },
+      where: { projectId_scope_key: { projectId, scope, key } },
+      create: { projectId, scope, key, ...data },
       update: data,
     });
     // Names are logged, never values.
@@ -77,25 +89,31 @@ export class EnvironmentService {
       action: "ENV_VAR_SET",
       actorId: userId,
       project,
-      metadata: { key, secret: row.secret, target: row.target },
+      metadata: { key, secret: row.secret, target: row.target, ...(serviceId && { serviceId }) },
     });
     return this.view(row);
   }
 
-  async remove(projectId: string, userId: string, key: string): Promise<void> {
+  async remove(projectId: string, userId: string, key: string, serviceId: string | null = null): Promise<void> {
     const project = await this.deps.access.project(projectId, userId, OrgRole.DEVELOPER);
-    const { count } = await this.deps.prisma.environmentVariable.deleteMany({ where: { projectId, key } });
+    const scope = await this.scopeFor(projectId, serviceId);
+    const { count } = await this.deps.prisma.environmentVariable.deleteMany({ where: { projectId, scope, key } });
     if (count === 0) throw new NotFoundError(`Environment variable not found: ${key}`);
     this.deps.logger.info({ projectId, key }, "Environment variable deleted");
     await this.deps.audit.record({ action: "ENV_VAR_DELETED", actorId: userId, project, metadata: { key } });
   }
 
   /**
-   * Decrypted values for a deployment. No ownership check: only the deploy
+   * Decrypted values for one service's deployment: the project's variables,
+   * overridden by the service's own. No ownership check: only the deploy
    * pipeline calls this, for a project whose access it already checked.
    */
-  async forDeployment(projectId: string): Promise<DeploymentEnvironment> {
-    const rows = await this.deps.prisma.environmentVariable.findMany({ where: { projectId } });
+  async forDeployment(projectId: string, serviceId?: string): Promise<DeploymentEnvironment> {
+    const rows = await this.deps.prisma.environmentVariable.findMany({
+      where: { projectId, scope: { in: [PROJECT_SCOPE, ...(serviceId ? [serviceId] : [])] } },
+    });
+    // Project-wide first, so a service's own value overwrites it.
+    rows.sort((a, b) => Number(a.scope !== PROJECT_SCOPE) - Number(b.scope !== PROJECT_SCOPE));
     const environment: DeploymentEnvironment = { runtime: {}, build: {} };
     for (const row of rows) {
       const value = this.reveal(row);
@@ -106,9 +124,18 @@ export class EnvironmentService {
     return environment;
   }
 
+  /** "project", or the id of a service that belongs to the project. */
+  private async scopeFor(projectId: string, serviceId: string | null): Promise<string> {
+    if (!serviceId) return PROJECT_SCOPE;
+    const service = await this.deps.prisma.service.findFirst({ where: { id: serviceId, projectId }, select: { id: true } });
+    if (!service) throw new NotFoundError(`Service not found: ${serviceId}`);
+    return service.id;
+  }
+
   private view(row: EnvironmentVariable, showValue = true): EnvironmentVariableView {
     return {
       key: row.key,
+      serviceId: row.scope === PROJECT_SCOPE ? null : row.scope,
       value: row.secret || !showValue ? null : this.reveal(row),
       secret: row.secret,
       target: row.target,
@@ -118,7 +145,7 @@ export class EnvironmentService {
 
   private reveal(row: EnvironmentVariable): string {
     try {
-      return this.deps.secretBox.decrypt(row.value, sealContext(row.projectId, row.key));
+      return this.deps.secretBox.decrypt(row.value, sealContext(row.projectId, row.scope, row.key));
     } catch {
       throw new AppError(
         ErrorCode.SECRET_UNREADABLE,
@@ -131,6 +158,9 @@ export class EnvironmentService {
 
 }
 
-function sealContext(projectId: string, key: string): string {
-  return `env:${projectId}:${key}`;
+const PROJECT_SCOPE = "project";
+
+/** Binds a ciphertext to its project, scope and key (project-wide values keep the original format). */
+function sealContext(projectId: string, scope: string, key: string): string {
+  return scope === PROJECT_SCOPE ? `env:${projectId}:${key}` : `env:${projectId}:${scope}:${key}`;
 }

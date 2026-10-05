@@ -32,6 +32,7 @@ const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
 const NODE_NO_DOCKERFILE_APP = path.resolve(here, "../fixtures/node-no-dockerfile");
 const HEALTH_PORT_APP = path.resolve(here, "../fixtures/health-port-app");
 const MEMORY_HOG_APP = path.resolve(here, "../fixtures/memory-hog");
+const MULTI_SERVICE_APP = path.resolve(here, "../fixtures/multi-service");
 
 function localSource(sourceDir: string): SourceProvider {
   return {
@@ -345,6 +346,47 @@ describe("deployment engine against real Docker", () => {
       expect(tags.tags).toEqual([record.imageName.split(":").at(-1)]);
     } finally {
       await registryContainer.remove({ force: true });
+    }
+  });
+
+  it("runs a multi-service project: web reaches the private api by name, the worker just runs", async () => {
+    const network = `shipyard-p-it${randomUUID().replace(/-/g, "").slice(0, 8)}`;
+    const service = engine(MULTI_SERVICE_APP);
+    const spec = (alias: string, overrides: object) => ({
+      type: "WEB" as const,
+      sourceDir: alias,
+      buildCommand: null,
+      startCommand: null,
+      port: null,
+      public: true,
+      network,
+      alias,
+      ...overrides,
+    });
+    const run = async (alias: string, overrides: object) => {
+      const record = await service.run({ ...job(`multi-${alias}`), service: spec(alias, overrides) });
+      created.push(record);
+      return record;
+    };
+    try {
+      const api = await run("api", { port: 4000, public: false });
+      const worker = await run("worker", { type: "WORKER", public: false });
+      const web = await run("web", {});
+
+      expect(worker).toMatchObject({ status: S.RUNNING, containerPort: null, hostPort: null });
+      expect(api.deploymentUrl).toBeNull(); // private: no address outside the project
+      const body = await (await fetch(web.deploymentUrl!.replace("localhost", "127.0.0.1"))).json();
+      expect(body).toEqual({ from: "web", api: { from: "api" } });
+
+      // The api isn't published beyond loopback, and only the project network knows it as "api".
+      const info = await dockerode.getContainer(api.containerId!).inspect();
+      expect(info.NetworkSettings.Networks[network]?.Aliases).toContain("api");
+    } finally {
+      for (const record of created.splice(-3)) {
+        if (record.containerId) await docker.removeContainer(record.containerId);
+        await docker.removeImage(record.imageName);
+      }
+      await docker.removeNetwork(network);
     }
   });
 });

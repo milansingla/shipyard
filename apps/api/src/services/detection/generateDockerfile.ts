@@ -7,7 +7,13 @@ import type { NodeProject, PackageManager } from "./nodeProject.js";
  * content. The only repository-derived value, the start command, is validated
  * by detection and emitted in exec (JSON) form, so it never passes through a shell.
  */
-export function generateNodeDockerfile(project: NodeProject, port: number, buildArgNames: readonly string[] = []): string {
+export function generateNodeDockerfile(
+  project: NodeProject,
+  port: number,
+  buildArgNames: readonly string[] = [],
+  /** A build command configured for the service, instead of `<pm> run build`. */
+  buildCommand: string | null = null,
+): string {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new RangeError(`Invalid port: ${port}`);
 
   const pm = project.packageManager;
@@ -46,7 +52,9 @@ export function generateNodeDockerfile(project: NodeProject, port: number, build
   lines.push(`RUN ${installCommand(project)}`);
   if (project.dependencyFiles) lines.push("COPY --chown=node:node . .");
 
-  if (project.hasBuildScript) lines.push(`RUN ${pm} run build`);
+  // A configured command runs through a shell, in exec form: the JSON array keeps it one argument.
+  if (buildCommand) lines.push(`RUN ${JSON.stringify(["sh", "-c", buildCommand])}`);
+  else if (project.hasBuildScript) lines.push(`RUN ${pm} run build`);
 
   lines.push(
     "ENV NODE_ENV=production",

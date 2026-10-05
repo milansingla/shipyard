@@ -16,6 +16,7 @@ import { DeploymentService } from "./modules/deployments/DeploymentService.js";
 import { DomainService } from "./modules/domains/DomainService.js";
 import { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { ProjectService } from "./modules/projects/ProjectService.js";
+import { ServiceService } from "./modules/services/ServiceService.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
@@ -43,6 +44,7 @@ export interface ApiServices extends EngineServices {
   domains: DomainService;
   audit: AuditService;
   organizations: OrganizationService;
+  services: ServiceService;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -156,8 +158,9 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     logger: logger.child({ component: "domains" }),
   });
 
+  const services = new ServiceService({ prisma, access, deployments, audit, logger: logger.child({ component: "services" }) });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
-  return { ...engineServices, prisma, projects, deployments, environment, domains, audit, organizations, auth, webhooks };
+  return { ...engineServices, prisma, projects, deployments, environment, domains, audit, organizations, services, auth, webhooks };
 }
 
 function createAuth(

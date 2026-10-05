@@ -18,14 +18,33 @@ import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
+import type { Service } from "../../db/prisma.js";
 import type { AccessService } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import type { EnvironmentService } from "../environment/EnvironmentService.js";
+import {
+  artifactName,
+  effectiveHealthCheck,
+  effectiveResources,
+  primaryServiceId,
+  projectNetworkName,
+  routeName,
+  serviceSpec,
+} from "../services/serviceRules.js";
 import type { BuildLogStore, BuildLogWriter } from "./BuildLogStore.js";
 
 export type EngineLike = Pick<
   DeploymentEngine,
-  "run" | "stop" | "restart" | "getLogs" | "followLogs" | "destroy" | "inspect" | "ensureRoutable" | "artifactNames"
+  | "run"
+  | "stop"
+  | "restart"
+  | "getLogs"
+  | "followLogs"
+  | "destroy"
+  | "inspect"
+  | "ensureRoutable"
+  | "artifactNames"
+  | "removeNetwork"
 >;
 
 export interface DeploymentServiceDeps {
@@ -191,40 +210,58 @@ export class DeploymentService {
    * `actorId` null = Shipyard itself (a verified push): no person's role is
    * checked. Otherwise the person needs DEVELOPER in the project's organization.
    */
+  /**
+   * Deploys every service of the project (or only `serviceIds`) at the
+   * latest commit of its branch: one deployment per service, run in the
+   * background. Returns the primary web service's deployment (else the first).
+   *
+   * `actorId` null = Shipyard itself (a verified push): no person's role is
+   * checked. Otherwise the person needs DEVELOPER in the project's organization.
+   */
   async deploy(
     projectId: string,
     actorId: string | null,
     trigger: DeploymentTrigger = DeploymentTrigger.MANUAL,
+    options: { serviceIds?: readonly string[] } = {},
   ): Promise<Deployment> {
     const project =
       actorId === null
         ? await this.loadProject(projectId)
         : await this.deps.access.project(projectId, actorId, OrgRole.DEVELOPER);
+    const services = await this.services(projectId);
+    const selected = options.serviceIds ? services.filter((service) => options.serviceIds!.includes(service.id)) : services;
+    if (selected.length === 0) throw new NotFoundError("No such service in this project.");
     this.lockProject(projectId);
 
-    let deployment: Deployment;
+    let deployments: Deployment[];
     try {
-      const id = randomUUID();
-      deployment = await this.deps.prisma.$transaction(async (tx) => {
-        const created = await tx.deployment.create({
-          data: {
-            id,
-            projectId,
-            trigger,
-            branch: project.branch,
-            ...this.deps.engine.artifactNames({ id, name: project.slug }),
-          },
-        });
-        await tx.deploymentEvent.create({
-          data: {
-            deploymentId: id,
-            type: DeploymentEventType.CREATED,
-            toStatus: DeploymentStatus.QUEUED,
-            // A push is Shipyard acting on GitHub's behalf, not the owner clicking "Deploy".
-            actorId,
-            message: trigger === DeploymentTrigger.PUSH ? `Push to ${project.branch}` : null,
-          },
-        });
+      deployments = await this.deps.prisma.$transaction(async (tx) => {
+        const created: Deployment[] = [];
+        for (const service of selected) {
+          const id = randomUUID();
+          created.push(
+            await tx.deployment.create({
+              data: {
+                id,
+                projectId,
+                serviceId: service.id,
+                trigger,
+                branch: project.branch,
+                ...this.deps.engine.artifactNames({ id, name: artifactName(project, service) }),
+              },
+            }),
+          );
+          await tx.deploymentEvent.create({
+            data: {
+              deploymentId: id,
+              type: DeploymentEventType.CREATED,
+              toStatus: DeploymentStatus.QUEUED,
+              // A push is Shipyard acting on GitHub's behalf, not the owner clicking "Deploy".
+              actorId,
+              message: trigger === DeploymentTrigger.PUSH ? `Push to ${project.branch}` : null,
+            },
+          });
+        }
         return created;
       });
     } catch (error) {
@@ -232,15 +269,24 @@ export class DeploymentService {
       throw error;
     }
 
-    await this.deps.audit.record({
-      action: "DEPLOYMENT_STARTED",
-      actorId,
-      project,
-      metadata: { deploymentId: deployment.id, trigger, branch: project.branch },
-    });
-    this.track(this.execute(project, deployment).finally(() => this.unlockProject(projectId)));
-    return deployment;
+    for (const deployment of deployments) {
+      await this.deps.audit.record({
+        action: "DEPLOYMENT_STARTED",
+        actorId,
+        project,
+        metadata: {
+          deploymentId: deployment.id,
+          service: services.find((service) => service.id === deployment.serviceId)!.name,
+          trigger,
+          branch: project.branch,
+        },
+      });
+    }
+    this.track(this.executeAll(project, deployments, services).finally(() => this.unlockProject(projectId)));
+    const primaryId = primaryServiceId(services);
+    return deployments.find((deployment) => deployment.serviceId === primaryId) ?? deployments[0]!;
   }
+
 
   /**
    * Deploys after a GitHub push, as Shipyard (the push's signature was
@@ -284,7 +330,7 @@ export class DeploymentService {
       let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: userId, message: "Restart" });
       let result;
       try {
-        const route = { name: project.slug, aliases: await this.projectDomains(project.id) };
+        const route = await this.routeFor(project, deployment.serviceId);
         result = await this.deps.engine.restart(deployment.containerId, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
@@ -297,7 +343,7 @@ export class DeploymentService {
         deploymentUrl: result.deploymentUrl,
         errorMessage: null,
       });
-      await this.retireOthers(deployment.projectId, id);
+      await this.retireOthers(deployment.serviceId, id);
       return running;
     } finally {
       this.unlockProject(deployment.projectId);
@@ -336,7 +382,7 @@ export class DeploymentService {
       });
       let result;
       try {
-        const route = { name: project.slug, aliases: await this.projectDomains(project.id) };
+        const route = await this.routeFor(project, target.serviceId);
         result = await this.deps.engine.restart(target.containerId!, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
@@ -351,7 +397,7 @@ export class DeploymentService {
         deploymentUrl: result.deploymentUrl,
         errorMessage: null,
       });
-      await this.retireOthers(project.id, target.id, `Rolled back to deployment ${displayId(target.id)}`);
+      await this.retireOthers(target.serviceId, target.id, `Rolled back to deployment ${displayId(target.id)}`);
       await prisma.deploymentEvent.createMany({
         data: [
           {
@@ -383,6 +429,22 @@ export class DeploymentService {
     }
   }
 
+  /** Like destroyProjectDeployments, for one service (see ServiceService.delete). */
+  async destroyServiceDeployments(projectId: string, serviceId: string, finalize: () => Promise<void>): Promise<void> {
+    this.lockProject(projectId);
+    try {
+      const deployments = await this.deps.prisma.deployment.findMany({ where: { serviceId } });
+      for (const deployment of deployments) {
+        await this.deactivateRoute(deployment);
+        await this.deps.engine.destroy({ containerId: deployment.containerId, imageName: deployment.imageName });
+        await this.deps.buildLogs.remove(deployment.id);
+      }
+      await finalize();
+    } finally {
+      this.unlockProject(projectId);
+    }
+  }
+
   /**
    * Removes every container, image and log of a project, then runs `finalize`
    * (deleting the project row) while still holding the project lock, so no new
@@ -399,6 +461,7 @@ export class DeploymentService {
         await this.deps.engine.destroy({ containerId: deployment.containerId, imageName: deployment.imageName });
         await this.deps.buildLogs.remove(deployment.id);
       }
+      await this.deps.engine.removeNetwork(projectNetworkName(projectId));
       await finalize();
     } finally {
       this.unlockProject(projectId);
@@ -438,10 +501,11 @@ export class DeploymentService {
 
     const running = await prisma.deployment.findMany({
       where: { status: DeploymentStatus.RUNNING },
-      include: { project: { select: { slug: true } } },
+      include: { project: { select: { id: true, slug: true } } },
     });
     for (const deployment of running) {
-      const reason = await this.checkStillRunning(deployment, deployment.project.slug);
+      const route = await this.routeFor(deployment.project, deployment.serviceId);
+      const reason = await this.checkStillRunning(deployment, route?.name ?? null);
       if (reason) {
         await this.markFailed(deployment.id, reason, DeploymentStatus.RUNNING);
         summary.failed += 1;
@@ -463,8 +527,25 @@ export class DeploymentService {
 
   // ───────────────────────── internals ─────────────────────────
 
-  private async execute(project: Project, deployment: Deployment): Promise<void> {
-    const logger = this.deps.logger.child({ deploymentId: deployment.id, projectId: project.id });
+  /**
+   * Runs a project's deployments one after another: private services and
+   * workers first, the primary web service last, so a new frontend never goes
+   * live before the backend it calls. Each service switches with zero downtime
+   * on its own; one failing doesn't stop the others (it keeps its previous version).
+   */
+  private async executeAll(project: Project, deployments: Deployment[], services: Service[]): Promise<void> {
+    const primaryId = primaryServiceId(services);
+    const order = (deployment: Deployment) => {
+      const service = services.find((s) => s.id === deployment.serviceId)!;
+      return service.id === primaryId ? 2 : service.type === "WEB" && service.public ? 1 : 0;
+    };
+    for (const deployment of [...deployments].sort((a, b) => order(a) - order(b))) {
+      await this.execute(project, deployment, services.find((s) => s.id === deployment.serviceId)!, primaryId);
+    }
+  }
+
+  private async execute(project: Project, deployment: Deployment, service: Service, primaryId: string | null): Promise<void> {
+    const logger = this.deps.logger.child({ deploymentId: deployment.id, projectId: project.id, service: service.name });
     let writer: BuildLogWriter | null = null;
 
     try {
@@ -475,20 +556,14 @@ export class DeploymentService {
         // Re-validated on every deploy: the allowlist may have changed since creation.
         repository: parseRepositoryUrl(project.repositoryUrl, this.deps.allowedGitHosts),
         branch: deployment.branch,
-        name: project.slug,
+        name: artifactName(project, service),
+        routeName: routeName(project, service, primaryId),
+        service: serviceSpec(project, service),
         labels: { [ShipyardLabel.PROJECT_ID]: project.id },
-        domains: await this.projectDomains(project.id),
-        resources: {
-          cpuLimit: project.cpuLimit,
-          memoryLimitMb: project.memoryLimitMb,
-          restartPolicy: project.restartPolicy,
-        },
-        healthCheck: {
-          path: project.healthCheckPath,
-          port: project.healthCheckPort,
-          timeoutMs: project.healthCheckTimeoutSeconds === null ? null : project.healthCheckTimeoutSeconds * 1000,
-        },
-        env: (await this.deps.environment?.forDeployment(project.id)) ?? undefined,
+        domains: await this.serviceDomains(project.id, service.id, primaryId),
+        resources: effectiveResources(project, service),
+        healthCheck: effectiveHealthCheck(project, service),
+        env: (await this.deps.environment?.forDeployment(project.id, service.id)) ?? undefined,
       };
 
       await this.deps.engine.run(job, {
@@ -496,7 +571,7 @@ export class DeploymentService {
         onLog: (source, text) => logWriter.write(source === "runtime" ? prefixLines("[app] ", text) : text),
       });
 
-      await this.retireOthers(project.id, deployment.id);
+      await this.retireOthers(deployment.serviceId, deployment.id);
     } catch (error) {
       // The engine already persisted FAILED for errors inside the pipeline.
       if (!(error instanceof DeploymentFailedError)) {
@@ -519,12 +594,13 @@ export class DeploymentService {
           actorId: null,
           project,
           metadata: succeeded
-            ? { deploymentId: outcome.id, commitSha: outcome.commitSha }
-            : { deploymentId: outcome.id, failedStage: outcome.failedStage },
+            ? { deploymentId: outcome.id, service: service.name, commitSha: outcome.commitSha }
+            : { deploymentId: outcome.id, service: service.name, failedStage: outcome.failedStage },
         });
       }
     }
   }
+
 
   private async persist(state: Readonly<DeploymentState>, previous: DeploymentStatus): Promise<void> {
     const { prisma } = this.deps;
@@ -567,7 +643,7 @@ export class DeploymentService {
   private async findRollbackTarget(source: Deployment): Promise<Deployment> {
     const candidates = await this.deps.prisma.deployment.findMany({
       where: {
-        projectId: source.projectId,
+        serviceId: source.serviceId,
         id: { not: source.id },
         createdAt: { lt: source.createdAt },
         status: DeploymentStatus.STOPPED,
@@ -592,10 +668,11 @@ export class DeploymentService {
   }
 
   /** Stops every other healthy deployment of the project, keeping containers for rollback. */
-  private async retireOthers(projectId: string, keepId: string, reason?: string): Promise<void> {
+  /** Stops the service's other healthy deployments, keeping containers for rollback. */
+  private async retireOthers(serviceId: string, keepId: string, reason?: string): Promise<void> {
     const others = await this.deps.prisma.deployment.findMany({
       where: {
-        projectId,
+        serviceId,
         id: { not: keepId },
         status: { in: [DeploymentStatus.RUNNING, DeploymentStatus.HEALTHY] },
       },
@@ -606,6 +683,7 @@ export class DeploymentService {
       );
     }
   }
+
 
   private async stopDeployment(deployment: Deployment, cause: Cause = {}): Promise<Deployment> {
     assertTransition(deployment.status, DeploymentStatus.STOPPING);
@@ -678,7 +756,8 @@ export class DeploymentService {
    * Returns a failure reason, or null if the container is still running. Refreshes
    * its port and URL (the URL changes when routing was turned on or off).
    */
-  private async checkStillRunning(deployment: Deployment, slug: string): Promise<string | null> {
+  /** `routeName` null = not routed (worker, private service): no URL, nothing to attach. */
+  private async checkStillRunning(deployment: Deployment, routeName: string | null): Promise<string | null> {
     if (!deployment.containerId) return "Deployment has no container.";
     try {
       const container = await this.deps.engine.inspect(deployment.containerId);
@@ -686,12 +765,15 @@ export class DeploymentService {
         return `Container exited${container.exitCode === null ? "" : ` with code ${container.exitCode}`} while Shipyard was not running.`;
       }
       // Not fatal: the app still runs; the router just can't reach it until this is fixed.
-      await this.deps.engine
-        .ensureRoutable(deployment.containerId)
-        .catch((error: unknown) =>
-          this.deps.logger.warn({ err: error, deploymentId: deployment.id }, "Router cannot reach this deployment"),
-        );
-      const deploymentUrl = container.hostPort === null ? null : this.deps.router.urlFor(slug, container.hostPort);
+      if (routeName) {
+        await this.deps.engine
+          .ensureRoutable(deployment.containerId)
+          .catch((error: unknown) =>
+            this.deps.logger.warn({ err: error, deploymentId: deployment.id }, "Router cannot reach this deployment"),
+          );
+      }
+      const deploymentUrl =
+        routeName === null || container.hostPort === null ? null : this.deps.router.urlFor(routeName, container.hostPort);
       if (container.hostPort !== deployment.hostPort || deploymentUrl !== deployment.deploymentUrl) {
         await this.deps.prisma.deployment.update({
           where: { id: deployment.id },
@@ -711,16 +793,17 @@ export class DeploymentService {
    */
   private async syncRoutes(): Promise<void> {
     const running = await this.deps.prisma.deployment.findMany({
-      where: { status: DeploymentStatus.RUNNING },
-      include: { project: { select: { slug: true, domains: { select: { hostname: true }, orderBy: { hostname: "asc" } } } } },
+      where: { status: DeploymentStatus.RUNNING, service: { type: "WEB", public: true } },
+      include: { project: true },
       orderBy: { finishedAt: "asc" },
     });
     const targets = new Map<string, RouteTarget>();
     for (const deployment of running) {
       if (!deployment.containerName || deployment.containerPort === null) continue;
-      targets.set(deployment.project.slug, {
-        name: deployment.project.slug,
-        aliases: deployment.project.domains.map((domain) => domain.hostname),
+      const route = await this.routeFor(deployment.project, deployment.serviceId);
+      if (!route) continue;
+      targets.set(route.name, {
+        ...route,
         deploymentId: deployment.id,
         containerName: deployment.containerName,
         containerPort: deployment.containerPort,
@@ -729,43 +812,62 @@ export class DeploymentService {
     await this.deps.router.sync([...targets.values()]);
   }
 
+
   /**
    * Re-applies the project's route to its live deployment, e.g. after its
    * custom domains changed. No live deployment: nothing to do (the next
    * deploy picks the domains up).
    */
   async refreshRoute(projectId: string): Promise<void> {
-    const live = await this.deps.prisma.deployment.findFirst({
-      where: { projectId, status: DeploymentStatus.RUNNING },
-      include: { project: { select: { slug: true } } },
-      orderBy: { finishedAt: "desc" },
+    const live = await this.deps.prisma.deployment.findMany({
+      where: { projectId, status: DeploymentStatus.RUNNING, service: { type: "WEB", public: true } },
+      include: { project: true },
     });
-    if (!live?.containerName || live.containerPort === null) return;
-    await this.deps.router.activate({
-      name: live.project.slug,
-      aliases: await this.projectDomains(projectId),
-      deploymentId: live.id,
-      containerName: live.containerName,
-      containerPort: live.containerPort,
-    });
+    for (const deployment of live) {
+      const route = await this.routeFor(deployment.project, deployment.serviceId);
+      if (!route || !deployment.containerName || deployment.containerPort === null) continue;
+      await this.deps.router.activate({
+        ...route,
+        deploymentId: deployment.id,
+        containerName: deployment.containerName,
+        containerPort: deployment.containerPort,
+      });
+    }
   }
 
-  private async projectDomains(projectId: string): Promise<string[]> {
+
+  private async services(projectId: string): Promise<Service[]> {
+    return this.deps.prisma.service.findMany({ where: { projectId }, orderBy: { createdAt: "asc" } });
+  }
+
+  /** Where a service is routed, or null when it isn't (workers, private services). */
+  private async routeFor(project: Pick<Project, "id" | "slug">, serviceId: string): Promise<{ name: string; aliases: string[] } | null> {
+    const services = await this.services(project.id);
+    const service = services.find((candidate) => candidate.id === serviceId);
+    if (!service || service.type !== "WEB" || !service.public) return null;
+    const primaryId = primaryServiceId(services);
+    return { name: routeName(project, service, primaryId), aliases: await this.serviceDomains(project.id, service.id, primaryId) };
+  }
+
+  /** A service's custom domains; domains without a service belong to the primary one. */
+  private async serviceDomains(projectId: string, serviceId: string, primaryId: string | null): Promise<string[]> {
     const domains = await this.deps.prisma.projectDomain.findMany({
-      where: { projectId },
+      where: { projectId, OR: [{ serviceId }, ...(serviceId === primaryId ? [{ serviceId: null }] : [])] },
       select: { hostname: true },
       orderBy: { hostname: "asc" },
     });
     return domains.map((domain) => domain.hostname);
   }
 
+
   /** Takes the deployment out of the router, if the route still points at it. */
-  private async deactivateRoute(deployment: Pick<Deployment, "id" | "projectId">): Promise<void> {
+  private async deactivateRoute(deployment: Pick<Deployment, "id" | "projectId" | "serviceId">): Promise<void> {
     const project = await this.deps.prisma.project.findUnique({
       where: { id: deployment.projectId },
-      select: { slug: true },
+      select: { id: true, slug: true },
     });
-    if (project) await this.deps.router.deactivate(project.slug, deployment.id);
+    const route = project && (await this.routeFor(project, deployment.serviceId));
+    if (route) await this.deps.router.deactivate(route.name, deployment.id);
   }
 
   /** Unscoped: for Shipyard's own work (verified pushes), never on a person's behalf. */

@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
 import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { prepareBuild } from "../build/prepareBuild.js";
@@ -36,6 +39,8 @@ export type EngineDocker = Pick<
   | "stopContainer"
   | "restartContainer"
   | "connectToNetwork"
+  | "ensureNetwork"
+  | "removeNetwork"
   | "removeContainer"
   | "removeImage"
 >;
@@ -48,6 +53,8 @@ export interface DeploymentEngineDeps {
   router: Router;
   registry: ImageRegistry;
   logger: Logger;
+  /** How long a new worker must keep running to count as healthy. Default 10s. */
+  workerSettleMs?: number;
 }
 
 /** Thrown when a run fails after it started; carries the final state. */
@@ -73,7 +80,11 @@ const FAILURE_LOG_TAIL = 50;
  * Input must already be validated (see parseRepositoryUrl / validateBranchName).
  */
 export class DeploymentEngine {
-  constructor(private readonly deps: DeploymentEngineDeps) {}
+  private readonly workerSettleMs: number;
+
+  constructor(private readonly deps: DeploymentEngineDeps) {
+    this.workerSettleMs = deps.workerSettleMs ?? 10_000;
+  }
 
   /** Image and container names are deterministic, so callers can know them up front. */
   artifactNames(job: Pick<DeploymentJob, "id" | "name">): { imageName: string; containerName: string } {
@@ -113,17 +124,24 @@ export class DeploymentEngine {
 
       // 2. Detect: the repository's own Dockerfile, or one generated for a Node.js project.
       await moveTo(DeploymentStatus.DETECTING);
+      const service = job.service;
+      const buildDir = await resolveSourceDir(source.path, service?.sourceDir ?? ".");
       const env = job.env ?? { runtime: {}, build: {} };
-      const plan = await prepareBuild(source.path, (text) => log("system", text), Object.keys(env.build).sort());
+      const plan = await prepareBuild(buildDir, (text) => log("system", text), Object.keys(env.build).sort(), {
+        buildCommand: service?.buildCommand,
+        startCommand: service?.startCommand,
+        port: service?.port,
+      });
       log("system", describeEnvironment(env));
-      state.containerPort = plan.containerPort;
+      const worker = service?.type === "WORKER";
+      state.containerPort = worker ? null : plan.containerPort;
 
       // 3. Build
       await moveTo(DeploymentStatus.BUILDING);
       const healthCheck = job.healthCheck ?? DEFAULT_HEALTH_CHECK;
       const labels = this.labelsFor(job, state.containerPort, healthCheck);
       await this.deps.docker.buildImage(
-        source.path,
+        buildDir,
         state.imageName,
         labels,
         (text) => log("build", text),
@@ -138,12 +156,16 @@ export class DeploymentEngine {
       // 4. Start
       await moveTo(DeploymentStatus.STARTING);
       if (job.resources) log("system", describeResources(job.resources));
+      const routed = !worker && (service?.public ?? true);
+      if (service) await this.deps.docker.ensureNetwork(service.network, { [ShipyardLabel.PROJECT_ID]: job.labels?.[ShipyardLabel.PROJECT_ID] ?? "" });
       const container = await this.deps.docker.createAndStartContainer({
         imageName: state.imageName,
         containerName: state.containerName,
         containerPort: state.containerPort,
         labels,
-        network: this.deps.router.network,
+        network: routed ? this.deps.router.network : null,
+        privateNetwork: service ? { name: service.network, alias: service.alias } : null,
+        command: plan.command,
         env: env.runtime,
         healthCheckPort: healthCheck.port,
         resources: job.resources,
@@ -151,28 +173,43 @@ export class DeploymentEngine {
       state.containerId = container.id;
       state.hostPort = container.hostPort;
 
-      // 5. Health check
+      // 5. Health check: HTTP for web services; for workers, that the process keeps running.
       await moveTo(DeploymentStatus.HEALTH_CHECKING);
-      const health = await this.deps.healthCheck.waitUntilHealthy({
-        ...healthCheckTarget(container.healthHostPort, healthCheck),
-        getContainerState: () => this.deps.docker.getContainerState(container.id),
-      });
-      log("system", `Health check passed (HTTP ${health.statusCode} after ${health.attempts} attempt(s))\n`);
+      if (worker) {
+        await this.waitWorkerSettles(container.id);
+        log("system", `Worker kept running for ${Math.round(this.workerSettleMs / 1000)}s\n`);
+      } else {
+        const health = await this.deps.healthCheck.waitUntilHealthy({
+          ...healthCheckTarget(container.healthHostPort!, healthCheck),
+          getContainerState: () => this.deps.docker.getContainerState(container.id),
+        });
+        log("system", `Health check passed (HTTP ${health.statusCode} after ${health.attempts} attempt(s))\n`);
+      }
       await moveTo(DeploymentStatus.HEALTHY);
 
-      // 6. Route: move the project's URL to this container. Resolves only once visitors
+      // 6. Route: move the address to this container. Resolves only once visitors
       //    actually reach it; until then the previous deployment keeps serving.
-      const url = this.deps.router.urlFor(job.name, container.hostPort);
       await moveTo(DeploymentStatus.ROUTING);
-      await this.deps.router.activate({
-        name: job.name,
-        aliases: job.domains,
-        deploymentId: job.id,
-        containerName: state.containerName,
-        containerPort: state.containerPort,
-      });
-      state.deploymentUrl = url;
-      log("system", `Live at ${url}\n`);
+      const routeName = job.routeName ?? job.name;
+      if (routed) {
+        const url = this.deps.router.urlFor(routeName, container.hostPort!);
+        await this.deps.router.activate({
+          name: routeName,
+          aliases: job.domains,
+          deploymentId: job.id,
+          containerName: state.containerName,
+          containerPort: state.containerPort!,
+        });
+        state.deploymentUrl = url;
+        log("system", `Live at ${url}\n`);
+      } else if (service) {
+        log(
+          "system",
+          worker
+            ? `Running (workers aren't routed)\n`
+            : `Running, private: reachable inside the project at http://${service.alias}:${state.containerPort}\n`,
+        );
+      }
       await moveTo(DeploymentStatus.RUNNING);
 
       logger.info({ url: state.deploymentUrl, commitSha: state.commitSha }, "Deployment running");
@@ -238,49 +275,61 @@ export class DeploymentEngine {
    */
   async restart(
     containerReference: string,
-    route: { name: string; aliases?: readonly string[] },
+    /** null = not routed (a worker or a private service): it just runs again. */
+    route: { name: string; aliases?: readonly string[] } | null,
     onStage: (status: DeploymentStatus) => Promise<void> = async () => {},
   ): Promise<ContainerActionResult> {
     const before = await this.deps.docker.inspectManagedContainer(containerReference);
     await this.deps.docker.restartContainer(before.id);
+    const worker = before.containerPort === 0;
 
     // Docker may assign a different ephemeral host port after a restart, and
     // can report no port at all for a moment while it re-publishes them.
     let after = await this.deps.docker.inspectManagedContainer(before.id);
-    for (let attempt = 0; attempt < 20 && after.running && (after.hostPort === null || after.healthHostPort === null); attempt += 1) {
+    for (
+      let attempt = 0;
+      !worker && attempt < 20 && after.running && (after.hostPort === null || after.healthHostPort === null);
+      attempt += 1
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 150));
       after = await this.deps.docker.inspectManagedContainer(before.id);
     }
-    if (after.hostPort === null || after.healthHostPort === null) {
+    if (!worker && (after.hostPort === null || after.healthHostPort === null)) {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Container restarted without a published port.");
     }
-    const { hostPort, healthHostPort } = after;
 
     // Checked the way it was when deployed (its labels), not with today's project settings.
     await onStage(DeploymentStatus.HEALTH_CHECKING);
-    await this.deps.healthCheck.waitUntilHealthy({
-      ...healthCheckTarget(healthHostPort, after.healthCheck),
-      getContainerState: () => this.deps.docker.getContainerState(after.id),
-    });
+    if (worker) {
+      await this.waitWorkerSettles(after.id);
+    } else {
+      await this.deps.healthCheck.waitUntilHealthy({
+        ...healthCheckTarget(after.healthHostPort!, after.healthCheck),
+        getContainerState: () => this.deps.docker.getContainerState(after.id),
+      });
+    }
     await onStage(DeploymentStatus.HEALTHY);
 
-    await this.joinRouterNetwork(after);
     await onStage(DeploymentStatus.ROUTING);
-    await this.deps.router.activate({
-      name: route.name,
-      aliases: route.aliases,
-      deploymentId: after.deploymentId ?? after.id,
-      containerName: after.name,
-      containerPort: after.containerPort,
-    });
+    if (route) {
+      await this.joinRouterNetwork(after);
+      await this.deps.router.activate({
+        name: route.name,
+        aliases: route.aliases,
+        deploymentId: after.deploymentId ?? after.id,
+        containerName: after.name,
+        containerPort: after.containerPort,
+      });
+    }
 
     return {
       containerName: after.name,
       status: DeploymentStatus.RUNNING,
-      hostPort,
-      deploymentUrl: this.deps.router.urlFor(route.name, hostPort),
+      hostPort: after.hostPort,
+      deploymentUrl: route && after.hostPort !== null ? this.deps.router.urlFor(route.name, after.hostPort) : null,
     };
   }
+
 
   /**
    * Makes sure the router can reach an existing container. Containers started
@@ -296,6 +345,11 @@ export class DeploymentEngine {
   ): Promise<{ running: boolean; exitCode: number | null; hostPort: number | null }> {
     const container = await this.deps.docker.inspectManagedContainer(containerReference);
     return { running: container.running, exitCode: container.exitCode, hostPort: container.hostPort };
+  }
+
+  /** Removes a project's private network (after its containers are gone). */
+  async removeNetwork(name: string): Promise<void> {
+    await this.deps.docker.removeNetwork(name);
   }
 
   /** Removes a deployment's container and image. Missing artifacts are ignored. */
@@ -326,13 +380,31 @@ export class DeploymentEngine {
     await observer.onStatusChange?.(state, previous);
   }
 
-  private labelsFor(job: DeploymentJob, containerPort: number, health: HealthCheckSettings): Record<string, string> {
+  /** A worker is healthy once it has kept running for workerSettleMs; exiting earlier fails it with its exit code. */
+  private async waitWorkerSettles(containerId: string): Promise<void> {
+    const deadline = Date.now() + this.workerSettleMs;
+    while (true) {
+      const state = await this.deps.docker.getContainerState(containerId);
+      if (!state.running) {
+        const how = state.oomKilled ? " because it ran out of memory" : state.exitCode === null ? "" : ` with code ${state.exitCode}`;
+        throw new AppError(ErrorCode.HEALTH_CHECK_FAILED, `Worker exited${how} within its first ${Math.round(this.workerSettleMs / 1000)}s.`, {
+          statusCode: 422,
+        });
+      }
+      if (Date.now() >= deadline) return;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(500, this.workerSettleMs)));
+    }
+  }
+
+  private labelsFor(job: DeploymentJob, containerPort: number | null, health: HealthCheckSettings): Record<string, string> {
     return {
       ...job.labels,
       [ShipyardLabel.MANAGED]: "true",
       [ShipyardLabel.DEPLOYMENT_ID]: job.id,
       [ShipyardLabel.REPOSITORY]: job.repository.cloneUrl,
-      [ShipyardLabel.CONTAINER_PORT]: String(containerPort),
+      // 0 = a worker (no port).
+      [ShipyardLabel.CONTAINER_PORT]: String(containerPort ?? 0),
+      ...(job.service && { [ShipyardLabel.SERVICE]: job.service.alias }),
       [ShipyardLabel.HEALTH_PATH]: health.path,
       ...(health.port !== null && { [ShipyardLabel.HEALTH_PORT]: String(health.port) }),
       ...(health.timeoutMs !== null && { [ShipyardLabel.HEALTH_TIMEOUT_MS]: String(health.timeoutMs) }),
@@ -364,6 +436,27 @@ function describeResources(resources: ContainerResources): string {
 function describeEnvironment(env: { runtime: Record<string, string>; build: Record<string, string> }): string {
   const list = (vars: Record<string, string>) => Object.keys(vars).sort().join(", ") || "none";
   return `Environment: runtime ${list(env.runtime)}; build ${list(env.build)}\n`;
+}
+
+/**
+ * The service's directory inside the clone. Validated when saved; checked again
+ * here against the real files: it must stay inside the clone (no `..`, no
+ * symlink pointing out) and be a directory.
+ */
+async function resolveSourceDir(clonePath: string, sourceDir: string): Promise<string> {
+  const root = await fs.realpath(clonePath);
+  const candidate = path.resolve(root, sourceDir);
+  const fail = (reason: string) =>
+    new AppError(ErrorCode.PROJECT_DETECTION_FAILED, `The service's directory "${sourceDir}" ${reason}.`, { statusCode: 422 });
+  let real: string;
+  try {
+    real = await fs.realpath(candidate);
+  } catch {
+    throw fail("doesn't exist in the repository");
+  }
+  if (real !== root && !real.startsWith(`${root}${path.sep}`)) throw fail("points outside the repository");
+  if (!(await fs.stat(real)).isDirectory()) throw fail("is not a directory");
+  return real;
 }
 
 const DEFAULT_HEALTH_CHECK: HealthCheckSettings = { path: "/", port: null, timeoutMs: null };

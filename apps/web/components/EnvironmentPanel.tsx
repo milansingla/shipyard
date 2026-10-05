@@ -4,7 +4,7 @@ import { type FormEvent, useState } from "react";
 
 import { Button, ErrorNote, Label, Mono } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
-import type { EnvironmentTarget, EnvironmentVariable } from "@/lib/types";
+import type { EnvironmentTarget, EnvironmentVariable, Service } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
 
 const TARGET_LABEL: Record<EnvironmentTarget, string> = {
@@ -13,9 +13,16 @@ const TARGET_LABEL: Record<EnvironmentTarget, string> = {
   BOTH: "Build + runtime",
 };
 
+/** `?service=<id>` for a service's own variable; nothing for a project-wide one. */
+function scopeQuery(serviceId: string): string {
+  return serviceId ? `?service=${encodeURIComponent(serviceId)}` : "";
+}
+
 const FIELD = "h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink disabled:opacity-60";
 
 interface Draft {
+  /** "" = every service. */
+  serviceId: string;
   key: string;
   value: string;
   secret: boolean;
@@ -24,10 +31,20 @@ interface Draft {
   existing: boolean;
 }
 
-const EMPTY: Draft = { key: "", value: "", secret: false, target: "RUNTIME", existing: false };
+const EMPTY: Draft = { serviceId: "", key: "", value: "", secret: false, target: "RUNTIME", existing: false };
 
 /** A project's environment variables and secrets. Values apply on the next deploy. */
-export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; canEdit: boolean }) {
+export function EnvironmentPanel({
+  projectId,
+  services,
+  canEdit,
+}: {
+  projectId: string;
+  services: Service[];
+  canEdit: boolean;
+}) {
+  const serviceName = new Map(services.map((service) => [service.id, service.name]));
+  const scoped = services.length > 1;
   const variables = useApi<EnvironmentVariable[]>(`/projects/${projectId}/env`);
   const [draft, setDraft] = useState<Draft>(EMPTY);
   const [busy, setBusy] = useState(false);
@@ -49,7 +66,7 @@ export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; ca
   const save = (event: FormEvent) => {
     event.preventDefault();
     void act(async () => {
-      await api(`/projects/${projectId}/env/${encodeURIComponent(draft.key.trim())}`, {
+      await api(`/projects/${projectId}/env/${encodeURIComponent(draft.key.trim())}${scopeQuery(draft.serviceId)}`, {
         method: "PUT",
         body: { value: draft.value, secret: draft.secret, target: draft.secret ? "RUNTIME" : draft.target },
       });
@@ -57,17 +74,20 @@ export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; ca
     });
   };
 
-  const remove = (key: string) => {
-    if (!window.confirm(`Delete ${key}? Deployments already running keep it until the next deploy.`)) return;
+  const remove = (variable: EnvironmentVariable) => {
+    if (!window.confirm(`Delete ${variable.key}? Deployments already running keep it until the next deploy.`)) return;
     void act(async () => {
-      await api(`/projects/${projectId}/env/${encodeURIComponent(key)}`, { method: "DELETE" });
-      if (draft.key === key) setDraft(EMPTY);
+      await api(`/projects/${projectId}/env/${encodeURIComponent(variable.key)}${scopeQuery(variable.serviceId ?? "")}`, {
+        method: "DELETE",
+      });
+      if (draft.key === variable.key) setDraft(EMPTY);
     });
   };
 
   const edit = (variable: EnvironmentVariable) => {
     setError(null);
     setDraft({
+      serviceId: variable.serviceId ?? "",
       key: variable.key,
       value: variable.value ?? "", // a secret's value is never sent back: type a new one
       secret: variable.secret,
@@ -105,7 +125,7 @@ export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; ca
           <table className="w-full min-w-[36rem] text-left text-sm">
             <thead className="border-b border-rivet">
               <tr>
-                {["Name", "Value", "Available at", ""].map((h) => (
+                {["Name", ...(scoped ? ["For"] : []), "Value", "Available at", ""].map((h) => (
                   <th key={h || "actions"} scope="col" className="py-2 pr-4 font-normal">
                     {h && <Label>{h}</Label>}
                   </th>
@@ -114,10 +134,15 @@ export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; ca
             </thead>
             <tbody className="divide-y divide-rivet">
               {list.map((variable) => (
-                <tr key={variable.key}>
+                <tr key={`${variable.serviceId ?? "*"}:${variable.key}`}>
                   <td className="py-3 pr-4">
                     <Mono className="font-semibold">{variable.key}</Mono>
                   </td>
+                  {scoped && (
+                    <td className="py-3 pr-4 text-ink-soft">
+                      {variable.serviceId ? serviceName.get(variable.serviceId) ?? "—" : "All services"}
+                    </td>
+                  )}
                   <td className="max-w-[22rem] py-3 pr-4">
                     {variable.value === null && !variable.secret ? (
                       <span className="text-xs text-ink-soft">hidden for your role</span>
@@ -142,7 +167,7 @@ export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; ca
                         </button>
                         <button
                           type="button"
-                          onClick={() => remove(variable.key)}
+                          onClick={() => remove(variable)}
                           disabled={busy}
                           className="ml-4 text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
                         >
@@ -160,6 +185,24 @@ export function EnvironmentPanel({ projectId, canEdit }: { projectId: string; ca
 
       {canEdit && (
         <form onSubmit={save} className="mt-6 grid gap-4 border-t border-rivet pt-6 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_minmax(0,11rem)]">
+          {scoped && (
+            <label className="flex flex-col gap-2 sm:col-span-3">
+              <Label>For</Label>
+              <select
+                value={draft.serviceId}
+                onChange={(event) => setDraft({ ...draft, serviceId: event.target.value })}
+                disabled={draft.existing}
+                className={FIELD}
+              >
+                <option value="">All services</option>
+                {services.map((service) => (
+                  <option key={service.id} value={service.id}>
+                    Only {service.name} (overrides the shared value)
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="flex flex-col gap-2">
             <Label>Name</Label>
             <input

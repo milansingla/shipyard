@@ -22,6 +22,15 @@ interface Deployment {
   createdAt: string;
 }
 
+interface Service {
+  id: string;
+  name: string;
+  type: "WEB" | "WORKER";
+  public: boolean;
+  port: number | null;
+  latestDeployment: Deployment | null;
+}
+
 interface EnvVar {
   key: string;
   value: string | null;
@@ -167,9 +176,24 @@ async function listProjects(api: ApiClient, io: Io): Promise<number> {
 
 async function status(api: ApiClient, project: Project, io: Io): Promise<number> {
   const deployments = await api.request<Deployment[]>("GET", `/projects/${project.id}/deployments?limit=5`);
-  const live = deployments.find((d) => d.status === "RUNNING");
+  const services = await api.request<Service[]>("GET", `/projects/${project.id}/services`);
+  const live = deployments.find((d) => d.status === "RUNNING" && d.deploymentUrl);
   io.stdout(`${project.name}  (${project.organization.personal ? "personal" : project.organization.name}, you are ${project.role.toLowerCase()})\n`);
   io.stdout(live ? `Live at ${live.deploymentUrl} — deployment ${short(live.id)}, commit ${short(live.commitSha)}\n\n` : "Nothing running.\n\n");
+  if (services.length > 1) {
+    io.stdout(
+      table(
+        ["SERVICE", "TYPE", "STATUS", "ADDRESS"],
+        services.map((s) => [
+          s.name,
+          s.type === "WORKER" ? "worker" : s.public ? "web" : "web (private)",
+          s.latestDeployment?.status ?? "never deployed",
+          s.latestDeployment?.deploymentUrl ?? (s.type === "WEB" && !s.public ? `http://${s.name}:${s.port ?? "<port>"} (inside the project)` : ""),
+        ]),
+      ),
+    );
+    io.stdout("\n");
+  }
   if (deployments.length > 0) {
     io.stdout(table(["DEPLOYMENT", "STATUS", "COMMIT", "CREATED"], deployments.map((d) => [short(d.id), d.status, short(d.commitSha), new Date(d.createdAt).toLocaleString()])));
   }

@@ -71,7 +71,11 @@ export interface NodeProject {
  * Throws PROJECT_DETECTION_FAILED when it IS a Node project but Shipyard can't
  * work out a correct build — guessing wrong would produce a broken image.
  */
-export async function detectNodeProject(sourceDir: string): Promise<NodeProject | null> {
+export async function detectNodeProject(
+  sourceDir: string,
+  /** A start command configured for the service: detection doesn't need to find one. */
+  options: { startCommand?: string | null } = {},
+): Promise<NodeProject | null> {
   const raw = await readRegularFile(sourceDir, "package.json", MAX_PACKAGE_JSON_BYTES);
   if (raw === null) return null;
 
@@ -80,7 +84,9 @@ export async function detectNodeProject(sourceDir: string): Promise<NodeProject 
 
   const { manager, major, lockfile } = await detectPackageManager(sourceDir, pkg.packageManager, notes);
   const nodeMajor = selectNodeMajor(pkg.engines?.node, notes);
-  const startCommand = await resolveStartCommand(sourceDir, pkg, manager);
+  const startCommand = options.startCommand
+    ? ["sh", "-c", options.startCommand]
+    : await resolveStartCommand(sourceDir, pkg, manager);
   const dependencyFiles = await selectDependencyFiles(sourceDir, pkg, manager, major, lockfile, notes);
 
   return {

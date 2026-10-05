@@ -30,6 +30,7 @@ export type DeploymentTrigger = "MANUAL" | "PUSH";
 export interface Deployment {
   id: string;
   projectId: string;
+  serviceId: string;
   status: DeploymentStatus;
   /** What started it: someone deploying, or a GitHub push. */
   trigger: DeploymentTrigger;
@@ -101,6 +102,25 @@ export interface Project {
   updatedAt: string;
 }
 
+export type ServiceType = "WEB" | "WORKER";
+
+export interface Service {
+  id: string;
+  projectId: string;
+  name: string;
+  type: ServiceType;
+  sourceDir: string;
+  buildCommand: string | null;
+  startCommand: string | null;
+  port: number | null;
+  public: boolean;
+  /** Owns the project's own address. */
+  primary: boolean;
+  /** First hostname label when public; null for workers and private services. */
+  routeName: string | null;
+  latestDeployment: Deployment | null;
+}
+
 export interface ProjectWithLatestDeployment extends Project {
   latestDeployment: Deployment | null;
 }
@@ -110,6 +130,8 @@ export type EnvironmentTarget = "RUNTIME" | "BUILD" | "BOTH";
 
 export interface EnvironmentVariable {
   key: string;
+  /** null = every service; otherwise the one service it applies to (and overrides the shared value for). */
+  serviceId: string | null;
   /** null for secrets: the API never sends a secret's value back. */
   value: string | null;
   secret: boolean;
@@ -132,6 +154,7 @@ export interface DeploymentEvent {
 
 export interface ProjectDomain {
   hostname: string;
+  serviceId: string | null;
   url: string;
   createdAt: string;
 }
