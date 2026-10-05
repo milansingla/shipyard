@@ -1,0 +1,471 @@
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { createApp } from "../../src/app.js";
+import type { PrismaClient } from "../../src/db/prisma.js";
+import { SecretBox } from "../../src/lib/secretBox.js";
+import { sessionCookieName } from "../../src/middleware/authenticate.js";
+import { AuthService } from "../../src/modules/auth/AuthService.js";
+import { BuildLogStore } from "../../src/modules/deployments/BuildLogStore.js";
+import { DeploymentService, type EngineLike } from "../../src/modules/deployments/DeploymentService.js";
+import { ProjectService } from "../../src/modules/projects/ProjectService.js";
+import { DeploymentStatus as S } from "../../src/services/deployment/status.js";
+import type { DeploymentState } from "../../src/services/deployment/types.js";
+import { GitHubClient } from "../../src/services/github/GitHubClient.js";
+import { createTestPrisma, resetTables } from "../helpers/db.js";
+import { silentLogger } from "../helpers/silentLogger.js";
+
+// The HTTP API end to end against real PostgreSQL: GitHub sign-in (against a
+// local fake GitHub that really checks PKCE), sessions, and per-user
+// authorization of every project/deployment endpoint. Docker and `git ls-remote`
+// are faked — they are covered by deployment.integration.test.ts and
+// git.integration.test.ts; this suite is about who may do what.
+
+interface FakeGitHubUser {
+  id: number;
+  login: string;
+}
+
+/** Just enough of github.com + api.github.com for the OAuth web flow. */
+class FakeGitHub {
+  readonly server = http.createServer((req, res) => void this.handle(req, res));
+  private readonly codes = new Map<string, { user: FakeGitHubUser; challenge: string }>();
+  private readonly tokens = new Map<string, FakeGitHubUser>();
+
+  /** What github.com does after the user clicks "Authorize": remember the PKCE challenge, issue a code. */
+  issueCode(user: FakeGitHubUser, challenge: string): string {
+    const code = randomUUID();
+    this.codes.set(code, { user, challenge });
+    return code;
+  }
+
+  revokeAll(): void {
+    this.tokens.clear();
+  }
+
+  private async handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? "/", "http://fake");
+    const send = (status: number, body: unknown) => {
+      res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(body));
+    };
+
+    if (req.method === "POST" && url.pathname === "/login/oauth/access_token") {
+      let raw = "";
+      for await (const chunk of req) raw += String(chunk);
+      const body = JSON.parse(raw) as { client_secret: string; code: string; code_verifier: string };
+      const grant = this.codes.get(body.code);
+      this.codes.delete(body.code); // single use, like GitHub
+      const verifierMatches =
+        grant !== undefined && createHash("sha256").update(body.code_verifier).digest("base64url") === grant.challenge;
+      if (body.client_secret !== "test-secret" || !grant || !verifierMatches) {
+        return send(200, { error: "bad_verification_code" });
+      }
+      const token = `gho_${randomUUID()}`;
+      this.tokens.set(token, grant.user);
+      return send(200, { access_token: token, token_type: "bearer", scope: "read:user" });
+    }
+
+    const user = this.tokens.get((req.headers.authorization ?? "").replace(/^Bearer /, ""));
+    if (!user) return send(401, { message: "Bad credentials" });
+
+    if (url.pathname === "/user") return send(200, { id: user.id, login: user.login, name: null, avatar_url: null });
+    if (url.pathname === "/user/repos") {
+      return send(200, [
+        repo(user.login, "public-app", false),
+        repo(user.login, "secret-app", true),
+      ]);
+    }
+    const branches = /^\/repos\/([^/]+)\/([^/]+)\/branches$/.exec(url.pathname);
+    if (branches) return send(200, [{ name: "main" }, { name: "develop" }]);
+    send(404, { message: "Not Found" });
+  }
+}
+
+function repo(owner: string, name: string, isPrivate: boolean) {
+  return {
+    full_name: `${owner}/${name}`,
+    name,
+    owner: { login: owner },
+    private: isPrivate,
+    default_branch: "main",
+    html_url: `https://github.com/${owner}/${name}`,
+    updated_at: "2026-10-01T00:00:00Z",
+  };
+}
+
+/** Walks a deployment to RUNNING instantly, without Docker. */
+const fakeEngine: EngineLike = {
+  async run(job, observer = {}) {
+    const state: DeploymentState = {
+      id: job.id,
+      status: S.PENDING,
+      branch: job.branch,
+      commitSha: "c".repeat(40),
+      imageName: `shipyard/${job.name}:x`,
+      containerName: `shipyard-${job.name}-x`,
+      containerId: "fake-container",
+      containerPort: 3000,
+      hostPort: 49_999,
+      deploymentUrl: "http://localhost:49999",
+      errorMessage: null,
+      startedAt: new Date(),
+      finishedAt: null,
+    };
+    for (const status of [S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]) {
+      const previous = state.status;
+      state.status = status;
+      await observer.onStatusChange?.(state, previous);
+    }
+    return state;
+  },
+  async stop() {
+    return { containerName: "x", status: S.STOPPED, hostPort: null, deploymentUrl: null };
+  },
+  async restart() {
+    return { containerName: "x", status: S.RUNNING, hostPort: 49_998, deploymentUrl: "http://localhost:49998" };
+  },
+  async getLogs() {
+    return [{ stream: "stdout" as const, text: "hello\n" }];
+  },
+  async destroy() {},
+  async inspect() {
+    return { running: true, exitCode: null, hostPort: 49_999, deploymentUrl: "http://localhost:49999" };
+  },
+};
+
+const APP_URL = "http://localhost:3000";
+const SESSION_COOKIE = sessionCookieName(false);
+const ALICE = { id: 1001, login: "alice" };
+const BOB = { id: 2002, login: "bob" };
+const MALLORY = { id: 3003, login: "mallory" };
+
+let prisma: PrismaClient;
+let fakeGitHub: FakeGitHub;
+let apiServer: http.Server;
+let api: string;
+let dataDir: string;
+let deployments: DeploymentService;
+
+beforeAll(async () => {
+  prisma = createTestPrisma();
+  dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "shipyard-api-it-"));
+
+  fakeGitHub = new FakeGitHub();
+  const githubBase = await listen(fakeGitHub.server);
+
+  // Listen first: the OAuth redirect URI must contain the real port.
+  apiServer = http.createServer();
+  api = await listen(apiServer);
+
+  const github = new GitHubClient({
+    clientId: "test-client",
+    clientSecret: "test-secret",
+    oauthBaseUrl: githubBase,
+    apiBaseUrl: githubBase,
+  });
+  const auth = new AuthService({
+    prisma,
+    github,
+    secretBox: new SecretBox(Buffer.alloc(32, 5)),
+    redirectUri: `${api}/api/auth/github/callback`,
+    sessionTtlMs: 60 * 60 * 1000,
+    // Matched case-insensitively; "alice-renamed" is used by the rename test.
+    allowedUsers: ["alice", "bob", "alice-renamed"],
+    logger: silentLogger,
+  });
+  deployments = new DeploymentService({
+    prisma,
+    engine: fakeEngine,
+    buildLogs: new BuildLogStore(dataDir),
+    allowedGitHosts: ["github.com"],
+    logger: silentLogger,
+  });
+  const projects = new ProjectService({
+    prisma,
+    git: { resolveBranch: async (_repo, branch) => branch ?? "main" },
+    deployments,
+    allowedGitHosts: ["github.com"],
+    logger: silentLogger,
+  });
+
+  apiServer.on(
+    "request",
+    createApp({
+      docker: { ping: async () => true },
+      projects,
+      deployments,
+      auth: { service: auth, github, sessionCookie: SESSION_COOKIE, secureCookies: false, appUrl: APP_URL },
+      allowedOrigins: [api, APP_URL],
+      logger: silentLogger,
+      exposeInternalErrors: true,
+    }),
+  );
+});
+
+beforeEach(async () => {
+  await deployments.waitForIdle();
+  await resetTables(prisma);
+});
+
+afterAll(async () => {
+  await deployments.waitForIdle();
+  await new Promise((resolve) => apiServer.close(resolve));
+  await new Promise((resolve) => fakeGitHub.server.close(resolve));
+  await prisma.$disconnect();
+  await fs.rm(dataDir, { recursive: true, force: true });
+});
+
+async function listen(server: http.Server): Promise<string> {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+}
+
+function cookieFrom(res: Response, name: string): string {
+  const header = res.headers.getSetCookie().find((cookie) => cookie.startsWith(`${name}=`));
+  if (!header) throw new Error(`No ${name} cookie in response`);
+  return header.split(";")[0]!;
+}
+
+/** Starts sign-in, plays GitHub's part, completes the callback. Returns the session cookie. */
+async function signIn(user: FakeGitHubUser, tamper: { state?: string; dropLoginCookie?: boolean } = {}) {
+  const login = await fetch(`${api}/api/auth/github/login`, { redirect: "manual" });
+  expect(login.status).toBe(302);
+  const authorize = new URL(login.headers.get("location")!);
+  const code = fakeGitHub.issueCode(user, authorize.searchParams.get("code_challenge")!);
+  const state = tamper.state ?? authorize.searchParams.get("state")!;
+
+  const callback = await fetch(`${api}/api/auth/github/callback?code=${code}&state=${state}`, {
+    redirect: "manual",
+    headers: tamper.dropLoginCookie ? {} : { cookie: cookieFrom(login, "shipyard_oauth") },
+  });
+  return callback;
+}
+
+async function sessionFor(user: FakeGitHubUser): Promise<string> {
+  const callback = await signIn(user);
+  expect(callback.status).toBe(302);
+  expect(callback.headers.get("location")).toBe(`${APP_URL}/`);
+  return cookieFrom(callback, SESSION_COOKIE);
+}
+
+async function call(cookie: string | null, method: string, route: string, body?: unknown) {
+  const res = await fetch(`${api}${route}`, {
+    method,
+    headers: {
+      ...(cookie && { cookie }),
+      ...(body !== undefined && { "content-type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? (JSON.parse(text) as Record<string, any>) : null };
+}
+
+describe("GitHub sign-in", () => {
+  it("signs in, sets an httpOnly session cookie, and exposes the user without any token", async () => {
+    const callback = await signIn(ALICE);
+    const setCookie = callback.headers.getSetCookie().find((c) => c.startsWith(`${SESSION_COOKIE}=`))!;
+    expect(setCookie).toMatch(/HttpOnly/i);
+    expect(setCookie).toMatch(/SameSite=Lax/i);
+
+    const me = await call(cookieFrom(callback, SESSION_COOKIE), "GET", "/api/auth/me");
+    expect(me.status).toBe(200);
+    expect(me.body).toEqual({ data: { id: expect.any(String), githubId: "1001", login: "alice", name: null, avatarUrl: null } });
+    expect(JSON.stringify(me.body)).not.toContain("gho_");
+  });
+
+  it("stores the GitHub token encrypted and only a hash of the session token", async () => {
+    const cookie = await sessionFor(ALICE);
+    const rawSession = cookie.split("=")[1]!;
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { githubId: 1001n } });
+    expect(user.githubAccessToken.startsWith("v1:")).toBe(true);
+    expect(user.githubAccessToken).not.toContain("gho_");
+
+    const sessions = await prisma.session.findMany();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]!.id).not.toBe(rawSession);
+    expect(sessions[0]!.id).toBe(createHash("sha256").update(rawSession).digest("hex"));
+  });
+
+  it("signing in again updates the same user (e.g. renamed login), not a duplicate", async () => {
+    await sessionFor(ALICE);
+    await sessionFor({ ...ALICE, login: "alice-renamed" });
+    const users = await prisma.user.findMany();
+    expect(users.map((u) => u.login)).toEqual(["alice-renamed"]);
+  });
+
+  it("refuses GitHub accounts not in SHIPYARD_ALLOWED_GITHUB_USERS, creating nothing", async () => {
+    const callback = await signIn(MALLORY);
+    expect(callback.status).toBe(403);
+    expect(await callback.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+    expect(await prisma.user.count()).toBe(0);
+    expect(await prisma.session.count()).toBe(0);
+  });
+
+  it("matches the allowlist case-insensitively", async () => {
+    expect((await signIn({ ...ALICE, login: "ALICE" })).status).toBe(302);
+  });
+
+  it("ends existing sessions of a user removed from the allowlist", async () => {
+    const cookie = await sessionFor(BOB);
+    // Simulates the admin removing "bob" and restarting: the user row stays, the login no longer matches.
+    await prisma.user.updateMany({ where: { login: "bob" }, data: { login: "bob-not-allowed" } });
+    expect((await call(cookie, "GET", "/api/auth/me")).status).toBe(401);
+  });
+
+  it("rejects a callback whose state doesn't match (login CSRF)", async () => {
+    const callback = await signIn(ALICE, { state: "A".repeat(43) });
+    expect(callback.status).toBe(400);
+    expect(await callback.json()).toMatchObject({ error: { code: "OAUTH_FAILED" } });
+    expect(await prisma.session.count()).toBe(0);
+  });
+
+  it("rejects a callback from a browser that didn't start the sign-in", async () => {
+    const callback = await signIn(ALICE, { dropLoginCookie: true });
+    expect(callback.status).toBe(400);
+    expect(await prisma.user.count()).toBe(0);
+  });
+
+  it("reports a cancelled sign-in clearly", async () => {
+    const res = await call(null, "GET", "/api/auth/github/callback?error=access_denied");
+    expect(res.status).toBe(400);
+    expect(res.body?.error.message).toContain("cancelled");
+  });
+
+  it("logout ends the session server-side", async () => {
+    const cookie = await sessionFor(ALICE);
+    expect((await call(cookie, "POST", "/api/auth/logout")).status).toBe(204);
+    expect((await call(cookie, "GET", "/api/auth/me")).status).toBe(401);
+  });
+
+  it("expired sessions are rejected and removed", async () => {
+    const cookie = await sessionFor(ALICE);
+    await prisma.session.updateMany({ data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect((await call(cookie, "GET", "/api/auth/me")).status).toBe(401);
+    expect(await prisma.session.count()).toBe(0);
+  });
+
+  it.each(["garbage", "", "x".repeat(43)])("an invalid session cookie %j is just 'signed out'", async (value) => {
+    expect((await call(`${SESSION_COOKIE}=${value}`, "GET", "/api/auth/me")).status).toBe(401);
+  });
+});
+
+describe("authorization", () => {
+  it("requires a session for every project and deployment endpoint", async () => {
+    const id = randomUUID();
+    for (const [method, route] of [
+      ["GET", "/api/projects"],
+      ["POST", "/api/projects"],
+      ["GET", `/api/projects/${id}`],
+      ["DELETE", `/api/projects/${id}`],
+      ["POST", `/api/projects/${id}/deploy`],
+      ["GET", `/api/projects/${id}/deployments`],
+      ["GET", `/api/deployments/${id}`],
+      ["GET", `/api/deployments/${id}/logs`],
+      ["POST", `/api/deployments/${id}/stop`],
+      ["POST", `/api/deployments/${id}/restart`],
+      ["POST", `/api/deployments/${id}/redeploy`],
+      ["GET", "/api/github/repos"],
+    ] as const) {
+      const res = await call(null, method, route);
+      expect({ route: `${method} ${route}`, status: res.status }).toEqual({ route: `${method} ${route}`, status: 401 });
+    }
+  });
+
+  it("users only ever see and act on their own projects and deployments (others get 404)", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/alice/app" });
+    expect(created.status).toBe(201);
+    const projectId = created.body!.data.id as string;
+
+    const deployed = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    expect(deployed.status).toBe(202);
+    const deploymentId = deployed.body!.data.id as string;
+    await deployments.waitForIdle();
+
+    // Alice sees her own things.
+    expect((await call(alice, "GET", "/api/projects")).body!.data).toHaveLength(1);
+    expect((await call(alice, "GET", `/api/deployments/${deploymentId}`)).body!.data.status).toBe(S.RUNNING);
+
+    // Bob sees nothing, and can't tell whether Alice's ids exist.
+    expect((await call(bob, "GET", "/api/projects")).body!.data).toEqual([]);
+    for (const [method, route] of [
+      ["GET", `/api/projects/${projectId}`],
+      ["POST", `/api/projects/${projectId}/deploy`],
+      ["GET", `/api/projects/${projectId}/deployments`],
+      ["DELETE", `/api/projects/${projectId}`],
+      ["GET", `/api/deployments/${deploymentId}`],
+      ["GET", `/api/deployments/${deploymentId}/logs?type=runtime`],
+      ["POST", `/api/deployments/${deploymentId}/stop`],
+      ["POST", `/api/deployments/${deploymentId}/restart`],
+      ["POST", `/api/deployments/${deploymentId}/redeploy`],
+    ] as const) {
+      const res = await call(bob, method, route);
+      expect({ route: `${method} ${route}`, status: res.status }).toEqual({ route: `${method} ${route}`, status: 404 });
+    }
+
+    // Nothing Bob tried had any effect.
+    expect(await prisma.project.count()).toBe(1);
+    expect(await prisma.deployment.count()).toBe(1);
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: deploymentId } })).status).toBe(S.RUNNING);
+
+    // Alice can still manage it.
+    expect((await call(alice, "POST", `/api/deployments/${deploymentId}/stop`)).body!.data.status).toBe(S.STOPPED);
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}`)).status).toBe(204);
+  });
+
+  it("refuses state-changing requests from other sites, even with a valid session", async () => {
+    const alice = await sessionFor(ALICE);
+    const res = await fetch(`${api}/api/projects`, {
+      method: "POST",
+      headers: { cookie: alice, origin: "https://evil.example", "content-type": "application/json" },
+      body: JSON.stringify({ repositoryUrl: "https://github.com/alice/app" }),
+    });
+    expect(res.status).toBe(403);
+    expect(await prisma.project.count()).toBe(0);
+
+    const fromDashboard = await fetch(`${api}/api/projects`, {
+      method: "POST",
+      headers: { cookie: alice, origin: APP_URL, "content-type": "application/json" },
+      body: JSON.stringify({ repositoryUrl: "https://github.com/alice/app" }),
+    });
+    expect(fromDashboard.status).toBe(201);
+  });
+});
+
+describe("repository selection", () => {
+  it("lists the user's repositories, marking private ones as not deployable", async () => {
+    const alice = await sessionFor(ALICE);
+    const res = await call(alice, "GET", "/api/github/repos");
+    expect(res.status).toBe(200);
+    expect(res.body!.data.items.map((r: Record<string, unknown>) => [r.fullName, r.deployable, r.repositoryUrl])).toEqual([
+      ["alice/public-app", true, "https://github.com/alice/public-app"],
+      ["alice/secret-app", false, "https://github.com/alice/secret-app"],
+    ]);
+  });
+
+  it("lists branches, validating owner and repo", async () => {
+    const alice = await sessionFor(ALICE);
+    expect((await call(alice, "GET", "/api/github/repos/alice/public-app/branches")).body).toEqual({
+      data: { items: ["main", "develop"], hasNextPage: false },
+    });
+    expect((await call(alice, "GET", "/api/github/repos/-bad/x/branches")).status).toBe(400);
+  });
+
+  it("asks the user to sign in again when GitHub revokes the token", async () => {
+    const alice = await sessionFor(ALICE);
+    fakeGitHub.revokeAll();
+    const res = await call(alice, "GET", "/api/github/repos");
+    expect(res.status).toBe(401);
+    expect(res.body!.error.message).toContain("Sign in again");
+  });
+});

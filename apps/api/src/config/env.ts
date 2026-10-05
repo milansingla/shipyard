@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
 import { AppError, ErrorCode } from "../lib/errors.js";
+import { parseSecretKey } from "../lib/secretBox.js";
 
 // Resolves to <repo root>/.env from both src/config and dist/config.
 const ROOT_ENV_FILE = fileURLToPath(new URL("../../../../.env", import.meta.url));
@@ -28,6 +29,17 @@ const envSchema = z.object({
   SHIPYARD_HEALTHCHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   SHIPYARD_GIT_CLONE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   SHIPYARD_BUILD_TIMEOUT_MS: z.coerce.number().int().positive().default(15 * 60_000),
+  /** Where browsers reach this API; used for the OAuth callback URL. Default http://localhost:<PORT>. */
+  SHIPYARD_PUBLIC_URL: z.url({ protocol: /^https?$/ }).optional(),
+  /** Where the browser is sent after signing in (the dashboard). Default: SHIPYARD_PUBLIC_URL. */
+  SHIPYARD_APP_URL: z.url({ protocol: /^https?$/ }).optional(),
+  /** 32 random bytes, base64. Encrypts stored GitHub tokens. */
+  SHIPYARD_SECRET_KEY: z.string().optional(),
+  SHIPYARD_SESSION_TTL_HOURS: z.coerce.number().int().min(1).max(24 * 365).default(24 * 30),
+  /** Comma-separated GitHub logins allowed to sign in, or "*" for anyone. Required with GitHub sign-in. */
+  SHIPYARD_ALLOWED_GITHUB_USERS: z.string().optional(),
+  GITHUB_CLIENT_ID: z.string().optional(),
+  GITHUB_CLIENT_SECRET: z.string().optional(),
 });
 
 export type LogLevel = (typeof LOG_LEVELS)[number];
@@ -52,6 +64,20 @@ export interface AppConfig {
     intervalMs: number;
     requestTimeoutMs: number;
   };
+  /** Origin + path where browsers reach the API, no trailing slash. */
+  publicUrl: string;
+  /** Where to send the browser after sign-in, no trailing slash. */
+  appUrl: string;
+  auth: {
+    /** null = GitHub sign-in not configured; protected endpoints are then unusable. */
+    github: { clientId: string; clientSecret: string } | null;
+    /** Lower-cased logins allowed to sign in, or "*" (anyone with a GitHub account). */
+    allowedUsers: readonly string[] | "*";
+    secretKey: Buffer | null;
+    sessionTtlMs: number;
+    /** Secure cookies whenever the API is served over HTTPS. */
+    secureCookies: boolean;
+  };
 }
 
 /** Pure: turns an env-like object into validated config. Throws on invalid input. */
@@ -75,6 +101,8 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     throw new AppError(ErrorCode.CONFIG_INVALID, "SHIPYARD_ALLOWED_GIT_HOSTS must list at least one host.");
   }
 
+  const publicUrl = trimTrailingSlash(parsed.SHIPYARD_PUBLIC_URL ?? `http://localhost:${parsed.PORT}`);
+
   return {
     env: parsed.NODE_ENV,
     host: parsed.HOST,
@@ -95,7 +123,51 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
       intervalMs: 1_000,
       requestTimeoutMs: 3_000,
     },
+    publicUrl,
+    appUrl: trimTrailingSlash(parsed.SHIPYARD_APP_URL ?? publicUrl),
+    auth: {
+      ...parseAuth(parsed),
+      sessionTtlMs: parsed.SHIPYARD_SESSION_TTL_HOURS * 60 * 60 * 1000,
+      secureCookies: publicUrl.startsWith("https://"),
+    },
   };
+}
+
+function parseAuth(parsed: z.infer<typeof envSchema>): Pick<AppConfig["auth"], "github" | "secretKey" | "allowedUsers"> {
+  const configError = (message: string) => new AppError(ErrorCode.CONFIG_INVALID, message);
+
+  let secretKey: Buffer | null = null;
+  if (parsed.SHIPYARD_SECRET_KEY !== undefined) {
+    secretKey = parseSecretKey(parsed.SHIPYARD_SECRET_KEY);
+    // Never echo the value: it is a secret.
+    if (!secretKey) throw configError("SHIPYARD_SECRET_KEY must be 32 bytes, base64 (`openssl rand -base64 32`).");
+  }
+
+  const allowedRaw = parsed.SHIPYARD_ALLOWED_GITHUB_USERS?.trim();
+  const allowedUsers: readonly string[] | "*" =
+    allowedRaw === "*"
+      ? "*"
+      : (allowedRaw ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean);
+
+  const { GITHUB_CLIENT_ID: clientId, GITHUB_CLIENT_SECRET: clientSecret } = parsed;
+  if (clientId === undefined && clientSecret === undefined) return { github: null, secretKey, allowedUsers };
+  if (clientId === undefined || clientSecret === undefined) {
+    throw configError("Set both GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET, or neither.");
+  }
+  if (!secretKey) {
+    throw configError("GitHub sign-in needs SHIPYARD_SECRET_KEY to encrypt stored tokens (`openssl rand -base64 32`).");
+  }
+  // Anyone who signs in can run code on this host: who may sign in must be an explicit decision.
+  if (allowedUsers !== "*" && allowedUsers.length === 0) {
+    throw configError(
+      'GitHub sign-in needs SHIPYARD_ALLOWED_GITHUB_USERS: your GitHub login(s), comma-separated, or "*" for any GitHub account.',
+    );
+  }
+  return { github: { clientId, clientSecret }, secretKey, allowedUsers };
+}
+
+function trimTrailingSlash(url: string): string {
+  return url.replace(/\/+$/, "");
 }
 
 /** For entrypoints that need the database (the API server). */

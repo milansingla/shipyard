@@ -48,6 +48,9 @@ const IN_PROGRESS: DeploymentStatus[] = [
  * - deploys run in the background; the API returns immediately
  * - after a crash/restart of Shipyard, stored statuses are reconciled with Docker
  *
+ * Authorization: every public method takes the acting user's id and only
+ * finds deployments of that user's projects; anything else is a 404.
+ *
  * Concurrency note: the per-project lock is in memory, so this assumes ONE
  * Shipyard API process. Multiple instances would need a DB-level lock.
  */
@@ -59,14 +62,14 @@ export class DeploymentService {
 
   // ───────────────────────── queries ─────────────────────────
 
-  async get(id: string): Promise<Deployment> {
-    const deployment = await this.deps.prisma.deployment.findUnique({ where: { id } });
+  async get(id: string, ownerId: string): Promise<Deployment> {
+    const deployment = await this.deps.prisma.deployment.findFirst({ where: { id, project: { ownerId } } });
     if (!deployment) throw new NotFoundError(`Deployment not found: ${id}`);
     return deployment;
   }
 
-  async listForProject(projectId: string, limit: number): Promise<Deployment[]> {
-    await this.getProject(projectId);
+  async listForProject(projectId: string, ownerId: string, limit: number): Promise<Deployment[]> {
+    await this.getProject(projectId, ownerId);
     return this.deps.prisma.deployment.findMany({
       where: { projectId },
       orderBy: { createdAt: "desc" },
@@ -74,8 +77,8 @@ export class DeploymentService {
     });
   }
 
-  async getLogs(id: string, type: LogType, tail: number): Promise<DeploymentLogs> {
-    const deployment = await this.get(id);
+  async getLogs(id: string, ownerId: string, type: LogType, tail: number): Promise<DeploymentLogs> {
+    const deployment = await this.get(id, ownerId);
 
     if (type === "build") {
       return { type, content: await this.deps.buildLogs.read(id) };
@@ -99,8 +102,8 @@ export class DeploymentService {
    * Creates a PENDING deployment for the project's configured branch and starts
    * the pipeline in the background. Returns immediately; poll GET /deployments/:id.
    */
-  async deploy(projectId: string): Promise<Deployment> {
-    const project = await this.getProject(projectId);
+  async deploy(projectId: string, ownerId: string): Promise<Deployment> {
+    const project = await this.getProject(projectId, ownerId);
     this.lockProject(projectId);
 
     let deployment: Deployment;
@@ -124,13 +127,13 @@ export class DeploymentService {
   }
 
   /** Deploys the latest commit of the same project/branch as an existing deployment. */
-  async redeploy(id: string): Promise<Deployment> {
-    const deployment = await this.get(id);
-    return this.deploy(deployment.projectId);
+  async redeploy(id: string, ownerId: string): Promise<Deployment> {
+    const deployment = await this.get(id, ownerId);
+    return this.deploy(deployment.projectId, ownerId);
   }
 
-  async stop(id: string): Promise<Deployment> {
-    const deployment = await this.get(id);
+  async stop(id: string, ownerId: string): Promise<Deployment> {
+    const deployment = await this.get(id, ownerId);
     if (deployment.status === DeploymentStatus.STOPPED) return deployment;
     return this.stopDeployment(deployment);
   }
@@ -140,8 +143,8 @@ export class DeploymentService {
    * Restarting an older, stopped deployment also retires the currently running
    * one — which makes this the rollback mechanism.
    */
-  async restart(id: string): Promise<Deployment> {
-    const deployment = await this.get(id);
+  async restart(id: string, ownerId: string): Promise<Deployment> {
+    const deployment = await this.get(id, ownerId);
     assertTransition(deployment.status, DeploymentStatus.STARTING);
     if (!deployment.containerId) {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "This deployment has no container to restart.");
@@ -345,7 +348,7 @@ export class DeploymentService {
         `Deployment ${deployment.id} changed while it was being updated. Refresh and try again.`,
       );
     }
-    return this.get(deployment.id);
+    return this.load(deployment.id);
   }
 
   private async markFailed(id: string, reason: unknown): Promise<void> {
@@ -382,8 +385,15 @@ export class DeploymentService {
     }
   }
 
-  private async getProject(projectId: string): Promise<Project> {
-    const project = await this.deps.prisma.project.findUnique({ where: { id: projectId } });
+  /** Unscoped: only for re-reading a row whose access was already checked. */
+  private async load(id: string): Promise<Deployment> {
+    const deployment = await this.deps.prisma.deployment.findUnique({ where: { id } });
+    if (!deployment) throw new NotFoundError(`Deployment not found: ${id}`);
+    return deployment;
+  }
+
+  private async getProject(projectId: string, ownerId: string): Promise<Project> {
+    const project = await this.deps.prisma.project.findFirst({ where: { id: projectId, ownerId } });
     if (!project) throw new NotFoundError(`Project not found: ${projectId}`);
     return project;
   }

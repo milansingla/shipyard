@@ -3,6 +3,10 @@ import Docker from "dockerode";
 import type { AppConfig } from "./config/env.js";
 import { type PrismaClient, createPrismaClient } from "./db/prisma.js";
 import type { Logger } from "./lib/logger.js";
+import type { AppAuth } from "./app.js";
+import { SecretBox } from "./lib/secretBox.js";
+import { sessionCookieName } from "./middleware/authenticate.js";
+import { AuthService } from "./modules/auth/AuthService.js";
 import { BuildLogStore } from "./modules/deployments/BuildLogStore.js";
 import { DeploymentService } from "./modules/deployments/DeploymentService.js";
 import { ProjectService } from "./modules/projects/ProjectService.js";
@@ -10,6 +14,7 @@ import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
 import { DockerService } from "./services/docker/DockerService.js";
 import { GitService } from "./services/git/GitService.js";
+import { GitHubClient } from "./services/github/GitHubClient.js";
 import { WorkspaceService } from "./services/workspace/WorkspaceService.js";
 
 export interface EngineServices {
@@ -22,6 +27,8 @@ export interface ApiServices extends EngineServices {
   prisma: PrismaClient;
   projects: ProjectService;
   deployments: DeploymentService;
+  /** null when GitHub sign-in is not configured. */
+  auth: AppAuth | null;
 }
 
 /**
@@ -69,5 +76,28 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     logger: logger.child({ component: "projects" }),
   });
 
-  return { ...engineServices, prisma, projects, deployments };
+  return { ...engineServices, prisma, projects, deployments, auth: createAuth(config, prisma, logger) };
+}
+
+function createAuth(config: AppConfig, prisma: PrismaClient, logger: Logger): AppAuth | null {
+  const { github: githubConfig, secretKey } = config.auth;
+  if (!githubConfig || !secretKey) return null; // config validation guarantees both or neither
+
+  const github = new GitHubClient(githubConfig);
+  const service = new AuthService({
+    prisma,
+    github,
+    secretBox: new SecretBox(secretKey),
+    redirectUri: `${config.publicUrl}/api/auth/github/callback`,
+    sessionTtlMs: config.auth.sessionTtlMs,
+    allowedUsers: config.auth.allowedUsers,
+    logger: logger.child({ component: "auth" }),
+  });
+  return {
+    service,
+    github,
+    sessionCookie: sessionCookieName(config.auth.secureCookies),
+    secureCookies: config.auth.secureCookies,
+    appUrl: config.appUrl,
+  };
 }

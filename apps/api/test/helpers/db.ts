@@ -19,4 +19,6 @@ export function createTestPrisma(): PrismaClient {
 export async function resetTables(prisma: PrismaClient): Promise<void> {
   await prisma.deployment.deleteMany();
   await prisma.project.deleteMany();
+  await prisma.session.deleteMany();
+  await prisma.user.deleteMany();
 }

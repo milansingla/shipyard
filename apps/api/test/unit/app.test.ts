@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.js";
 import { AppError, ErrorCode } from "../../src/lib/errors.js";
 import { createErrorHandler } from "../../src/middleware/errorHandler.js";
+import type { DeploymentService } from "../../src/modules/deployments/DeploymentService.js";
+import type { ProjectService } from "../../src/modules/projects/ProjectService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
 let server: Server | undefined;
@@ -48,6 +50,24 @@ describe("HTTP API", () => {
     const res = await fetch(`${base}/api/nope`);
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: { code: "NOT_FOUND", message: "Route not found: GET /api/nope" } });
+  });
+});
+
+describe("authentication", () => {
+  it("protected routes explain the missing setup (503) when GitHub sign-in is not configured", async () => {
+    const base = await start(
+      createApp({
+        docker: { ping: async () => true },
+        // Never reached: requireUser() rejects first.
+        projects: {} as ProjectService,
+        deployments: {} as DeploymentService,
+        logger: silentLogger,
+        exposeInternalErrors: false,
+      }),
+    );
+    const res = await fetch(`${base}/api/projects`);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ error: { code: "AUTH_NOT_CONFIGURED" } });
   });
 });
 

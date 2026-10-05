@@ -5,6 +5,11 @@
 export const ErrorCode = {
   VALIDATION_ERROR: "VALIDATION_ERROR",
   NOT_FOUND: "NOT_FOUND",
+  UNAUTHENTICATED: "UNAUTHENTICATED",
+  FORBIDDEN: "FORBIDDEN",
+  AUTH_NOT_CONFIGURED: "AUTH_NOT_CONFIGURED",
+  OAUTH_FAILED: "OAUTH_FAILED",
+  GITHUB_ERROR: "GITHUB_ERROR",
   PROJECT_ALREADY_EXISTS: "PROJECT_ALREADY_EXISTS",
   DEPLOYMENT_IN_PROGRESS: "DEPLOYMENT_IN_PROGRESS",
   CONFIG_INVALID: "CONFIG_INVALID",
@@ -56,6 +61,13 @@ export class ValidationError extends AppError {
 export class NotFoundError extends AppError {
   constructor(message: string) {
     super(ErrorCode.NOT_FOUND, message, { statusCode: 404 });
+  }
+}
+
+/** No valid session (HTTP 401). The client should sign in again. */
+export class UnauthenticatedError extends AppError {
+  constructor(message = "Sign in to continue.") {
+    super(ErrorCode.UNAUTHENTICATED, message, { statusCode: 401 });
   }
 }
 

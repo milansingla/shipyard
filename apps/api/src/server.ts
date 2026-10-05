@@ -11,11 +11,17 @@ const services = createApiServices(config, requireDatabaseUrl(config), logger);
 // by a previous run (e.g. a deploy that was BUILDING when the process died).
 await services.prisma.$connect();
 await services.deployments.reconcileOnStartup();
+await services.auth?.service.deleteExpiredSessions();
+if (!services.auth) {
+  logger.warn("GitHub sign-in is not configured: project and deployment endpoints will answer 503. See .env.example.");
+}
 
 const app = createApp({
   docker: services.docker,
   projects: services.projects,
   deployments: services.deployments,
+  auth: services.auth,
+  allowedOrigins: [config.publicUrl, config.appUrl],
   logger: logger.child({ component: "http" }),
   exposeInternalErrors: config.env !== "production",
 });

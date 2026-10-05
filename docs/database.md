@@ -14,14 +14,25 @@ npm run db:down      # stop (data kept); `docker compose down -v` deletes it
 ## Model
 
 ```
-Project 1 ──── * Deployment
+User 1 ──── * Session
+  1
+  └──── * Project 1 ──── * Deployment
 ```
+
+### User and Session
+Created by GitHub sign-in — see [github.md](github.md). `User.githubId` (GitHub's
+numeric id, `BIGINT`) is the identity; `login` is display data refreshed at each
+sign-in. `githubAccessToken` is AES-256-GCM ciphertext. `Session.id` is
+sha256 of the cookie token, so the table alone can't be used to impersonate anyone.
+Deleting a user cascades to sessions but is **restricted** while they own
+projects: project deletion must run first because it also removes containers.
 
 ### Project
 A repository + branch Shipyard knows how to deploy.
 
 | Field                                | Notes                                                              |
 | ------------------------------------ | ------------------------------------------------------------------ |
+| `ownerId`                            | The user who created it; every query is scoped by it |
 | `slug` (unique)                      | URL/Docker-safe form of `name`; used in container/image names and, from M7, hostnames |
 | `repositoryUrl`                      | Normalised HTTPS clone URL, validated against the host allowlist   |
 | `repositoryOwner`, `repositoryName`  | Parsed once at creation; avoids re-parsing for display             |
@@ -72,7 +83,8 @@ and RUNNING rows are checked against Docker (`DeploymentService.reconcileOnStart
 
 - The "one deployment per project at a time" lock is in memory: correct for one
   API process only. Moving it into PostgreSQL is planned for V3.
-- No `User` model yet — projects have no owner until GitHub OAuth (M4).
+- Slugs are unique across all users (they become container names and, in M7,
+  hostnames), so two users can't both have a project named `api`.
 
 ## Tests
 

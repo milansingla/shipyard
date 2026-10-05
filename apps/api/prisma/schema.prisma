@@ -26,9 +26,46 @@ enum DeploymentStatus {
   STOPPED
 }
 
+/// A person who signed in with GitHub. GitHub is the only identity provider in V2.
+model User {
+  id                String    @id @default(uuid()) @db.Uuid
+  /// GitHub's numeric account id: stable, unlike `login`, which users can rename.
+  githubId          BigInt    @unique
+  login             String
+  name              String?
+  avatarUrl         String?
+  /// AES-256-GCM ciphertext (see src/lib/secretBox.ts). Never returned by the API.
+  githubAccessToken String
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  projects          Project[]
+  sessions          Session[]
+
+  @@map("users")
+}
+
+/// A signed-in browser. The cookie holds a random token; only its SHA-256
+/// is stored here, so a database leak does not leak usable sessions.
+model Session {
+  /// sha256(token), hex.
+  id        String   @id
+  userId    String   @db.Uuid
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
 /// A repository + branch that Shipyard knows how to deploy.
 model Project {
   id              String       @id @default(uuid()) @db.Uuid
+  /// Restrict: deleting a user must go through project deletion, which also
+  /// removes containers. A cascade would orphan running containers.
+  ownerId         String       @db.Uuid
+  owner           User         @relation(fields: [ownerId], references: [id], onDelete: Restrict)
   name            String
   /// URL/Docker-safe identifier derived from `name`. Used for container names
   /// now and for the project's hostname once Traefik routing exists.
@@ -41,6 +78,7 @@ model Project {
   updatedAt       DateTime     @updatedAt
   deployments     Deployment[]
 
+  @@index([ownerId, createdAt(sort: Desc)])
   @@map("projects")
 }
 

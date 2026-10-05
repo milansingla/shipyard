@@ -1,13 +1,14 @@
 # Architecture
 
-## Current shape (V2 · Milestone 3)
+## Current shape (V2 · Milestone 4)
 
 ```
             ┌──────────── apps/api ──────────────────────────────────────────────┐
  CLI ──────►│ cli.ts ─────────┐                                                  │
             │                 ├─► bootstrap.ts (composition root)                │
- HTTP ─────►│ server.ts ─► app.ts ─► routes: health, projects, deployments      │
-            │                                                                    │
+ HTTP ─────►│ server.ts ─► app.ts ─► originCheck ─► authenticate (session cookie) │
+            │              routes: health, auth, github, projects, deployments   │
+            │  modules/  AuthService ── GitHub OAuth, sessions ─► GitHubClient   │
             │  modules/  ProjectService ─┐                                       │
             │            DeploymentService ── persists status, 1 deploy/project, │
             │              │   │              retires old deployment, reconciles │
@@ -29,7 +30,9 @@
 
 | Component            | Knows about                         | Does NOT know about        |
 | -------------------- | ----------------------------------- | -------------------------- |
-| `DeploymentService`  | database, project lock, retiring old deployments | git flags, Docker API |
+| `AuthService`        | OAuth flow, sessions, allowlist     | projects, Docker           |
+| `GitHubClient`       | GitHub HTTP API, response validation | database, sessions        |
+| `DeploymentService`  | database, ownership, project lock, retiring old deployments | git flags, Docker API |
 | `DeploymentEngine`   | step order, statuses, failure policy for one run | database, other deployments |
 | `prepareBuild` + `detection/` | Dockerfile vs Node.js detection, generation | Docker API, database |
 | `GitService`         | `git` CLI, hardening flags          | deployments, Docker        |

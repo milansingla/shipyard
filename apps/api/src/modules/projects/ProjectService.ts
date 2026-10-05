@@ -20,6 +20,11 @@ export interface ProjectServiceDeps {
   logger: Logger;
 }
 
+/**
+ * Every method takes the acting user's id and only ever sees that user's
+ * projects. Another user's project is reported as "not found" (404), not
+ * "forbidden", so ids of other people's projects can't be probed.
+ */
 export class ProjectService {
   constructor(private readonly deps: ProjectServiceDeps) {}
 
@@ -28,7 +33,7 @@ export class ProjectService {
    * remote that the repository is reachable and the branch exists — so a typo
    * fails now with a clear 422 instead of later as a FAILED deployment.
    */
-  async create(input: CreateProjectInput): Promise<Project> {
+  async create(input: CreateProjectInput, ownerId: string): Promise<Project> {
     const repository = parseRepositoryUrl(input.repositoryUrl, this.deps.allowedGitHosts);
     const requestedBranch = input.branch === undefined ? null : validateBranchName(input.branch);
     const branch = await this.deps.git.resolveBranch(repository, requestedBranch);
@@ -39,6 +44,7 @@ export class ProjectService {
     try {
       const project = await this.deps.prisma.project.create({
         data: {
+          ownerId,
           name,
           slug,
           repositoryUrl: repository.cloneUrl,
@@ -47,7 +53,7 @@ export class ProjectService {
           branch,
         },
       });
-      this.deps.logger.info({ projectId: project.id, slug, branch }, "Project created");
+      this.deps.logger.info({ projectId: project.id, ownerId, slug, branch }, "Project created");
       return project;
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -61,17 +67,18 @@ export class ProjectService {
   }
 
   /** All projects, newest first, each with its most recent deployment (for the dashboard). */
-  async list(): Promise<ProjectWithLatestDeployment[]> {
+  async list(ownerId: string): Promise<ProjectWithLatestDeployment[]> {
     const projects = await this.deps.prisma.project.findMany({
+      where: { ownerId },
       orderBy: { createdAt: "desc" },
       include: { deployments: { orderBy: { createdAt: "desc" }, take: 1 } },
     });
     return projects.map(({ deployments, ...project }) => ({ ...project, latestDeployment: deployments[0] ?? null }));
   }
 
-  async get(id: string): Promise<ProjectWithLatestDeployment> {
-    const project = await this.deps.prisma.project.findUnique({
-      where: { id },
+  async get(id: string, ownerId: string): Promise<ProjectWithLatestDeployment> {
+    const project = await this.deps.prisma.project.findFirst({
+      where: { id, ownerId },
       include: { deployments: { orderBy: { createdAt: "desc" }, take: 1 } },
     });
     if (!project) throw new NotFoundError(`Project not found: ${id}`);
@@ -80,8 +87,8 @@ export class ProjectService {
   }
 
   /** Removes the project, all its containers/images/logs, and its deployment history. */
-  async delete(id: string): Promise<void> {
-    await this.get(id); // 404 before touching anything
+  async delete(id: string, ownerId: string): Promise<void> {
+    await this.get(id, ownerId); // 404 (also for other users' projects) before touching anything
     await this.deps.deployments.destroyProjectDeployments(id, async () => {
       await this.deps.prisma.project.delete({ where: { id } }); // cascades to deployments
     });

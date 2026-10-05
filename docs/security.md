@@ -58,17 +58,27 @@ scanning.
 | Builds running as root             | Generated Dockerfiles install, build and run as the `node` user             | `generateDockerfile.ts` |
 | Oversized repo metadata            | `package.json` / Dockerfile / `.dockerignore` size-capped, read only if regular files | `detection/files.ts` |
 | Oversized request bodies           | `express.json({ limit: "100kb" })`                                          | `app.ts` |
+| Strangers signing in               | `SHIPYARD_ALLOWED_GITHUB_USERS` required; re-checked on every request      | `AuthService` |
+| Unauthenticated access             | Every project/deployment/GitHub route calls `requireUser`                  | `middleware/authenticate.ts` |
+| Users acting on others' resources  | Services scope every query to the owner; others' ids → 404                  | `ProjectService`, `DeploymentService` |
+| Login CSRF / code interception     | OAuth `state` bound to an httpOnly cookie; PKCE S256                         | `AuthService` |
+| CSRF on API calls                  | `SameSite=Lax` session cookie + `Origin`/`Sec-Fetch-Site` check on POST/DELETE | `middleware/originCheck.ts` |
+| Session theft via XSS / DB leak    | `HttpOnly` cookie; DB stores sha256(token); server-side logout              | `AuthService` |
+| GitHub token leak                  | AES-256-GCM at rest; never in API responses; scope `read:user`              | `lib/secretBox.ts` |
+
+Details of the sign-in design: [github.md](github.md).
 
 ## Known gaps (tracked)
 
-- **No authentication on the API yet.** Every `/api/projects` and
-  `/api/deployments` endpoint is open: anyone who can reach the API can deploy
-  repositories and stop containers. GitHub OAuth + per-user ownership (M4) fix
-  this. Until then, **keep the API bound to 127.0.0.1** (`HOST`, the default).
+- **Signed-in users are trusted with the host.** Ownership stops users touching
+  *each other's* projects, but any allowed user can deploy code that runs
+  here (see "Docker access ≈ root" above). Only allowlist people you trust.
+- No rate limiting on sign-in or API endpoints yet (planned for V3).
+- Sessions have a fixed lifetime; there is no "sign out everywhere" endpoint
+  yet (deleting the user's `sessions` rows does it).
 - A cancelled build (timeout, `SHIPYARD_BUILD_TIMEOUT_MS`) may leave dangling
   image layers; reclaim with `docker image prune`.
 - No memory/CPU limits on containers (would break some apps without per-project config).
 - No egress restrictions for deployed containers.
 - Webhook signature verification arrives with webhooks (M6) — HMAC-SHA256,
   constant-time compare, raw body.
-- GitHub access tokens (M4) will be stored server-side only, never sent to the browser.

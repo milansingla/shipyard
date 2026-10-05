@@ -3,7 +3,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "../generated/prisma/client.js";
 
 export { Prisma, PrismaClient };
-export type { Deployment, Project } from "../generated/prisma/client.js";
+export type { Deployment, Project, User } from "../generated/prisma/client.js";
 
 /**
  * Prisma 7 talks to Postgres through a driver adapter (node-postgres here)

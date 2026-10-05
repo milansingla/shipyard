@@ -60,12 +60,20 @@ export function parseRepositoryUrl(input: string, allowedHosts: readonly string[
   const [owner, rawName] = segments as [string, string];
   const name = rawName.endsWith(".git") ? rawName.slice(0, -".git".length) : rawName;
 
-  if (!OWNER_PATTERN.test(owner)) {
+  if (!isValidRepositoryOwner(owner)) {
     throw new ValidationError(`Invalid repository owner: ${owner}`);
   }
-  if (!REPO_PATTERN.test(name) || name === "." || name === "..") {
+  if (!isValidRepositoryName(name)) {
     throw new ValidationError(`Invalid repository name: ${name}`);
   }
 
   return { cloneUrl: `https://${host}/${owner}/${name}.git`, host, owner, name };
+}
+
+export function isValidRepositoryOwner(owner: string): boolean {
+  return OWNER_PATTERN.test(owner);
+}
+
+export function isValidRepositoryName(name: string): boolean {
+  return REPO_PATTERN.test(name) && name !== "." && name !== "..";
 }

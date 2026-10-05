@@ -186,3 +186,94 @@ a `.dockerignore`d `secret.txt` is absent from the running container.
 | Fixed port 3000 for generated builds   | Parse source for `listen()`     | Static analysis is unreliable; `PORT` env is the convention |
 | Hand-written generator                 | Cloud Native Buildpacks / Nixpacks | No extra build toolchain; small and explainable; easy to swap later |
 | `semver` dependency                    | Hand-parse ranges               | Range semantics are subtle; npm itself uses this library  |
+
+---
+
+## Milestone 4 — GitHub sign-in, ownership, repository selection
+
+### Understand Before Interview
+
+#### Key concepts
+
+1. **Authentication vs authorization** — *who are you* (GitHub sign-in →
+   session) vs *what may you do* (`ownerId` scoping in every service query).
+2. **OAuth 2.0 authorization-code flow** — the browser only ever carries a
+   short-lived `code`; the server swaps it for a token using its client secret.
+3. **`state`** — a per-attempt random value, bound to the browser by an
+   httpOnly cookie. Without it, an attacker can log *you* into *their* account
+   (login CSRF).
+4. **PKCE** — the server keeps a random `verifier` and sends only
+   `sha256(verifier)`. A stolen `code` is useless without the verifier.
+5. **Server-side sessions** — the cookie is a random token; the DB stores its
+   hash. Logout deletes the row, so it works instantly (unlike a stateless JWT).
+6. **Cookie flags** — `HttpOnly` (no JS access), `SameSite=Lax` (not sent on
+   cross-site POSTs), `Secure` (HTTPS only), `__Host-` prefix (no Domain, Path=/).
+7. **CSRF** — a malicious page making *your* browser send an authenticated
+   request. Defence in depth: SameSite + checking `Origin` on state-changing requests.
+8. **IDOR** (insecure direct object reference) — `GET /deployments/:id` for
+   someone else's id. Fix: scope the query (`WHERE project.ownerId = me`), return 404.
+9. **Authenticated encryption (AES-GCM)** — confidentiality *and* tamper
+   detection; a unique IV per message.
+10. **Allowlisting identities** — on a platform that runs code, "can sign in"
+    must mean "trusted", so sign-in itself is restricted.
+
+#### Likely interview questions
+
+**Why sessions in PostgreSQL instead of JWTs?**
+Revocation. A JWT is valid until it expires; logging out or removing a user
+can't kill it without a denylist — which is a session table again. One
+indexed lookup per request is cheap at this scale. Code: `AuthService.authenticate`.
+
+**Why store a hash of the session token instead of the token?**
+Same reason as passwords: a leaked DB backup must not let anyone impersonate
+users. The token has 256 bits of entropy, so a plain SHA-256 is enough (no
+slow KDF needed — there's nothing to brute-force).
+
+**Why 404 instead of 403 for another user's project?**
+403 confirms the id exists. 404 reveals nothing. The service query simply
+doesn't find it: `findFirst({ where: { id, ownerId } })`.
+
+**Where is authorization enforced?**
+In the services, not only the routes: `ProjectService.get(id, ownerId)`,
+`DeploymentService.get(id, ownerId)`. A future caller (webhooks, CLI) can't
+forget it, because there is no unscoped public method. Tested endpoint by
+endpoint in `api.integration.test.ts`.
+
+**What does PKCE add if you already have a client secret?**
+Defence in depth for the code: if it leaks (logs, referrer, a malicious
+browser extension), it can't be redeemed without the verifier that never left
+the server and this browser's cookie. GitHub supports it, so it costs nothing.
+
+**Why encrypt the GitHub token if the database is "internal"?**
+Backups, replicas, dumps, `db:studio` screenshots. Encryption with a key that
+lives only in the API's environment means a DB-only leak isn't a GitHub leak.
+
+**Why the sign-in allowlist?**
+A GitHub OAuth App accepts *any* GitHub account. On Shipyard, signing in means
+being able to run code on the host. So who may sign in is required config, and
+re-checked on every request so removal is immediate.
+
+**How did you test OAuth without GitHub?**
+A ~60-line fake GitHub HTTP server in the integration test that implements
+the token endpoint for real — single-use codes, and it rejects a wrong PKCE
+verifier — plus `/user`, repos and branches. The real `GitHubClient`,
+`AuthService`, Express app and PostgreSQL are used.
+
+#### Important code paths
+
+- `AuthService.startLogin` / `completeLogin` / `authenticate`
+- `middleware/authenticate.ts` (`requireUser`), `middleware/originCheck.ts`
+- `ProjectService` / `DeploymentService` — every public method takes `ownerId`
+- `lib/secretBox.ts` — AES-256-GCM
+- `test/integration/api.integration.test.ts` — the authorization matrix
+
+#### Trade-offs to be able to defend
+
+| Decision                          | Alternative                    | Why this, for now                                   |
+| --------------------------------- | ------------------------------ | --------------------------------------------------- |
+| DB sessions                       | JWT                            | Instant revocation; one indexed query               |
+| OAuth App, `read:user`            | GitHub App                     | Simple sign-in; private repos (GitHub App) later     |
+| Fixed session lifetime            | Sliding expiry                 | No write per request; good enough for 30 days        |
+| Owner = single user               | Teams/RBAC                     | V4 scope; ownership column is the seam for it        |
+| Hand-rolled 15-line cookie reader | `cookie-parser`                | One function, fully tested; setting uses Express     |
+| Login allowlist by `login`        | By numeric id                  | Readable config; logins re-checked each request      |
