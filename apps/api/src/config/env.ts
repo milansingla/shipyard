@@ -41,6 +41,9 @@ const envSchema = z.object({
     .optional(),
   /** Port Traefik listens on, on this host (docker-compose.yml publishes it). */
   SHIPYARD_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(80),
+  /** Contact for Let's Encrypt. Set = serve apps over HTTPS (docker-compose.production.yml). */
+  SHIPYARD_ACME_EMAIL: z.email().optional(),
+  SHIPYARD_HTTPS_PORT: z.coerce.number().int().min(1).max(65535).default(443),
   /** Where browsers reach this API; used for the OAuth callback URL. Default http://localhost:<PORT>. */
   SHIPYARD_PUBLIC_URL: z.url({ protocol: /^https?$/ }).optional(),
   /** Where the browser is sent after signing in (the dashboard). Default: SHIPYARD_PUBLIC_URL. */
@@ -80,6 +83,8 @@ export interface AppConfig {
     httpPort: number;
     /** Traefik's dynamic configuration directory (mounted by docker-compose.yml). */
     routesDir: string;
+    /** HTTPS via Let's Encrypt; null = plain HTTP. */
+    tls: { email: string; httpsPort: number } | null;
   } | null;
   healthCheck: {
     timeoutMs: number;
@@ -131,8 +136,12 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
         domain: parsed.SHIPYARD_PUBLIC_DOMAIN,
         httpPort: parsed.SHIPYARD_HTTP_PORT,
         routesDir: path.join(dataDir, "traefik"),
+        tls: parsed.SHIPYARD_ACME_EMAIL ? { email: parsed.SHIPYARD_ACME_EMAIL, httpsPort: parsed.SHIPYARD_HTTPS_PORT } : null,
       }
     : null;
+  if (parsed.SHIPYARD_ACME_EMAIL && !routing) {
+    throw new AppError(ErrorCode.CONFIG_INVALID, "SHIPYARD_ACME_EMAIL needs SHIPYARD_PUBLIC_DOMAIN: HTTPS is served by Traefik.");
+  }
   if (routing && parsed.SHIPYARD_PUBLISH_HOST !== "127.0.0.1") {
     // Visitors come in through Traefik; a port published on every interface would bypass it.
     throw new AppError(

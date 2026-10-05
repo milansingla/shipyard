@@ -1,16 +1,21 @@
 import fs from "node:fs/promises";
 import http from "node:http";
+import https from "node:https";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
-import type { RouteTarget, Router } from "./Router.js";
+import { type RouteTarget, type Router, isValidHostname } from "./Router.js";
 
 /** Docker network shared by Traefik and every deployment container (created by docker-compose.yml). */
 export const EDGE_NETWORK = "shipyard-edge";
 /** Traefik entry point for plain HTTP (see docker-compose.yml). */
 export const ENTRY_POINT = "web";
+/** Traefik entry point for HTTPS (docker-compose.production.yml). */
+export const TLS_ENTRY_POINT = "websecure";
+/** Certificate resolver defined in docker-compose.production.yml (Let's Encrypt). */
+export const CERT_RESOLVER = "letsencrypt";
 /** The one file Shipyard writes into Traefik's dynamic configuration directory. */
 export const ROUTES_FILE = "routes.yml";
 /** Added by Traefik to every response it proxies: which deployment answered. */
@@ -31,6 +36,8 @@ export interface TraefikRouterOptions {
   /** How long Traefik may take to pick up a route change (it applies at most one every ~2s). */
   cutoverTimeoutMs: number;
   probeIntervalMs: number;
+  /** Serve over HTTPS with Let's Encrypt certificates; null = plain HTTP. */
+  tls?: { httpsPort: number } | null;
 }
 
 /** Asks the proxy for `hostname`; returns the deployment id it was served by (null = no header). */
@@ -67,8 +74,9 @@ export class TraefikRouter implements Router {
   }
 
   urlFor(name: string): string {
-    const port = this.options.httpPort === 80 ? "" : `:${this.options.httpPort}`;
-    return `http://${this.hostname(name)}${port}`;
+    const { tls, httpPort } = this.options;
+    if (tls) return `https://${this.hostname(name)}${tls.httpsPort === 443 ? "" : `:${tls.httpsPort}`}`;
+    return `http://${this.hostname(name)}${httpPort === 80 ? "" : `:${httpPort}`}`;
   }
 
   async activate(target: RouteTarget): Promise<void> {
@@ -147,7 +155,8 @@ export class TraefikRouter implements Router {
     const temporary = path.join(this.options.routesDir, `.${ROUTES_FILE}.${process.pid}.tmp`);
     const routes = [...this.routes.values()];
     await fs.mkdir(this.options.routesDir, { recursive: true });
-    await fs.writeFile(temporary, `${JSON.stringify(traefikConfig(routes, this.options.domain), null, 2)}\n`);
+    const config = traefikConfig(routes, this.options.domain, Boolean(this.options.tls));
+    await fs.writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`);
     await fs.rename(temporary, file);
     this.logger.debug({ routes: routes.map((route) => route.name) }, "Route table written");
   }
@@ -161,7 +170,7 @@ export class TraefikRouter implements Router {
 }
 
 /** Traefik dynamic configuration for a set of routes. Pure, so it can be tested on its own. */
-export function traefikConfig(routes: readonly RouteTarget[], domain: string): TraefikDynamicConfig {
+export function traefikConfig(routes: readonly RouteTarget[], domain: string, tls = false): TraefikDynamicConfig {
   // Traefik ignores a configuration whose sections are all empty (the last routes would
   // stay live), but applies a file without sections.
   if (routes.length === 0) return {};
@@ -172,11 +181,14 @@ export function traefikConfig(routes: readonly RouteTarget[], domain: string): T
 
   for (const route of [...routes].sort((a, b) => a.name.localeCompare(b.name))) {
     const id = `shipyard-${route.name}`;
+    const hostnames = [`${route.name}.${domain}`, ...(route.aliases ?? [])];
     routers[id] = {
-      rule: `Host(\`${route.name}.${domain}\`)`,
-      entryPoints: [ENTRY_POINT],
+      rule: hostnames.map((hostname) => `Host(\`${hostname}\`)`).join(" || "),
+      entryPoints: [tls ? TLS_ENTRY_POINT : ENTRY_POINT],
       service: id,
       middlewares: [id],
+      // One certificate per hostname, requested from Let's Encrypt on first use.
+      ...(tls && { tls: { certResolver: CERT_RESOLVER } }),
     };
     services[id] = { loadBalancer: { servers: [{ url: `http://${route.containerName}:${route.containerPort}` }] } };
     middlewares[id] = { headers: { customResponseHeaders: { [DEPLOYMENT_HEADER]: route.deploymentId } } };
@@ -196,11 +208,22 @@ export interface TraefikDynamicConfig {
  * Probes Traefik on this host, as a visitor of `hostname` would reach it.
  * node:http rather than fetch(): fetch does not let callers set the Host header.
  */
-export function createTraefikProbe(httpPort: number, requestTimeoutMs: number): RouteProbe {
+export function createTraefikProbe(port: number, requestTimeoutMs: number, tls = false): RouteProbe {
   return (hostname) =>
     new Promise((resolve, reject) => {
-      const request = http.get(
-        { host: "127.0.0.1", port: httpPort, path: "/", headers: { host: hostname }, agent: false, timeout: requestTimeoutMs },
+      const get = tls ? https.get : http.get;
+      const request = get(
+        {
+          host: "127.0.0.1",
+          port,
+          path: "/",
+          headers: { host: hostname },
+          agent: false,
+          timeout: requestTimeoutMs,
+          // Over TLS: present the right name (SNI). The certificate itself isn't checked: this is a loopback
+          // probe for the routing header, and a new hostname's certificate may still be being issued.
+          ...(tls && { servername: hostname, rejectUnauthorized: false }),
+        },
         (response) => {
           const servedBy = response.headers[DEPLOYMENT_HEADER.toLowerCase()];
           response.destroy(); // only the headers matter; don't wait for (or keep) the body
@@ -216,6 +239,7 @@ export function createTraefikProbe(httpPort: number, requestTimeoutMs: number): 
 function assertRoutable(target: RouteTarget): void {
   const valid =
     DNS_LABEL.test(target.name) &&
+    (target.aliases ?? []).every(isValidHostname) &&
     DEPLOYMENT_ID.test(target.deploymentId) &&
     DNS_LABEL.test(target.containerName) && // Traefik resolves it through Docker's DNS
     Number.isInteger(target.containerPort) &&

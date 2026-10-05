@@ -129,7 +129,7 @@ describe("deployment engine against real Docker", () => {
     await docker.stopContainer(record.containerId!);
     await following;
 
-    const restarted = await service.restart(record.containerName, "hello-node");
+    const restarted = await service.restart(record.containerName, { name: "hello-node" });
     expect(restarted.status).toBe(S.RUNNING);
     expect(restarted.deploymentUrl).toMatch(/^http:\/\/localhost:\d+$/);
 
@@ -215,7 +215,7 @@ describe("deployment engine against real Docker", () => {
     expect(info.Config.Labels).toMatchObject({ "shipyard.health-path": "/healthz", "shipyard.health-port": "9000" });
 
     // Restart reads the settings back from the container's labels.
-    expect((await service.restart(record.containerName, "health-port-app")).status).toBe(S.RUNNING);
+    expect((await service.restart(record.containerName, { name: "health-port-app" })).status).toBe(S.RUNNING);
     await service.stop(record.containerName);
   });
 

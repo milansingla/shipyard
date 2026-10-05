@@ -228,7 +228,7 @@ describe("Traefik routing against real Docker", () => {
 
   it("rolls back by restarting the previous deployment, again without downtime", async () => {
     const traffic = keepVisiting();
-    const restarted = await engine(HELLO_APP).restart(first.containerName, ROUTE);
+    const restarted = await engine(HELLO_APP).restart(first.containerName, { name: ROUTE });
     await router.deactivate(ROUTE, second.id);
     await docker.stopContainer(second.containerId!);
     const visits = await traffic.stop();

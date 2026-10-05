@@ -15,6 +15,7 @@ import { sessionCookieName } from "../../src/middleware/authenticate.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
 import { BuildLogStore } from "../../src/modules/deployments/BuildLogStore.js";
 import { DeploymentService, type EngineLike } from "../../src/modules/deployments/DeploymentService.js";
+import { DomainService } from "../../src/modules/domains/DomainService.js";
 import { EnvironmentService } from "../../src/modules/environment/EnvironmentService.js";
 import { ProjectService } from "../../src/modules/projects/ProjectService.js";
 import { signGitHubPayload } from "../../src/modules/webhooks/signature.js";
@@ -109,6 +110,8 @@ let holdRuns: Promise<void> | null = null;
 
 /** The route table as the router would have it: hostname label → deployment id. */
 const liveRoutes = new Map<string, string>();
+/** Custom hostnames per route, as last activated. */
+const liveAliases = new Map<string, readonly string[]>();
 
 /** Behaves like TraefikRouter, minus Traefik: switching is instant. */
 const fakeRouter: Router = {
@@ -116,14 +119,18 @@ const fakeRouter: Router = {
   urlFor: (name) => `http://${name}.localhost`,
   async activate(target) {
     liveRoutes.set(target.name, target.deploymentId);
+    liveAliases.set(target.name, target.aliases ?? []);
   },
   async deactivate(name, deploymentId) {
     if (liveRoutes.get(name) === deploymentId) liveRoutes.delete(name);
   },
   async sync(targets) {
     liveRoutes.clear();
-  removedContainers.clear();
-    for (const target of targets) liveRoutes.set(target.name, target.deploymentId);
+    liveAliases.clear();
+    for (const target of targets) {
+      liveRoutes.set(target.name, target.deploymentId);
+      liveAliases.set(target.name, target.aliases ?? []);
+    }
   },
 };
 
@@ -168,11 +175,11 @@ const fakeEngine: EngineLike = {
   async stop() {
     return { containerName: "x", status: S.STOPPED, hostPort: null, deploymentUrl: null };
   },
-  async restart(containerId, routeName, onStage = async () => {}) {
+  async restart(containerId, route, onStage = async () => {}) {
     for (const stage of [S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING]) await onStage(stage);
     const deploymentId = containerId.replace(/^container-/, "");
-    await fakeRouter.activate({ name: routeName, deploymentId, containerName: "x", containerPort: 3000 });
-    return { containerName: "x", status: S.RUNNING, hostPort: 49_998, deploymentUrl: fakeRouter.urlFor(routeName, 49_998) };
+    await fakeRouter.activate({ name: route.name, aliases: route.aliases, deploymentId, containerName: "x", containerPort: 3000 });
+    return { containerName: "x", status: S.RUNNING, hostPort: 49_998, deploymentUrl: fakeRouter.urlFor(route.name, 49_998) };
   },
   async getLogs() {
     return [{ stream: "stdout" as const, text: "hello\n" }];
@@ -258,6 +265,7 @@ beforeAll(async () => {
       projects,
       deployments,
       environment,
+      domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, logger: silentLogger }),
       auth: { service: auth, github, sessionCookie: SESSION_COOKIE, secureCookies: false, appUrl: APP_URL },
       webhooks: {
         service: new WebhookService({ prisma, deployments, logger: silentLogger }),
@@ -274,6 +282,8 @@ beforeEach(async () => {
   holdRuns = null;
   await deployments.waitForIdle();
   liveRoutes.clear();
+  liveAliases.clear();
+  removedContainers.clear();
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
 });
@@ -1103,3 +1113,68 @@ describe("live logs (Server-Sent Events)", () => {
     expect((await readEvents(alice, `/api/deployments/${id}/logs/stream?type=runtime`, (e) => e.length > 0)).status).toBe(200);
   });
 });
+
+describe("custom domains", () => {
+  async function liveProject(cookie: string, repo: string) {
+    const projectId = (await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` })).body!.data.id as string;
+    await call(cookie, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    return projectId;
+  }
+
+  it("routes a custom domain to the live deployment right away, and to every later one", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await liveProject(alice, "shop");
+
+    const added = await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: " Shop.Example.COM. " });
+    expect(added.status).toBe(201);
+    expect(added.body!.data).toMatchObject({ hostname: "shop.example.com", url: "http://shop.example.com" });
+    expect(liveAliases.get("shop")).toEqual(["shop.example.com"]);
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(lastJob?.domains).toEqual(["shop.example.com"]);
+
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}/domains/shop.example.com`)).status).toBe(204);
+    expect(liveAliases.get("shop")).toEqual([]);
+    expect((await call(alice, "GET", `/api/projects/${projectId}/domains`)).body!.data).toEqual([]);
+  });
+
+  it.each([
+    ["localhost", "not a hostname"],
+    ["https://shop.example.com", "not a hostname"],
+    ["*.example.com", "not a hostname"],
+    ["other.localhost", "Shipyard's own"],
+  ])("rejects %s", async (hostname, message) => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await liveProject(alice, "shop-invalid");
+    const res = await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname });
+    expect(res.status).toBe(400);
+    expect(res.body!.error.message).toContain(message);
+  });
+
+  it("gives each hostname to one project, without saying whose; owner-only", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const aliceProject = await liveProject(alice, "taken-a");
+    const bobProject = (await call(bob, "POST", "/api/projects", { repositoryUrl: "https://github.com/bob/taken-b" })).body!.data.id;
+
+    await call(alice, "POST", `/api/projects/${aliceProject}/domains`, { hostname: "taken.example.com" });
+    const conflict = await call(bob, "POST", `/api/projects/${bobProject}/domains`, { hostname: "taken.example.com" });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body!.error).toEqual({ code: "DOMAIN_TAKEN", message: "taken.example.com is already used by a project." });
+
+    expect((await call(bob, "GET", `/api/projects/${aliceProject}/domains`)).status).toBe(404);
+    expect((await call(bob, "DELETE", `/api/projects/${aliceProject}/domains/taken.example.com`)).status).toBe(404);
+  });
+
+  it("rebuilds custom domains into the route table at startup", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await liveProject(alice, "boot");
+    await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: "boot.example.com" });
+    liveAliases.clear();
+    await deployments.reconcileOnStartup();
+    expect(liveAliases.get("boot")).toEqual(["boot.example.com"]);
+  });
+});
+

@@ -7,7 +7,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AppError, ErrorCode } from "../../src/lib/errors.js";
-import { DirectPortRouter, type RouteTarget } from "../../src/services/routing/Router.js";
+import { DirectPortRouter, type RouteTarget, isValidHostname } from "../../src/services/routing/Router.js";
 import {
   ROUTES_FILE,
   type RouteProbe,
@@ -251,3 +251,45 @@ describe("DirectPortRouter", () => {
     await expect(r.activate()).resolves.toBeUndefined();
   });
 });
+
+describe("custom domains and HTTPS", () => {
+  it("routes custom hostnames to the same deployment, over HTTPS with Let's Encrypt when enabled", () => {
+    const config = traefikConfig([{ ...target("shop", "d1"), aliases: ["shop.example.com", "www.shop.example.com"] }], "apps.example.com", true);
+    expect(config.http?.routers["shipyard-shop"]).toEqual({
+      rule: "Host(`shop.apps.example.com`) || Host(`shop.example.com`) || Host(`www.shop.example.com`)",
+      entryPoints: ["websecure"],
+      service: "shipyard-shop",
+      middlewares: ["shipyard-shop"],
+      tls: { certResolver: "letsencrypt" },
+    });
+  });
+
+  it("builds https URLs, omitting port 443", () => {
+    const options = { network: "n", domain: "apps.example.com", httpPort: 80, routesDir, cutoverTimeoutMs: 100, probeIntervalMs: 5 };
+    expect(new TraefikRouter({ ...options, tls: { httpsPort: 443 } }, async () => null, silentLogger).urlFor("shop")).toBe(
+      "https://shop.apps.example.com",
+    );
+    expect(new TraefikRouter({ ...options, tls: { httpsPort: 8443 } }, async () => null, silentLogger).urlFor("shop")).toBe(
+      "https://shop.apps.example.com:8443",
+    );
+  });
+
+  it.each(["app.example.com", "a.b.c.example.org", "xn--bcher-kva.example"])("accepts the hostname %s", (hostname) => {
+    expect(isValidHostname(hostname)).toBe(true);
+  });
+
+  it.each(["localhost", "1.2.3.4", "*.example.com", "App.example.com", "example.com:80", "http://example.com", "a..com", "-a.com", "a.com/x"])(
+    "rejects the hostname %s",
+    (hostname) => {
+      expect(isValidHostname(hostname)).toBe(false);
+    },
+  );
+
+  it("refuses to route an invalid alias", async () => {
+    const r = router(fakeTraefik().probe);
+    await expect(r.activate({ ...target("shop", "d1"), aliases: ["evil`) || Host(`x"] })).rejects.toMatchObject({
+      code: ErrorCode.ROUTING_FAILED,
+    });
+  });
+});
+

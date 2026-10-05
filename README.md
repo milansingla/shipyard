@@ -119,6 +119,7 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `POST /api/projects/:id/deploy`            | new deployment (202)                              |
 | `GET /api/projects/:id/deployments?limit=` | deployment history, newest first                  |
 | `GET /api/projects/:id/env`                | environment variables (secrets: value hidden)     |
+| `GET/POST /api/projects/:id/domains` · `DELETE …/domains/:hostname` | custom domains, live immediately |
 | `PUT /api/projects/:id/env/:key` · `DELETE …` | set (`value`, `secret`, `target`) · remove — applies on next deploy |
 | `GET /api/deployments/:id`                 | one deployment                                    |
 | `GET /api/deployments/:id/events`          | its history: created by whom, every status change, why |

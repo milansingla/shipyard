@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { DomainsPanel } from "@/components/DomainsPanel";
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
 import { ProjectSettings } from "@/components/ProjectSettings";
 import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
@@ -118,6 +119,8 @@ export default function ProjectPage() {
       </div>
 
       <PushDeploySetup branch={p.branch} />
+
+      <DomainsPanel projectId={p.id} />
 
       <EnvironmentPanel projectId={p.id} />
 

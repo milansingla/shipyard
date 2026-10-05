@@ -88,7 +88,7 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(await engine.stop(target), null, 2));
       return;
     case "restart":
-      console.log(JSON.stringify(await engine.restart(target, target), null, 2));
+      console.log(JSON.stringify(await engine.restart(target, { name: target }), null, 2));
       return;
     default:
       throw new ValidationError(`Unknown command "${command}".\n${USAGE}`);

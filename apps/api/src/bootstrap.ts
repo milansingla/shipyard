@@ -9,6 +9,7 @@ import { sessionCookieName } from "./middleware/authenticate.js";
 import { AuthService } from "./modules/auth/AuthService.js";
 import { BuildLogStore } from "./modules/deployments/BuildLogStore.js";
 import { DeploymentService } from "./modules/deployments/DeploymentService.js";
+import { DomainService } from "./modules/domains/DomainService.js";
 import { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { ProjectService } from "./modules/projects/ProjectService.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
@@ -34,6 +35,7 @@ export interface ApiServices extends EngineServices {
   deployments: DeploymentService;
   /** null without SHIPYARD_SECRET_KEY (values are always stored encrypted). */
   environment: EnvironmentService | null;
+  domains: DomainService;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -73,11 +75,19 @@ export function createEngineServices(
 /** Traefik when SHIPYARD_PUBLIC_DOMAIN is set; otherwise each deployment is reached on its own port. */
 function createRouter(config: AppConfig, logger: Logger): Router {
   if (!config.routing) return new DirectPortRouter();
-  const { domain, httpPort, routesDir } = config.routing;
+  const { domain, httpPort, routesDir, tls } = config.routing;
   return new TraefikRouter(
     // Traefik applies at most one configuration change every ~2s; 15s leaves room for a busy host.
-    { network: EDGE_NETWORK, domain, httpPort, routesDir, cutoverTimeoutMs: 15_000, probeIntervalMs: 250 },
-    createTraefikProbe(httpPort, 3_000),
+    {
+      network: EDGE_NETWORK,
+      domain,
+      httpPort,
+      routesDir,
+      cutoverTimeoutMs: 15_000,
+      probeIntervalMs: 250,
+      tls: tls && { httpsPort: tls.httpsPort },
+    },
+    createTraefikProbe(tls ? tls.httpsPort : httpPort, 3_000, Boolean(tls)),
     logger.child({ component: "router" }),
   );
 }
@@ -115,8 +125,16 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
       }
     : null;
 
+  const domains = new DomainService({
+    prisma,
+    deployments,
+    publicDomain: config.routing?.domain ?? null,
+    https: Boolean(config.routing?.tls),
+    logger: logger.child({ component: "domains" }),
+  });
+
   const auth = createAuth(config, prisma, secretBox, logger);
-  return { ...engineServices, prisma, projects, deployments, environment, auth, webhooks };
+  return { ...engineServices, prisma, projects, deployments, environment, domains, auth, webhooks };
 }
 
 function createAuth(config: AppConfig, prisma: PrismaClient, secretBox: SecretBox | null, logger: Logger): AppAuth | null {

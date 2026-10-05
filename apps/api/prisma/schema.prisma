@@ -104,6 +104,7 @@ model Project {
   updatedAt       DateTime     @updatedAt
   deployments     Deployment[]
   environmentVariables EnvironmentVariable[]
+  domains         ProjectDomain[]
 
   @@index([ownerId, createdAt(sort: Desc)])
   @@map("projects")
@@ -117,6 +118,20 @@ enum RestartPolicy {
   ON_FAILURE
   /// Always restart, also after a reboot, until Shipyard stops it.
   UNLESS_STOPPED
+}
+
+/// A custom hostname routed to the project's live deployment, next to its
+/// generated <slug>.<SHIPYARD_PUBLIC_DOMAIN> address.
+model ProjectDomain {
+  id        String   @id @default(uuid()) @db.Uuid
+  projectId String   @db.Uuid
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// Lower-case. Unique across all projects: one hostname, one app.
+  hostname  String   @unique
+  createdAt DateTime @default(now())
+
+  @@index([projectId])
+  @@map("project_domains")
 }
 
 /// When a variable is available: to the running app, to `docker build`, or both.

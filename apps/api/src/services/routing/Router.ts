@@ -6,6 +6,16 @@ export interface RouteTarget {
   /** Reached by name on the proxy's Docker network. */
   containerName: string;
   containerPort: number;
+  /** Custom hostnames (e.g. app.example.com) routed to the same deployment. */
+  aliases?: readonly string[];
+}
+
+/** A DNS hostname with at least two labels, lower-case: "app.example.com". No IPs, ports or wildcards. */
+export function isValidHostname(value: string): boolean {
+  return (
+    value.length <= 253 &&
+    /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value)
+  );
 }
 
 /**

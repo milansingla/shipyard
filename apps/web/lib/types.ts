@@ -104,6 +104,12 @@ export interface DeploymentEvent {
   createdAt: string;
 }
 
+export interface ProjectDomain {
+  hostname: string;
+  url: string;
+  createdAt: string;
+}
+
 export interface DeploymentLogs {
   type: "build" | "runtime";
   content: string;

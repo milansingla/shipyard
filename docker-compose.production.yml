@@ -1,0 +1,36 @@
+# Serve apps to the internet over HTTPS (Let's Encrypt), on top of docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --wait
+#
+# Needs in .env:
+#   SHIPYARD_PUBLIC_DOMAIN=apps.example.com   with DNS: *.apps.example.com → this server
+#   SHIPYARD_ACME_EMAIL=you@example.com       Let's Encrypt's contact for expiry notices
+# Custom domains: point each one's DNS at this server. Ports 80 and 443 must be
+# reachable from the internet (Let's Encrypt verifies over port 80).
+services:
+  traefik:
+    command:
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.aliasHeadersStrategy=delete
+      # Everything on plain HTTP is redirected to HTTPS (ACME challenges are answered first).
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.aliasHeadersStrategy=delete
+      - --certificatesresolvers.letsencrypt.acme.email=${SHIPYARD_ACME_EMAIL:?set SHIPYARD_ACME_EMAIL in .env}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --log.level=WARN
+      - --global.checkNewVersion=false
+      - --global.sendAnonymousUsage=false
+    # Public, not loopback: this is the point of production mode.
+    ports: !override
+      - "${SHIPYARD_HTTP_PORT:-80}:80"
+      - "${SHIPYARD_HTTPS_PORT:-443}:443"
+    volumes:
+      # Issued certificates survive restarts (and Let's Encrypt's rate limits are respected).
+      - shipyard-letsencrypt:/letsencrypt
+
+volumes:
+  shipyard-letsencrypt:

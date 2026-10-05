@@ -31,7 +31,7 @@ export interface DeploymentServiceDeps {
   /** Decrypts the project's variables for each deployment; null = no variables (no secret key). */
   environment: Pick<EnvironmentService, "forDeployment"> | null;
   /** The same router the engine uses: stopping takes a deployment out of it, startup rebuilds it. */
-  router: Pick<Router, "urlFor" | "deactivate" | "sync">;
+  router: Pick<Router, "urlFor" | "activate" | "deactivate" | "sync">;
   buildLogs: Pick<BuildLogStore, "open" | "read" | "remove" | "follow">;
   allowedGitHosts: readonly string[];
   logger: Logger;
@@ -268,7 +268,8 @@ export class DeploymentService {
       let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: ownerId, message: "Restart" });
       let result;
       try {
-        result = await this.deps.engine.restart(deployment.containerId, project.slug, async (stage) => {
+        const route = { name: project.slug, aliases: await this.projectDomains(project.id) };
+        result = await this.deps.engine.restart(deployment.containerId, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
       } catch (error) {
@@ -320,7 +321,8 @@ export class DeploymentService {
       });
       let result;
       try {
-        result = await this.deps.engine.restart(target.containerId!, project.slug, async (stage) => {
+        const route = { name: project.slug, aliases: await this.projectDomains(project.id) };
+        result = await this.deps.engine.restart(target.containerId!, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
       } catch (error) {
@@ -454,6 +456,7 @@ export class DeploymentService {
         branch: deployment.branch,
         name: project.slug,
         labels: { [ShipyardLabel.PROJECT_ID]: project.id },
+        domains: await this.projectDomains(project.id),
         resources: {
           cpuLimit: project.cpuLimit,
           memoryLimitMb: project.memoryLimitMb,
@@ -676,7 +679,7 @@ export class DeploymentService {
   private async syncRoutes(): Promise<void> {
     const running = await this.deps.prisma.deployment.findMany({
       where: { status: DeploymentStatus.RUNNING },
-      include: { project: { select: { slug: true } } },
+      include: { project: { select: { slug: true, domains: { select: { hostname: true }, orderBy: { hostname: "asc" } } } } },
       orderBy: { finishedAt: "asc" },
     });
     const targets = new Map<string, RouteTarget>();
@@ -684,12 +687,43 @@ export class DeploymentService {
       if (!deployment.containerName || deployment.containerPort === null) continue;
       targets.set(deployment.project.slug, {
         name: deployment.project.slug,
+        aliases: deployment.project.domains.map((domain) => domain.hostname),
         deploymentId: deployment.id,
         containerName: deployment.containerName,
         containerPort: deployment.containerPort,
       });
     }
     await this.deps.router.sync([...targets.values()]);
+  }
+
+  /**
+   * Re-applies the project's route to its live deployment, e.g. after its
+   * custom domains changed. No live deployment: nothing to do (the next
+   * deploy picks the domains up).
+   */
+  async refreshRoute(projectId: string): Promise<void> {
+    const live = await this.deps.prisma.deployment.findFirst({
+      where: { projectId, status: DeploymentStatus.RUNNING },
+      include: { project: { select: { slug: true } } },
+      orderBy: { finishedAt: "desc" },
+    });
+    if (!live?.containerName || live.containerPort === null) return;
+    await this.deps.router.activate({
+      name: live.project.slug,
+      aliases: await this.projectDomains(projectId),
+      deploymentId: live.id,
+      containerName: live.containerName,
+      containerPort: live.containerPort,
+    });
+  }
+
+  private async projectDomains(projectId: string): Promise<string[]> {
+    const domains = await this.deps.prisma.projectDomain.findMany({
+      where: { projectId },
+      select: { hostname: true },
+      orderBy: { hostname: "asc" },
+    });
+    return domains.map((domain) => domain.hostname);
   }
 
   /** Takes the deployment out of the router, if the route still points at it. */

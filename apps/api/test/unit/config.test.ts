@@ -112,6 +112,7 @@ describe("parseConfig: Traefik routing", () => {
       domain: "apps.example.com",
       httpPort: 80,
       routesDir: path.join("/srv/shipyard", "traefik"),
+      tls: null,
     });
     expect(parseConfig({ SHIPYARD_PUBLIC_DOMAIN: "localhost", SHIPYARD_HTTP_PORT: "8000" }).routing?.httpPort).toBe(8000);
   });
@@ -129,3 +130,18 @@ describe("parseConfig: Traefik routing", () => {
     );
   });
 });
+
+describe("parseConfig: HTTPS", () => {
+  it("enables Let's Encrypt with SHIPYARD_ACME_EMAIL, on port 443 by default", () => {
+    expect(parseConfig({ SHIPYARD_PUBLIC_DOMAIN: "apps.example.com", SHIPYARD_ACME_EMAIL: "ops@example.com" }).routing?.tls).toEqual({
+      email: "ops@example.com",
+      httpsPort: 443,
+    });
+  });
+
+  it("needs routing, and a real email", () => {
+    expect(() => parseConfig({ SHIPYARD_ACME_EMAIL: "ops@example.com" })).toThrow("SHIPYARD_PUBLIC_DOMAIN");
+    expect(() => parseConfig({ SHIPYARD_PUBLIC_DOMAIN: "x.com", SHIPYARD_ACME_EMAIL: "nope" })).toThrow("SHIPYARD_ACME_EMAIL");
+  });
+});
+

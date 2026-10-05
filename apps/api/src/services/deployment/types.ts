@@ -14,6 +14,8 @@ export interface DeploymentJob {
   labels?: Record<string, string>;
   /** How to decide the app is healthy. Default: "/" on the app's port, server-default timeout. */
   healthCheck?: HealthCheckSettings;
+  /** Custom hostnames routed to this deployment besides its generated one. */
+  domains?: readonly string[];
   /** CPU/memory limits and restart policy. Default: none, never restarted. */
   resources?: ContainerResources;
   /** Decrypted variables: `runtime` goes into the container, `build` becomes build args. */

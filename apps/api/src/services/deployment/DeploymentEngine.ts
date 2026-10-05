@@ -163,6 +163,7 @@ export class DeploymentEngine {
       await moveTo(DeploymentStatus.ROUTING);
       await this.deps.router.activate({
         name: job.name,
+        aliases: job.domains,
         deploymentId: job.id,
         containerName: state.containerName,
         containerPort: state.containerPort,
@@ -228,13 +229,13 @@ export class DeploymentEngine {
 
   /**
    * Restarts the container, waits until it is healthy again, then points the
-   * route `routeName` at it. Restarting an older deployment is a rollback.
+   * route at it. Restarting an older deployment is a rollback.
    * `onStage` is told when the health check starts, passes, and routing starts,
    * so the caller can record each stage as it happens.
    */
   async restart(
     containerReference: string,
-    routeName: string,
+    route: { name: string; aliases?: readonly string[] },
     onStage: (status: DeploymentStatus) => Promise<void> = async () => {},
   ): Promise<ContainerActionResult> {
     const before = await this.deps.docker.inspectManagedContainer(containerReference);
@@ -258,7 +259,8 @@ export class DeploymentEngine {
     await this.joinRouterNetwork(after);
     await onStage(DeploymentStatus.ROUTING);
     await this.deps.router.activate({
-      name: routeName,
+      name: route.name,
+      aliases: route.aliases,
       deploymentId: after.deploymentId ?? after.id,
       containerName: after.name,
       containerPort: after.containerPort,
@@ -268,7 +270,7 @@ export class DeploymentEngine {
       containerName: after.name,
       status: DeploymentStatus.RUNNING,
       hostPort,
-      deploymentUrl: this.deps.router.urlFor(routeName, hostPort),
+      deploymentUrl: this.deps.router.urlFor(route.name, hostPort),
     };
   }
 

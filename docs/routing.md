@@ -120,6 +120,46 @@ would not be enough: Traefik's reload delay varies.
   container being restarted. Redeploy instead to replace it without a gap.
 - **Delete project**: its route is removed with its containers.
 
+## Custom domains
+
+Project page → **Domains**, or `POST /api/projects/:id/domains {"hostname": "app.example.com"}`.
+
+- The hostname is added to the project's router rule
+  (``Host(`shop.localhost`) || Host(`app.example.com`)``) and goes live on the
+  running deployment within seconds. No redeploy is needed, since routing
+  isn't part of the container. Every later deployment, restart, rollback and
+  startup sync carries it.
+- One hostname belongs to one project (409 `DOMAIN_TAKEN`, without saying
+  whose). Addresses under `SHIPYARD_PUBLIC_DOMAIN` can't be claimed: they're
+  the generated ones. Validation: lower-cased DNS names with at least two
+  labels; no IPs, ports, schemes or wildcards; at most 20 per project.
+- **DNS is yours to set**: point an A/AAAA (or CNAME) record at this server.
+  Locally, try it with `curl -H 'Host: app.example.com' http://127.0.0.1/`.
+
+## HTTPS in production (Let's Encrypt)
+
+```bash
+# .env
+SHIPYARD_PUBLIC_DOMAIN=apps.example.com   # DNS: *.apps.example.com → this server
+SHIPYARD_ACME_EMAIL=you@example.com
+
+docker compose -f docker-compose.yml -f docker-compose.production.yml up -d --wait
+```
+
+[`docker-compose.production.yml`](../docker-compose.production.yml) publishes
+ports 80 and 443 on all interfaces, redirects HTTP to HTTPS, and defines a
+Let's Encrypt resolver using the HTTP-01 challenge. Certificates are kept in a
+named volume. With `SHIPYARD_ACME_EMAIL` set, Shipyard writes every router on
+the `websecure` entry point with `tls.certResolver: letsencrypt`: each
+generated and custom hostname gets its own certificate on first use. URLs
+become `https://…`, and the cutover probe talks HTTPS to Traefik (SNI set,
+certificate not verified: it is a loopback check of the routing header, and a
+fresh hostname's certificate may still be being issued).
+
+This path is validated by config generation tests and by starting Traefik
+with these flags; issuing real certificates needs a public server and DNS, so
+it can't run in the local test suite.
+
 ## Why containers still publish a port
 
 Each deployment container still publishes its port on **127.0.0.1** (never
@@ -157,8 +197,9 @@ curl -v http://127.0.0.1:<hostPort>/               # 6. Does the app itself answ
 - **Only Shipyard writes routes**, and every value in them is validated: slugs
   and container names must be DNS labels, ports in range, deployment ids
   `[A-Za-z0-9-]`. Repository content never reaches the file.
-- **Loopback only**: Traefik listens on `127.0.0.1`. Serving apps to a network
-  needs HTTPS first (V3: Let's Encrypt, custom domains).
+- **Loopback by default**: in development Traefik listens on `127.0.0.1`.
+  Only the production override opens 80/443 to the network, and then with
+  HTTPS and an HTTP→HTTPS redirect.
 - **Alias headers are dropped** (`aliasHeadersStrategy=delete`): a client can't
   send `X_Forwarded_For` to impersonate a header Traefik sets, for backends
   that treat `_` like `-`.
@@ -171,7 +212,11 @@ curl -v http://127.0.0.1:<hostPort>/               # 6. Does the app itself answ
 
 ## Limits
 
-- HTTP only, loopback only: HTTPS and real domains are V3.
+- HTTPS needs a publicly reachable server (HTTP-01 challenge); wildcard
+  certificates (DNS-01) are not set up.
+- Custom domains aren't verified as yours: on a server only trusted people
+  can sign in to, unique ownership per hostname is the guard. A domain does
+  nothing until its DNS points here.
 - One container per project; no load balancing across replicas.
 - Request-level zero downtime depends on the app finishing in-flight requests
   on SIGTERM within 10s, which most HTTP servers do (see `examples/hello-node`).
