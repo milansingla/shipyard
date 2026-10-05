@@ -13,6 +13,7 @@ import type { PrismaClient } from "../../src/db/prisma.js";
 import { NotFoundError } from "../../src/lib/errors.js";
 import { SecretBox } from "../../src/lib/secretBox.js";
 import { sessionCookieName } from "../../src/middleware/authenticate.js";
+import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
 import { BuildLogStore } from "../../src/modules/deployments/BuildLogStore.js";
@@ -216,6 +217,7 @@ let api: string;
 let dataDir: string;
 let deployments: DeploymentService;
 let environment: EnvironmentService;
+let audit: AuditService;
 
 beforeAll(async () => {
   prisma = createTestPrisma();
@@ -245,9 +247,11 @@ beforeAll(async () => {
     logger: silentLogger,
   });
   const secretBox = new SecretBox(Buffer.alloc(32, 5));
-  environment = new EnvironmentService({ prisma, secretBox, logger: silentLogger });
+  audit = new AuditService({ prisma, logger: silentLogger });
+  environment = new EnvironmentService({ prisma, secretBox, audit, logger: silentLogger });
   deployments = new DeploymentService({
     prisma,
+    audit,
     engine: fakeEngine,
     environment,
     router: fakeRouter,
@@ -257,6 +261,7 @@ beforeAll(async () => {
   });
   const projects = new ProjectService({
     prisma,
+    audit,
     git: { resolveBranch: async (_repo, branch) => branch ?? "main" },
     deployments,
     allowedGitHosts: ["github.com"],
@@ -270,14 +275,15 @@ beforeAll(async () => {
       projects,
       deployments,
       environment,
-      domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, logger: silentLogger }),
+      audit,
+      domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, audit, logger: silentLogger }),
       auth: {
         service: auth,
         github,
         sessionCookie: SESSION_COOKIE,
         secureCookies: false,
         appUrl: APP_URL,
-        apiKeys: new ApiKeyService({ prisma, logger: silentLogger }),
+        apiKeys: new ApiKeyService({ prisma, audit, logger: silentLogger }),
       },
       webhooks: {
         service: new WebhookService({ prisma, deployments, logger: silentLogger }),
@@ -299,6 +305,7 @@ beforeEach(async () => {
   removedContainers.clear();
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
+  await prisma.auditLog.deleteMany();
 });
 
 afterAll(async () => {
@@ -1276,9 +1283,48 @@ describe("API keys", () => {
   it("is refused for users removed from the allowlist", async () => {
     // A key whose owner is no longer on the allowlist (here: a login that never was).
     const user = await prisma.user.create({ data: { githubId: 9_999n, login: "removed", githubAccessToken: "v1:x" } });
-    const service = new ApiKeyService({ prisma, logger: silentLogger });
+    const service = new ApiKeyService({ prisma, audit, logger: silentLogger });
     const { token } = await service.create(user.id, { name: "old" });
     expect((await bearer(token, "GET", "/api/projects")).status).toBe(401);
+  });
+});
+
+describe("audit log", () => {
+  it("records who did what, without secret values, and keeps it after the project is deleted", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/audited" })).body!.data.id;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/DB_PASSWORD`, { value: "hunter2", secret: true });
+    await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: "audited.example.com" });
+    await call(alice, "PATCH", `/api/projects/${projectId}`, { memoryLimitMb: 256 });
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    await call(alice, "DELETE", `/api/projects/${projectId}/env/DB_PASSWORD`);
+    await call(alice, "POST", "/api/api-keys", { name: "audit-test" });
+
+    const log = (await call(alice, "GET", "/api/audit-logs")).body!.data as Array<Record<string, any>>;
+    expect(log.map((e) => e.action).reverse()).toEqual([
+      "PROJECT_CREATED",
+      "ENV_VAR_SET",
+      "DOMAIN_ADDED",
+      "PROJECT_SETTINGS_CHANGED",
+      "DEPLOYMENT_STARTED",
+      "DEPLOYMENT_SUCCEEDED",
+      "ENV_VAR_DELETED",
+      "API_KEY_CREATED",
+    ]);
+    expect(JSON.stringify(log)).not.toContain("hunter2");
+    expect(log.find((e) => e.action === "ENV_VAR_SET")).toMatchObject({ actor: "alice", metadata: { key: "DB_PASSWORD", secret: true } });
+    expect(log.find((e) => e.action === "DEPLOYMENT_SUCCEEDED")).toMatchObject({ actor: null, projectName: "audited" });
+
+    // Bob sees none of it.
+    expect((await call(bob, "GET", "/api/audit-logs")).body!.data).toEqual([]);
+
+    // Deleting the project is recorded, and the trail survives it.
+    await call(alice, "DELETE", `/api/projects/${projectId}`);
+    const after = (await call(alice, "GET", "/api/audit-logs")).body!.data as Array<Record<string, any>>;
+    expect(after[0]).toMatchObject({ action: "PROJECT_DELETED", actor: "alice", projectName: "audited" });
+    expect(after).toHaveLength(9);
   });
 });
 

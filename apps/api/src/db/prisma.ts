@@ -4,7 +4,7 @@ import { Prisma, PrismaClient } from "../generated/prisma/client.js";
 
 export { Prisma, PrismaClient };
 export type { Deployment, EnvironmentVariable, Project, User } from "../generated/prisma/client.js";
-export { DeploymentEventType, DeploymentTrigger } from "../generated/prisma/enums.js";
+export { AuditAction, DeploymentEventType, DeploymentTrigger } from "../generated/prisma/enums.js";
 
 /**
  * Prisma 7 talks to Postgres through a driver adapter (node-postgres here)

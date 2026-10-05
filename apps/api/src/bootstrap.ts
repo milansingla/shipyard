@@ -6,6 +6,7 @@ import type { Logger } from "./lib/logger.js";
 import type { AppAuth } from "./app.js";
 import { SecretBox } from "./lib/secretBox.js";
 import { sessionCookieName } from "./middleware/authenticate.js";
+import { AuditService } from "./modules/audit/AuditService.js";
 import { ApiKeyService } from "./modules/auth/ApiKeyService.js";
 import { AuthService } from "./modules/auth/AuthService.js";
 import { BuildLogStore } from "./modules/deployments/BuildLogStore.js";
@@ -37,6 +38,7 @@ export interface ApiServices extends EngineServices {
   /** null without SHIPYARD_SECRET_KEY (values are always stored encrypted). */
   environment: EnvironmentService | null;
   domains: DomainService;
+  audit: AuditService;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -97,13 +99,15 @@ function createRouter(config: AppConfig, logger: Logger): Router {
 export function createApiServices(config: AppConfig, databaseUrl: string, logger: Logger): ApiServices {
   const engineServices = createEngineServices(config, logger);
   const prisma = createPrismaClient(databaseUrl);
+  const audit = new AuditService({ prisma, logger: logger.child({ component: "audit" }) });
   const secretBox = config.auth.secretKey ? new SecretBox(config.auth.secretKey) : null;
   const environment = secretBox
-    ? new EnvironmentService({ prisma, secretBox, logger: logger.child({ component: "environment" }) })
+    ? new EnvironmentService({ prisma, secretBox, audit, logger: logger.child({ component: "environment" }) })
     : null;
 
   const deployments = new DeploymentService({
     prisma,
+    audit,
     engine: engineServices.engine,
     environment,
     router: engineServices.router,
@@ -113,6 +117,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
   });
   const projects = new ProjectService({
     prisma,
+    audit,
     git: engineServices.git,
     deployments,
     allowedGitHosts: config.allowedGitHosts,
@@ -131,14 +136,21 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     deployments,
     publicDomain: config.routing?.domain ?? null,
     https: Boolean(config.routing?.tls),
+    audit,
     logger: logger.child({ component: "domains" }),
   });
 
-  const auth = createAuth(config, prisma, secretBox, logger);
-  return { ...engineServices, prisma, projects, deployments, environment, domains, auth, webhooks };
+  const auth = createAuth(config, prisma, secretBox, audit, logger);
+  return { ...engineServices, prisma, projects, deployments, environment, domains, audit, auth, webhooks };
 }
 
-function createAuth(config: AppConfig, prisma: PrismaClient, secretBox: SecretBox | null, logger: Logger): AppAuth | null {
+function createAuth(
+  config: AppConfig,
+  prisma: PrismaClient,
+  secretBox: SecretBox | null,
+  audit: AuditService,
+  logger: Logger,
+): AppAuth | null {
   const { github: githubConfig } = config.auth;
   if (!githubConfig || !secretBox) return null; // config validation guarantees both or neither
 
@@ -158,6 +170,6 @@ function createAuth(config: AppConfig, prisma: PrismaClient, secretBox: SecretBo
     sessionCookie: sessionCookieName(config.auth.secureCookies),
     secureCookies: config.auth.secureCookies,
     appUrl: config.appUrl,
-    apiKeys: new ApiKeyService({ prisma, logger: logger.child({ component: "api-keys" }) }),
+    apiKeys: new ApiKeyService({ prisma, audit, logger: logger.child({ component: "api-keys" }) }),
   };
 }

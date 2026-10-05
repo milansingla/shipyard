@@ -23,6 +23,7 @@ const app = createApp({
   deployments: services.deployments,
   environment: services.environment,
   domains: services.domains,
+  audit: services.audit,
   auth: services.auth,
   webhooks: services.webhooks,
   allowedOrigins: [config.publicUrl, config.appUrl],

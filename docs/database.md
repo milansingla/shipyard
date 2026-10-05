@@ -106,6 +106,22 @@ Append-only history per deployment: `type` (`CREATED` | `STATUS_CHANGED`),
 user is deleted), `message`. Written in the same transaction as the change it
 records. Integer id = exact order.
 
+### AuditLog (`audit_logs`)
+
+Append-only trail: `action`, `actorId` (null = Shipyard itself), `projectId`
++ `projectName` copied (no foreign key, so entries outlive the project),
+`ownerId` (who may see it, also after deletion), `metadata` (ids and names,
+never secret values). Recorded: project created / settings changed /
+deleted, deployment started / succeeded / failed, rollback, environment
+variable set / deleted, domain added / removed, API key created / revoked.
+Writes are best-effort (a failed audit write is logged as an error and
+doesn't undo the action); tamper-evidence and retention policies are V6.
+
+### ApiKey (`api_keys`)
+
+`hash` = sha256(token) (unique), `prefix` for display, optional `expiresAt`,
+`revokedAt`, `lastUsedAt` (updated at most once a minute).
+
 ## Known limits
 
 - The route table Traefik reads (`<SHIPYARD_DATA_DIR>/traefik/routes.yml`) is

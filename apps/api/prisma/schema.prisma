@@ -55,6 +55,7 @@ model User {
   sessions          Session[]
   deploymentEvents  DeploymentEvent[]
   apiKeys           ApiKey[]
+  auditLogs         AuditLog[]
 
   @@map("users")
 }
@@ -129,6 +130,45 @@ model ApiKey {
 
   @@index([userId])
   @@map("api_keys")
+}
+
+enum AuditAction {
+  PROJECT_CREATED
+  PROJECT_SETTINGS_CHANGED
+  PROJECT_DELETED
+  DEPLOYMENT_STARTED
+  DEPLOYMENT_SUCCEEDED
+  DEPLOYMENT_FAILED
+  ROLLBACK
+  ENV_VAR_SET
+  ENV_VAR_DELETED
+  DOMAIN_ADDED
+  DOMAIN_REMOVED
+  API_KEY_CREATED
+  API_KEY_REVOKED
+}
+
+/// Who did what, append-only. Kept when the project is deleted (no foreign
+/// key to it): the name is copied so the trail stays readable.
+model AuditLog {
+  id          Int         @id @default(autoincrement())
+  action      AuditAction
+  /// null = Shipyard itself (a push, a background deploy finishing).
+  actorId     String?     @db.Uuid
+  actor       User?       @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  projectId   String?     @db.Uuid
+  projectName String?
+  /// Who the entry belongs to: the project's owner at the time (or the actor
+  /// for account-level actions). Decides visibility, also after deletion.
+  ownerId     String?     @db.Uuid
+  /// Details, never secret values: deployment id, variable name, hostname…
+  metadata    Json        @default("{}")
+  createdAt   DateTime    @default(now())
+
+  @@index([projectId, id])
+  @@index([ownerId, id])
+  @@index([actorId, id])
+  @@map("audit_logs")
 }
 
 /// What Docker does when a running app's process exits.

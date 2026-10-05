@@ -121,6 +121,17 @@ export interface ApiKey {
   revokedAt: string | null;
 }
 
+export interface AuditEntry {
+  id: number;
+  action: string;
+  /** Login of who did it; null = Shipyard itself. */
+  actor: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  metadata: Record<string, string | number | boolean | null>;
+  createdAt: string;
+}
+
 export interface DeploymentLogs {
   type: "build" | "runtime";
   content: string;

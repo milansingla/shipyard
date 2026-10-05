@@ -17,6 +17,7 @@ import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
+import type { AuditService } from "../audit/AuditService.js";
 import type { EnvironmentService } from "../environment/EnvironmentService.js";
 import type { BuildLogStore, BuildLogWriter } from "./BuildLogStore.js";
 
@@ -34,6 +35,7 @@ export interface DeploymentServiceDeps {
   router: Pick<Router, "urlFor" | "activate" | "deactivate" | "sync">;
   buildLogs: Pick<BuildLogStore, "open" | "read" | "remove" | "follow">;
   allowedGitHosts: readonly string[];
+  audit: Pick<AuditService, "record">;
   logger: Logger;
 }
 
@@ -222,6 +224,12 @@ export class DeploymentService {
       throw error;
     }
 
+    await this.deps.audit.record({
+      action: "DEPLOYMENT_STARTED",
+      actorId: trigger === DeploymentTrigger.MANUAL ? ownerId : null,
+      project,
+      metadata: { deploymentId: deployment.id, trigger, branch: project.branch },
+    });
     this.track(this.execute(project, deployment).finally(() => this.unlockProject(projectId)));
     return deployment;
   }
@@ -356,6 +364,12 @@ export class DeploymentService {
         ],
       });
       this.deps.logger.info({ projectId: project.id, from: source.id, to: target.id }, "Rolled back");
+      await this.deps.audit.record({
+        action: "ROLLBACK",
+        actorId: ownerId,
+        project,
+        metadata: { fromDeploymentId: source.id, toDeploymentId: target.id },
+      });
       return running;
     } finally {
       this.unlockProject(project.id);
@@ -490,6 +504,18 @@ export class DeploymentService {
       }
     } finally {
       await writer?.close().catch((closeError: unknown) => logger.warn({ err: closeError }, "Could not close build log"));
+      const outcome = await this.deps.prisma.deployment.findUnique({ where: { id: deployment.id } });
+      if (outcome) {
+        const succeeded = outcome.status === DeploymentStatus.RUNNING;
+        await this.deps.audit.record({
+          action: succeeded ? "DEPLOYMENT_SUCCEEDED" : "DEPLOYMENT_FAILED",
+          actorId: null,
+          project,
+          metadata: succeeded
+            ? { deploymentId: outcome.id, commitSha: outcome.commitSha }
+            : { deploymentId: outcome.id, failedStage: outcome.failedStage },
+        });
+      }
     }
   }
 

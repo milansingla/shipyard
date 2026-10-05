@@ -5,6 +5,7 @@ import { toDockerSlug } from "../../services/docker/naming.js";
 import { validateBranchName } from "../../services/git/branchName.js";
 import type { GitService } from "../../services/git/GitService.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
+import type { AuditService } from "../audit/AuditService.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
 import type { CreateProjectInput, UpdateProjectInput } from "./project.schemas.js";
 
@@ -17,6 +18,7 @@ export interface ProjectServiceDeps {
   git: Pick<GitService, "resolveBranch">;
   deployments: Pick<DeploymentService, "destroyProjectDeployments">;
   allowedGitHosts: readonly string[];
+  audit: Pick<AuditService, "record">;
   logger: Logger;
 }
 
@@ -54,6 +56,12 @@ export class ProjectService {
         },
       });
       this.deps.logger.info({ projectId: project.id, ownerId, slug, branch }, "Project created");
+      await this.deps.audit.record({
+        action: "PROJECT_CREATED",
+        actorId: ownerId,
+        project,
+        metadata: { repository: `${repository.owner}/${repository.name}`, branch },
+      });
       return project;
     } catch (error) {
       if (isUniqueViolation(error)) {
@@ -90,16 +98,23 @@ export class ProjectService {
   /** Updates settings; they apply to the next deployment. */
   async update(id: string, ownerId: string, input: UpdateProjectInput): Promise<ProjectWithLatestDeployment> {
     await this.get(id, ownerId); // 404 for other users' projects
-    await this.deps.prisma.project.update({ where: { id }, data: input });
+    const project = await this.deps.prisma.project.update({ where: { id }, data: input });
     this.deps.logger.info({ projectId: id, settings: Object.keys(input) }, "Project settings updated");
+    await this.deps.audit.record({
+      action: "PROJECT_SETTINGS_CHANGED",
+      actorId: ownerId,
+      project,
+      metadata: { settings: Object.keys(input).sort().join(",") },
+    });
     return this.get(id, ownerId);
   }
 
   async delete(id: string, ownerId: string): Promise<void> {
-    await this.get(id, ownerId); // 404 (also for other users' projects) before touching anything
+    const project = await this.get(id, ownerId); // 404 (also for other users' projects) before touching anything
     await this.deps.deployments.destroyProjectDeployments(id, async () => {
       await this.deps.prisma.project.delete({ where: { id } }); // cascades to deployments
     });
     this.deps.logger.info({ projectId: id }, "Project deleted");
+    await this.deps.audit.record({ action: "PROJECT_DELETED", actorId: ownerId, project });
   }
 }

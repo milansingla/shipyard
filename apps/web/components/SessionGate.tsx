@@ -136,7 +136,7 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
         <Link href="/" aria-label="Shipyard: all projects" className="text-3xl">
           <Wordmark />
         </Link>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 whitespace-nowrap sm:gap-4">
           <span className="flex items-center gap-2 text-sm">
             {user.avatarUrl && (
               // eslint-disable-next-line @next/next/no-img-element -- remote avatar, no optimisation needed
@@ -144,6 +144,9 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
             )}
             <span className="hidden font-semibold sm:inline">{user.login}</span>
           </span>
+          <Link href="/activity" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
+            Activity
+          </Link>
           <Link href="/account" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
             API keys
           </Link>

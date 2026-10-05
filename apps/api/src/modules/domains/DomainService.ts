@@ -2,6 +2,7 @@ import { type PrismaClient, isUniqueViolation } from "../../db/prisma.js";
 import { AppError, ConflictError, ErrorCode, NotFoundError, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { isValidHostname } from "../../services/routing/Router.js";
+import type { AuditService } from "../audit/AuditService.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
 
 export const MAX_DOMAINS_PER_PROJECT = 20;
@@ -19,6 +20,7 @@ export interface DomainServiceDeps {
   publicDomain: string | null;
   /** Apps are served over HTTPS (Let's Encrypt). */
   https: boolean;
+  audit: Pick<AuditService, "record">;
   logger: Logger;
 }
 
@@ -41,7 +43,7 @@ export class DomainService {
   }
 
   async add(projectId: string, ownerId: string, input: string): Promise<DomainView> {
-    await this.assertOwner(projectId, ownerId);
+    const project = await this.assertOwner(projectId, ownerId);
     const { publicDomain, prisma } = this.deps;
     if (!publicDomain) {
       throw new AppError(
@@ -70,15 +72,22 @@ export class DomainService {
       throw error;
     }
     this.deps.logger.info({ projectId, hostname }, "Custom domain added");
+    await this.deps.audit.record({ action: "DOMAIN_ADDED", actorId: ownerId, project, metadata: { hostname } });
     await this.deps.deployments.refreshRoute(projectId);
     return this.view(domain);
   }
 
   async remove(projectId: string, ownerId: string, input: string): Promise<void> {
-    await this.assertOwner(projectId, ownerId);
+    const project = await this.assertOwner(projectId, ownerId);
     const { count } = await this.deps.prisma.projectDomain.deleteMany({ where: { projectId, hostname: normalize(input) } });
     if (count === 0) throw new NotFoundError(`Domain not found: ${input}`);
     this.deps.logger.info({ projectId, hostname: normalize(input) }, "Custom domain removed");
+    await this.deps.audit.record({
+      action: "DOMAIN_REMOVED",
+      actorId: ownerId,
+      project,
+      metadata: { hostname: normalize(input) },
+    });
     await this.deps.deployments.refreshRoute(projectId);
   }
 
@@ -90,9 +99,13 @@ export class DomainService {
     };
   }
 
-  private async assertOwner(projectId: string, ownerId: string): Promise<void> {
-    const project = await this.deps.prisma.project.findFirst({ where: { id: projectId, ownerId }, select: { id: true } });
+  private async assertOwner(projectId: string, ownerId: string): Promise<{ id: string; name: string; ownerId: string }> {
+    const project = await this.deps.prisma.project.findFirst({
+      where: { id: projectId, ownerId },
+      select: { id: true, name: true, ownerId: true },
+    });
     if (!project) throw new NotFoundError(`Project not found: ${projectId}`);
+    return project;
   }
 }
 

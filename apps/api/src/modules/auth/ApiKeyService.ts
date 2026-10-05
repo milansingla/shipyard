@@ -1,6 +1,7 @@
 import type { PrismaClient } from "../../db/prisma.js";
 import { NotFoundError, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
+import type { AuditService } from "../audit/AuditService.js";
 import { hashToken, randomToken } from "./AuthService.js";
 
 export const MAX_API_KEYS_PER_USER = 25;
@@ -17,6 +18,7 @@ export interface ApiKeyView {
 
 export interface ApiKeyServiceDeps {
   prisma: PrismaClient;
+  audit: Pick<AuditService, "record">;
   logger: Logger;
   now?: () => Date;
 }
@@ -51,6 +53,7 @@ export class ApiKeyService {
       data: { userId, name: input.name, prefix: token.slice(0, 12), hash: hashToken(token), expiresAt },
     });
     this.deps.logger.info({ userId, apiKeyId: key.id, name: key.name }, "API key created");
+    await this.deps.audit.record({ action: "API_KEY_CREATED", actorId: userId, metadata: { apiKeyId: key.id, name: key.name } });
     return { key: toView(key), token };
   }
 
@@ -61,6 +64,7 @@ export class ApiKeyService {
     if (!key.revokedAt) {
       await this.deps.prisma.apiKey.update({ where: { id }, data: { revokedAt: this.now() } });
       this.deps.logger.info({ userId, apiKeyId: id }, "API key revoked");
+      await this.deps.audit.record({ action: "API_KEY_REVOKED", actorId: userId, metadata: { apiKeyId: id, name: key.name } });
     }
   }
 }

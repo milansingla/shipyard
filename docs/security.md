@@ -69,6 +69,7 @@ scanning.
 | Replayed / duplicated deliveries   | Delivery id stored before acting; duplicates are no-ops                      | `WebhookService` |
 | Webhook payload choosing what runs | Payload only *selects* projects; clone URL and branch come from the project | `WebhookService` |
 | Server paths in error messages     | git failures explained; workspace paths never shown                           | `GitService.explainGitFailure` |
+| Untraceable changes                | Audit log of project, deployment, rollback, variable, domain and key changes, with the actor | `AuditService` |
 | API key theft from the database    | Only sha256(key) stored; the key is shown once; `shp_` prefix for secret scanners | `ApiKeyService` |
 | A leaked API key escalating        | Keys can't create keys (needs a browser session); revocable, optional expiry, allowlist re-checked per request | `apiKey.routes.ts`, `AuthService.authenticateApiKey` |
 | GitHub token leak                  | AES-256-GCM at rest; never in API responses; scope `read:user`              | `lib/secretBox.ts` |

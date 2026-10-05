@@ -112,6 +112,7 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | ------------------------------------------ | ------------------------------------------------- |
 | `GET /api/auth/github/login` · `GET /api/auth/me` · `POST /api/auth/logout` | sign in (browser) · current user · sign out |
 | `GET /api/github/repos` · `GET /api/github/repos/:owner/:repo/branches` | repository & branch pickers |
+| `GET /api/audit-logs?projectId=&limit=&before=` | who did what (Activity page) |
 | `GET/POST /api/api-keys` · `DELETE /api/api-keys/:id` | API keys for the CLI/scripts (`Authorization: Bearer shp_…`) |
 | `POST /api/projects`                       | create (`repositoryUrl`, optional `branch`, `name`) |
 | `GET /api/projects` · `GET /api/projects/:id` | list / get, with latest deployment             |

@@ -2,6 +2,7 @@ import type { EnvironmentVariable, PrismaClient } from "../../db/prisma.js";
 import { AppError, ErrorCode, NotFoundError, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import type { SecretBox } from "../../lib/secretBox.js";
+import type { AuditService } from "../audit/AuditService.js";
 import { MAX_ENV_VARS_PER_PROJECT, type SetEnvVarInput } from "./environment.schemas.js";
 
 /** What the API returns. A secret's value is never sent back, only that it is set. */
@@ -23,6 +24,7 @@ export interface DeploymentEnvironment {
 export interface EnvironmentServiceDeps {
   prisma: PrismaClient;
   secretBox: SecretBox;
+  audit: Pick<AuditService, "record">;
   logger: Logger;
 }
 
@@ -46,7 +48,7 @@ export class EnvironmentService {
 
   /** Creates or replaces a variable. */
   async set(projectId: string, ownerId: string, key: string, input: SetEnvVarInput): Promise<EnvironmentVariableView> {
-    await this.assertOwner(projectId, ownerId);
+    const project = await this.assertOwner(projectId, ownerId);
     const { prisma, secretBox } = this.deps;
 
     const exists = await prisma.environmentVariable.findUnique({ where: { projectId_key: { projectId, key } } });
@@ -66,14 +68,21 @@ export class EnvironmentService {
     });
     // Names are logged, never values.
     this.deps.logger.info({ projectId, key, secret: row.secret, target: row.target }, "Environment variable saved");
+    await this.deps.audit.record({
+      action: "ENV_VAR_SET",
+      actorId: ownerId,
+      project,
+      metadata: { key, secret: row.secret, target: row.target },
+    });
     return this.view(row);
   }
 
   async remove(projectId: string, ownerId: string, key: string): Promise<void> {
-    await this.assertOwner(projectId, ownerId);
+    const project = await this.assertOwner(projectId, ownerId);
     const { count } = await this.deps.prisma.environmentVariable.deleteMany({ where: { projectId, key } });
     if (count === 0) throw new NotFoundError(`Environment variable not found: ${key}`);
     this.deps.logger.info({ projectId, key }, "Environment variable deleted");
+    await this.deps.audit.record({ action: "ENV_VAR_DELETED", actorId: ownerId, project, metadata: { key } });
   }
 
   /**
@@ -114,9 +123,13 @@ export class EnvironmentService {
     }
   }
 
-  private async assertOwner(projectId: string, ownerId: string): Promise<void> {
-    const project = await this.deps.prisma.project.findFirst({ where: { id: projectId, ownerId }, select: { id: true } });
+  private async assertOwner(projectId: string, ownerId: string): Promise<{ id: string; name: string; ownerId: string }> {
+    const project = await this.deps.prisma.project.findFirst({
+      where: { id: projectId, ownerId },
+      select: { id: true, name: true, ownerId: true },
+    });
     if (!project) throw new NotFoundError(`Project not found: ${projectId}`);
+    return project;
   }
 }
 
