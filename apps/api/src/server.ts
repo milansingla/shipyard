@@ -26,6 +26,7 @@ const app = createApp({
   audit: services.audit,
   organizations: services.organizations,
   services: services.services,
+  volumes: services.volumes,
   auth: services.auth,
   webhooks: services.webhooks,
   allowedOrigins: [config.publicUrl, config.appUrl],

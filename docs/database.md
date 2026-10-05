@@ -123,9 +123,18 @@ Append-only trail: `action`, `actorId` (null = Shipyard itself), `projectId`
 `organizationId` (whose members may see it, also after deletion), `metadata` (ids and names,
 never secret values). Recorded: project created / settings changed /
 deleted, deployment started / succeeded / failed, rollback, environment
-variable set / deleted, domain added / removed, API key created / revoked.
+variable set / deleted, domain added / removed, API key created / revoked,
+service added / changed / deleted, volume added / detached.
 Writes are best-effort (a failed audit write is logged as an error and
 doesn't undo the action); tamper-evidence and retention policies are V6.
+
+### Volume (`volumes`)
+
+A service's persistent directory: `name`, `mountPath` (each unique per
+service), `dockerName` (unique; `shipyard-<serviceId>-<name>`). The foreign key
+to the service is **Restrict**, not Cascade: deleting a service or project
+can't silently drop the record of where its data is. The services deleting
+them remove the Docker volumes first, and only with `deleteData=true`.
 
 ### ApiKey (`api_keys`)
 

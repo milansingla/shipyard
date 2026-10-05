@@ -7,6 +7,7 @@ import type { GitService } from "../../services/git/GitService.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { AccessService, ProjectWithRole } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
+import { volumesExist } from "../services/ServiceService.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
 import type { CreateProjectInput, UpdateProjectInput } from "./project.schemas.js";
 
@@ -18,7 +19,7 @@ export interface ProjectServiceDeps {
   prisma: PrismaClient;
   access: AccessService;
   git: Pick<GitService, "resolveBranch">;
-  deployments: Pick<DeploymentService, "destroyProjectDeployments">;
+  deployments: Pick<DeploymentService, "destroyProjectDeployments" | "removeVolumes">;
   allowedGitHosts: readonly string[];
   audit: Pick<AuditService, "record">;
   logger: Logger;
@@ -123,10 +124,16 @@ export class ProjectService {
   }
 
   /** Removes the project, all its containers/images/logs, and its deployment history. Needs ADMIN. */
-  async delete(id: string, userId: string): Promise<void> {
+  async delete(id: string, userId: string, options: { deleteData?: boolean } = {}): Promise<void> {
     const project = await this.deps.access.project(id, userId, OrgRole.ADMIN);
+    const volumes = await this.deps.prisma.volume.findMany({ where: { service: { projectId: id } } });
+    if (volumes.length > 0 && !options.deleteData) throw volumesExist(volumes.map((v) => v.name));
     await this.deps.deployments.destroyProjectDeployments(id, async () => {
-      await this.deps.prisma.project.delete({ where: { id } }); // cascades to deployments
+      await this.deps.deployments.removeVolumes(volumes.map((volume) => volume.dockerName));
+      await this.deps.prisma.$transaction([
+        this.deps.prisma.volume.deleteMany({ where: { service: { projectId: id } } }),
+        this.deps.prisma.project.delete({ where: { id } }), // cascades to services and deployments
+      ]);
     });
     this.deps.logger.info({ projectId: id }, "Project deleted");
     await this.deps.audit.record({ action: "PROJECT_DELETED", actorId: userId, project });

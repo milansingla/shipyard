@@ -123,6 +123,18 @@ export interface Service {
   /** First hostname label when public; null for workers and private services. */
   routeName: string | null;
   latestDeployment: Deployment | null;
+  volumes: Volume[];
+}
+
+/** Persistent storage mounted into every deployment of a service. */
+export interface Volume {
+  id: string;
+  serviceId: string;
+  name: string;
+  mountPath: string;
+  /** The Docker volume holding the data on the server. */
+  dockerName: string;
+  createdAt: string;
 }
 
 export interface ProjectWithLatestDeployment extends Project {

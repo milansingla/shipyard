@@ -586,3 +586,23 @@ makes the install depend only on them. The exceptions (install hooks,
 workspaces) are where the install really reads other files, so caching
 there would be wrong.
 
+
+## Persistent volumes
+
+- **Containers are disposable, data isn't**: every deploy replaces the
+  container and everything written inside it. A named volume is storage
+  Docker keeps outside any container, mounted into each new one.
+- **Name things by identity, not by label**: a volume named after the
+  project slug would be found again by a *new* project that reuses the slug.
+  Using the service's UUID makes leftover data unreachable by anyone else.
+- **Destructive actions must be explicit**: detaching keeps data; deleting a
+  service with volumes is refused unless the request says `deleteData=true`;
+  the foreign key is `Restrict` so no cascade can drop data quietly.
+- **Ownership of a fresh volume**: Docker creates it as root. A one-off
+  container runs `chown` as root for the image's user, so apps running as
+  `node` can write, without running the app itself as root.
+
+**Interview: why not bind-mount a host directory?** A bind mount exposes a
+host path to a container that runs untrusted code, and its ownership and
+existence depend on the host. A named volume is managed by Docker, created
+on demand and labelled, so Shipyard can find and remove only its own.

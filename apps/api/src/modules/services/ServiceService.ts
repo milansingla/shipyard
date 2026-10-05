@@ -1,4 +1,4 @@
-import { type Deployment, OrgRole, type PrismaClient, type Service, isUniqueViolation } from "../../db/prisma.js";
+import { type Deployment, OrgRole, type PrismaClient, type Service, type Volume, isUniqueViolation } from "../../db/prisma.js";
 import { ConflictError, ErrorCode, NotFoundError, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import type { AccessService } from "../access/AccessService.js";
@@ -9,18 +9,27 @@ import { primaryServiceId, routeName } from "./serviceRules.js";
 
 export const MAX_SERVICES_PER_PROJECT = 20;
 
+/** Deleting persistent data is never implied. */
+export function volumesExist(names: readonly string[]): ConflictError {
+  return new ConflictError(
+    ErrorCode.VOLUMES_EXIST,
+    `This would delete the data in ${names.join(", ")} for good. To do that, ask again with deleteData=true.`,
+  );
+}
+
 export interface ServiceView extends Service {
   /** Owns the project's own address (<slug>.<domain>). */
   primary: boolean;
   /** First hostname label when public; null for workers and private services. */
   routeName: string | null;
   latestDeployment: Deployment | null;
+  volumes: Volume[];
 }
 
 export interface ServiceServiceDeps {
   prisma: PrismaClient;
   access: AccessService;
-  deployments: Pick<DeploymentService, "deploy" | "destroyServiceDeployments">;
+  deployments: Pick<DeploymentService, "deploy" | "destroyServiceDeployments" | "removeVolumes">;
   audit: Pick<AuditService, "record">;
   logger: Logger;
 }
@@ -38,7 +47,7 @@ export class ServiceService {
     const services = await this.deps.prisma.service.findMany({
       where: { projectId },
       orderBy: { createdAt: "asc" },
-      include: { deployments: { orderBy: { createdAt: "desc" }, take: 1 } },
+      include: { deployments: { orderBy: { createdAt: "desc" }, take: 1 }, volumes: { orderBy: { createdAt: "asc" } } },
     });
     const primaryId = primaryServiceId(services);
     return services.map(({ deployments, ...service }) => ({
@@ -89,13 +98,18 @@ export class ServiceService {
   }
 
   /** Removes the service with its containers, images, logs and its own variables. A project keeps at least one service. */
-  async delete(serviceId: string, userId: string): Promise<void> {
+  async delete(serviceId: string, userId: string, options: { deleteData?: boolean } = {}): Promise<void> {
     const { service, project } = await this.find(serviceId, userId, OrgRole.ADMIN);
+    const volumes = await this.deps.prisma.volume.findMany({ where: { serviceId } });
+    if (volumes.length > 0 && !options.deleteData) throw volumesExist(volumes.map((v) => v.name));
     if ((await this.deps.prisma.service.count({ where: { projectId: project.id } })) <= 1) {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "A project needs at least one service. Delete the project instead.");
     }
     await this.deps.deployments.destroyServiceDeployments(project.id, serviceId, async () => {
+      // The containers using them are gone now, so the volumes can go too.
+      await this.deps.deployments.removeVolumes(volumes.map((volume) => volume.dockerName));
       await this.deps.prisma.$transaction([
+        this.deps.prisma.volume.deleteMany({ where: { serviceId } }),
         this.deps.prisma.environmentVariable.deleteMany({ where: { projectId: project.id, scope: serviceId } }),
         this.deps.prisma.service.delete({ where: { id: serviceId } }), // cascades to deployments and its domains
       ]);

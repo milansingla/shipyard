@@ -40,6 +40,9 @@ export type EngineDocker = Pick<
   | "restartContainer"
   | "connectToNetwork"
   | "ensureNetwork"
+  | "ensureVolume"
+  | "prepareVolumeOwnership"
+  | "removeVolume"
   | "removeNetwork"
   | "removeContainer"
   | "removeImage"
@@ -158,7 +161,14 @@ export class DeploymentEngine {
       if (job.resources) log("system", describeResources(job.resources));
       const routed = !worker && (service?.public ?? true);
       if (service) await this.deps.docker.ensureNetwork(service.network, { [ShipyardLabel.PROJECT_ID]: job.labels?.[ShipyardLabel.PROJECT_ID] ?? "" });
+      for (const volume of job.volumes ?? []) {
+        if (await this.deps.docker.ensureVolume(volume.name, { [ShipyardLabel.PROJECT_ID]: job.labels?.[ShipyardLabel.PROJECT_ID] ?? "", "shipyard.volume.mount": volume.mountPath })) {
+          await this.deps.docker.prepareVolumeOwnership(volume.name, state.imageName, volume.mountPath);
+          log("system", `Created volume ${volume.name} at ${volume.mountPath}\n`);
+        }
+      }
       const container = await this.deps.docker.createAndStartContainer({
+        volumes: job.volumes,
         imageName: state.imageName,
         containerName: state.containerName,
         containerPort: state.containerPort,
@@ -345,6 +355,11 @@ export class DeploymentEngine {
   ): Promise<{ running: boolean; exitCode: number | null; hostPort: number | null }> {
     const container = await this.deps.docker.inspectManagedContainer(containerReference);
     return { running: container.running, exitCode: container.exitCode, hostPort: container.hostPort };
+  }
+
+  /** Deletes volumes and their data, after the containers using them are gone. */
+  async removeVolumes(names: readonly string[]): Promise<void> {
+    for (const name of names) await this.deps.docker.removeVolume(name);
   }
 
   /** Removes a project's private network (after its containers are gone). */

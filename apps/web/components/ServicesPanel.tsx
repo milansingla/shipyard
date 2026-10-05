@@ -7,7 +7,7 @@ import { Button, ErrorNote, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { safeHttpUrl } from "@/lib/format";
 import type { ApiResource } from "@/lib/useApi";
-import type { Deployment, Service, ServiceType } from "@/lib/types";
+import type { Deployment, Service, ServiceType, Volume } from "@/lib/types";
 
 const FIELD = "h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink";
 
@@ -22,6 +22,23 @@ interface Draft {
 }
 
 const EMPTY: Draft = { name: "", type: "WEB", sourceDir: ".", port: "", isPublic: false, startCommand: "", buildCommand: "" };
+
+/**
+ * Asks before something whose data would be deleted for good. With volumes,
+ * a click isn't enough: the name has to be typed. Returns the query to send.
+ */
+export function confirmDeletion(what: string, name: string, volumes: Volume[], removes: string): string | null {
+  if (volumes.length === 0) return window.confirm(`Delete ${what}? ${removes}`) ? "" : null;
+  const typed = window.prompt(
+    `Delete ${what} AND the data in its volumes (${volumes.map((v) => v.name).join(", ")})? ${removes} The stored files are deleted for good.\n\nType ${name} to confirm.`,
+  );
+  if (typed === null) return null;
+  if (typed.trim() !== name) {
+    window.alert(`Nothing was deleted: that wasn't "${name}".`);
+    return null;
+  }
+  return "?deleteData=true";
+}
 
 /** Where a service can be reached, in words a person can use. */
 function address(service: Service): { text: string; href: string | null } {
@@ -52,6 +69,9 @@ export function ServicesPanel({
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
+  /** The service whose "add a volume" form is open. */
+  const [volumeFor, setVolumeFor] = useState<string | null>(null);
+  const [volumeDraft, setVolumeDraft] = useState({ name: "", mountPath: "" });
 
   async function act(key: string, fn: () => Promise<void>) {
     setBusy(key);
@@ -83,6 +103,29 @@ export function ServicesPanel({
       setDraft(EMPTY);
       setAdding(false);
     });
+  };
+
+  const addVolume = (event: FormEvent, serviceId: string) => {
+    event.preventDefault();
+    void act(`volume:${serviceId}`, async () => {
+      await api(`/services/${serviceId}/volumes`, {
+        method: "POST",
+        body: { name: volumeDraft.name.trim(), mountPath: volumeDraft.mountPath.trim() },
+      });
+      setVolumeDraft({ name: "", mountPath: "" });
+      setVolumeFor(null);
+    });
+  };
+
+  const detach = (service: Service, volume: Volume) => {
+    if (
+      !window.confirm(
+        `Stop mounting ${volume.name} into ${service.name}? The next deployment won't see these files. They stay on the server: adding a volume named ${volume.name} again brings them back.`,
+      )
+    ) {
+      return;
+    }
+    void act(`detach:${volume.id}`, () => api(`/volumes/${volume.id}`, { method: "DELETE" }));
   };
 
   const list = services.data ?? [];
@@ -160,8 +203,14 @@ export function ServicesPanel({
                     type="button"
                     disabled={busy !== null}
                     onClick={() => {
-                      if (window.confirm(`Delete the ${service.name} service? Its containers, images and its own variables are removed.`)) {
-                        void act(`delete:${service.id}`, () => api(`/services/${service.id}`, { method: "DELETE" }));
+                      const query = confirmDeletion(
+                        `the ${service.name} service`,
+                        service.name,
+                        service.volumes,
+                        "Its containers, images and its own variables are removed.",
+                      );
+                      if (query !== null) {
+                        void act(`delete:${service.id}`, () => api(`/services/${service.id}${query}`, { method: "DELETE" }));
                       }
                     }}
                     className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
@@ -170,6 +219,82 @@ export function ServicesPanel({
                   </button>
                 )}
               </div>
+
+              {(service.volumes.length > 0 || canEdit) && (
+                <div className="sm:col-span-3">
+                  {service.volumes.length > 0 && (
+                    <ul className="flex flex-wrap gap-2" aria-label={`Volumes of ${service.name}`}>
+                      {service.volumes.map((volume) => (
+                        <li key={volume.id} className="flex items-center gap-2 border border-rivet bg-primer px-2 py-1 text-xs">
+                          <span className="font-semibold">{volume.name}</span>
+                          <Mono className="text-ink-soft">{volume.mountPath}</Mono>
+                          {canEdit && (
+                            <button
+                              type="button"
+                              disabled={busy !== null}
+                              onClick={() => detach(service, volume)}
+                              className="text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                            >
+                              Detach<span className="sr-only"> {volume.name}</span>
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {canEdit && volumeFor !== service.id && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setVolumeFor(service.id);
+                        setVolumeDraft({ name: "", mountPath: "" });
+                      }}
+                      className={`${service.volumes.length > 0 ? "mt-2 " : ""}text-xs underline decoration-rivet underline-offset-4 hover:decoration-ink`}
+                    >
+                      Add a volume<span className="sr-only"> to {service.name}</span>
+                    </button>
+                  )}
+                  {canEdit && volumeFor === service.id && (
+                    <form onSubmit={(event) => addVolume(event, service.id)} className="mt-2 flex flex-wrap items-end gap-3">
+                      <label className="flex flex-col gap-1">
+                        <Label>Volume name</Label>
+                        <input
+                          value={volumeDraft.name}
+                          onChange={(event) => setVolumeDraft({ ...volumeDraft, name: event.target.value })}
+                          required
+                          maxLength={30}
+                          placeholder="uploads"
+                          autoComplete="off"
+                          spellCheck={false}
+                          className={`${FIELD} w-40 font-mono`}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-1">
+                        <Label>Mounted at</Label>
+                        <input
+                          value={volumeDraft.mountPath}
+                          onChange={(event) => setVolumeDraft({ ...volumeDraft, mountPath: event.target.value })}
+                          required
+                          maxLength={200}
+                          placeholder="/app/uploads"
+                          autoComplete="off"
+                          spellCheck={false}
+                          className={`${FIELD} w-56 font-mono`}
+                        />
+                      </label>
+                      <Button type="submit" busy={busy === `volume:${service.id}`}>
+                        Add volume
+                      </Button>
+                      <Button variant="secondary" onClick={() => setVolumeFor(null)}>
+                        Cancel
+                      </Button>
+                      <p className="w-full text-xs text-ink-soft">
+                        Files the app writes there are kept across deployments. Mounted from the next deploy on.
+                      </p>
+                    </form>
+                  )}
+                </div>
+              )}
             </li>
           );
         })}

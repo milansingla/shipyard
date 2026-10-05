@@ -4,6 +4,7 @@ import type { Logger } from "../../lib/logger.js";
 import { CONFIG_FILE_NAMES, type ConfiguredService, MAX_CONFIG_BYTES, parseShipyardConfig } from "../../services/config/shipyardConfig.js";
 import type { GitService } from "../../services/git/GitService.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
+import { MAX_VOLUMES_PER_SERVICE, dockerVolumeName } from "./VolumeService.js";
 
 type FileSetting =
   | "type"
@@ -71,8 +72,9 @@ export class ConfigSync {
       const wanted = fileValues(service);
       if (!current) {
         await this.assertAddressFree(project, service.name, file.name);
-        await prisma.service.create({ data: { projectId: project.id, name: service.name, ...wanted, managedBy: "CONFIG_FILE" } });
+        const created = await prisma.service.create({ data: { projectId: project.id, name: service.name, ...wanted, managedBy: "CONFIG_FILE" } });
         notes.push(`added service ${service.name}`);
+        notes.push(...(await this.syncVolumes(created, service)));
         continue;
       }
       const changes: Partial<FileSettings> = {};
@@ -87,12 +89,49 @@ export class ConfigSync {
       }
       if (Object.keys(changes).length > 0) notes.push(`updated ${service.name}: ${Object.keys(changes).join(", ")}`);
       if (kept.length > 0) notes.push(`kept the dashboard's ${kept.join(", ")} for ${service.name} (dashboard settings win)`);
+      notes.push(...(await this.syncVolumes(current, service)));
     }
 
     for (const stale of existing.filter((s) => s.managedBy === "CONFIG_FILE" && !configured.some((c) => c.name === s.name))) {
       notes.push(`service ${stale.name} is no longer in ${file.name}; it keeps its last settings. Delete it on the project page if it's gone for good`);
     }
     this.deps.logger.info({ projectId: project.id, file: file.name, notes }, "Synced services from configuration file");
+    return notes;
+  }
+
+  /**
+   * Adds the volumes the file declares and the service doesn't have yet.
+   * Never removes or moves one: that would hide data, so it's a dashboard action.
+   */
+  private async syncVolumes(service: Service, configured: ConfiguredService): Promise<string[]> {
+    if (configured.volumes.length === 0) return [];
+    const { prisma } = this.deps;
+    const existing = await prisma.volume.findMany({ where: { serviceId: service.id } });
+    const notes: string[] = [];
+    for (const volume of configured.volumes) {
+      const current = existing.find((candidate) => candidate.name === volume.name);
+      if (current) {
+        if (current.mountPath !== volume.mountPath) {
+          notes.push(`volume ${volume.name} of ${service.name} stays at ${current.mountPath}; moving it is done on the project page`);
+        }
+        continue;
+      }
+      const clash = existing.find((candidate) => candidate.mountPath === volume.mountPath);
+      if (clash) {
+        notes.push(`volume ${volume.name} of ${service.name} not added: ${volume.mountPath} is already volume ${clash.name}`);
+        continue;
+      }
+      if (existing.length >= MAX_VOLUMES_PER_SERVICE) {
+        notes.push(`volume ${volume.name} of ${service.name} not added: at most ${MAX_VOLUMES_PER_SERVICE} volumes`);
+        continue;
+      }
+      existing.push(
+        await prisma.volume.create({
+          data: { serviceId: service.id, ...volume, dockerName: dockerVolumeName(service.id, volume.name) },
+        }),
+      );
+      notes.push(`added volume ${volume.name} at ${volume.mountPath} to ${service.name}`);
+    }
     return notes;
   }
 

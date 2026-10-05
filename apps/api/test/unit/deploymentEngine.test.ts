@@ -112,6 +112,7 @@ function harness(
       if (opts.env && Object.keys(opts.env).length > 0) calls.push(`env:${JSON.stringify(opts.env)}`);
       if (opts.healthCheckPort) calls.push(`healthPort:${opts.healthCheckPort}`);
       if (opts.resources) calls.push(`resources:${JSON.stringify(opts.resources)}`);
+      if (opts.volumes?.length) calls.push(`mounts:${opts.volumes.map((v) => `${v.name}=${v.mountPath}`).join(",")}`);
       if (opts.containerPort === null) return { id: "container-id", hostPort: null, healthHostPort: null };
       return { id: "container-id", hostPort: 49153, healthHostPort: opts.healthCheckPort ? 49154 : 49153 };
     },
@@ -132,6 +133,14 @@ function harness(
       calls.push(`network:${name}`);
     },
     removeNetwork: unused,
+    async ensureVolume(name: string) {
+      calls.push(`volume:${name}`);
+      return true;
+    },
+    async prepareVolumeOwnership(name: string, _image: string, mountPath: string) {
+      calls.push(`chown:${name}:${mountPath}`);
+    },
+    removeVolume: unused,
     connectToNetwork: unused,
     removeContainer: unused,
     removeImage: unused,
@@ -374,6 +383,20 @@ describe("DeploymentEngine.run", () => {
 
     expect(h.calls).toContain(`resources:${JSON.stringify(resources)}`);
     expect(systemLog).toContain("Resources: 0.5 CPU, 512 MB memory, always restarted");
+  });
+
+  it("creates each volume before the container, hands a new one to the app's user, and mounts it", async () => {
+    const h = harness();
+    let systemLog = "";
+    await h.engine.run(job({ volumes: [{ name: "shipyard-s-uploads", mountPath: "/app/uploads" }] }), {
+      onLog: (source, text) => void (source === "system" && (systemLog += text)),
+    });
+
+    const volume = h.calls.indexOf("volume:shipyard-s-uploads");
+    expect(h.calls[volume + 1]).toBe("chown:shipyard-s-uploads:/app/uploads");
+    expect(h.calls.findIndex((call) => call.startsWith("start:"))).toBeGreaterThan(volume);
+    expect(h.calls).toContain("mounts:shipyard-s-uploads=/app/uploads");
+    expect(systemLog).toContain("Created volume shipyard-s-uploads at /app/uploads");
   });
 
   it("names images after the registry and pushes them after the build, before starting", async () => {

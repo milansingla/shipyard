@@ -86,6 +86,8 @@ export interface CreateContainerOptions {
   privateNetwork?: { name: string; alias: string } | null;
   /** Overrides the image's command (exec form). */
   command?: string[];
+  /** Named volumes to mount. */
+  volumes?: ReadonlyArray<{ name: string; mountPath: string }>;
   labels: Record<string, string>;
   /** Docker network to attach the container to (instead of the default bridge), e.g. the proxy's. */
   network?: string | null;
@@ -277,6 +279,9 @@ export class DockerService {
             ]),
           ),
           ...(networks[0] ? { NetworkMode: networks[0].name } : {}),
+          ...(options.volumes?.length && {
+            Mounts: options.volumes.map((volume) => ({ Type: "volume" as const, Source: volume.name, Target: volume.mountPath })),
+          }),
           ...resourceConfig(options.resources),
           LogConfig: RUNTIME_LOG_CONFIG,
           SecurityOpt: ["no-new-privileges:true"],
@@ -298,6 +303,64 @@ export class DockerService {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Docker did not assign a host port.");
     }
     return { id: container.id, hostPort: managed.hostPort, healthHostPort: managed.healthHostPort };
+  }
+
+  /** Creates a Shipyard-managed named volume if missing. Returns true when it was just created. */
+  async ensureVolume(name: string, labels: Record<string, string>): Promise<boolean> {
+    try {
+      await this.docker.getVolume(name).inspect();
+      return false;
+    } catch (error) {
+      if (!isDockerNotFound(error)) throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not inspect volume", error);
+    }
+    try {
+      await this.docker.createVolume({ Name: name, Labels: { ...labels, [ShipyardLabel.MANAGED]: "true" } });
+      return true;
+    } catch (error) {
+      throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not create volume", error);
+    }
+  }
+
+  /**
+   * A new volume is owned by root. Apps that run as another user (the
+   * generated Dockerfiles use `node`) couldn't write to it, so it is handed
+   * to the image's user once, by a short-lived container of that image.
+   */
+  async prepareVolumeOwnership(volumeName: string, imageName: string, mountPath: string): Promise<void> {
+    const image = await this.docker.getImage(imageName).inspect();
+    const user = image.Config?.User?.trim();
+    if (!user || user === "root" || user === "0" || user.startsWith("0:")) return;
+
+    const container = await this.docker.createContainer({
+      Image: imageName,
+      User: "0",
+      Entrypoint: ["chown", "-R", user, mountPath],
+      Cmd: [],
+      Labels: { [ShipyardLabel.MANAGED]: "true" },
+      HostConfig: { Mounts: [{ Type: "volume", Source: volumeName, Target: mountPath }], NetworkMode: "none", AutoRemove: false },
+    });
+    try {
+      await container.start();
+      const { StatusCode } = (await container.wait()) as { StatusCode: number };
+      if (StatusCode !== 0) {
+        throw new AppError(ErrorCode.CONTAINER_START_FAILED, `Could not give ${mountPath} to user ${user} (exit ${StatusCode}).`, { statusCode: 422 });
+      }
+    } finally {
+      await container.remove({ force: true }).catch(() => {});
+    }
+  }
+
+  /** Removes a Shipyard-managed volume and its data. Missing volumes are ignored; never someone else's. */
+  async removeVolume(name: string): Promise<void> {
+    try {
+      const volume = this.docker.getVolume(name);
+      const info = (await volume.inspect()) as { Labels?: Record<string, string> | null };
+      if (info.Labels?.[ShipyardLabel.MANAGED] !== "true") return;
+      await volume.remove();
+    } catch (error) {
+      if (isDockerNotFound(error)) return;
+      throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not remove volume", error);
+    }
   }
 
   /** Creates a Shipyard-managed bridge network if it doesn't exist yet. Idempotent. */

@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 
 import { DomainsPanel } from "@/components/DomainsPanel";
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
-import { ServicesPanel } from "@/components/ServicesPanel";
+import { ServicesPanel, confirmDeletion } from "@/components/ServicesPanel";
 import { ProjectSettings } from "@/components/ProjectSettings";
 import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
@@ -48,11 +48,15 @@ export default function ProjectPage() {
 
   const remove = () => {
     const name = project.data?.name ?? "this project";
-    if (!window.confirm(`Delete ${name}? Its containers, images, logs and deployment history are removed. This can't be undone.`)) {
-      return;
-    }
+    const query = confirmDeletion(
+      name,
+      name,
+      (services.data ?? []).flatMap((service) => service.volumes),
+      "Its containers, images, logs and deployment history are removed. This can't be undone.",
+    );
+    if (query === null) return;
     void run("delete", async () => {
-      await api(`/projects/${id}`, { method: "DELETE" });
+      await api(`/projects/${id}${query}`, { method: "DELETE" });
       router.push("/");
     });
   };

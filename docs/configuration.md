@@ -25,6 +25,8 @@ services:
     resources:
       cpu: 0.5
       memoryMb: 512
+    volumes:                # name: mount path. Kept across deployments
+      uploads: /app/public/uploads
   api:
     source: apps/api
     port: 4000
@@ -47,7 +49,11 @@ shallow clone downloads only that one file, before anything is built. Then:
   build log says so. Shipyard never deletes a running service on its own:
   delete it on the project page;
 - the build log of each deployment starts with what changed
-  (`shipyard.yaml: added service api`, `updated web: port`).
+  (`shipyard.yaml: added service api`, `updated web: port`);
+- **volumes** the file declares are added. A volume taken out of the file,
+  or given another path, stays as it is (the build log says so): moving or
+  detaching stored data is done on the project page. See
+  [services.md](services.md#persistent-volumes).
 
 ## Precedence
 

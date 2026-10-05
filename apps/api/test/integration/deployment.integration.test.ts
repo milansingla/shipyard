@@ -32,6 +32,7 @@ const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
 const NODE_NO_DOCKERFILE_APP = path.resolve(here, "../fixtures/node-no-dockerfile");
 const HEALTH_PORT_APP = path.resolve(here, "../fixtures/health-port-app");
 const MEMORY_HOG_APP = path.resolve(here, "../fixtures/memory-hog");
+const VOLUME_APP = path.resolve(here, "../fixtures/volume-app");
 const MULTI_SERVICE_APP = path.resolve(here, "../fixtures/multi-service");
 
 function localSource(sourceDir: string): SourceProvider {
@@ -346,6 +347,39 @@ describe("deployment engine against real Docker", () => {
       expect(tags.tags).toEqual([record.imageName.split(":").at(-1)]);
     } finally {
       await registryContainer.remove({ force: true });
+    }
+  });
+
+  it("keeps a volume's data across deployments, writable by a non-root app, and deletes it only when asked", async () => {
+    const volumeName = `shipyard-it-${randomUUID()}-data`;
+    const volumes = [{ name: volumeName, mountPath: "/data" }];
+    const service = engine(VOLUME_APP);
+    const visit = async (record: DeploymentState) =>
+      (await fetch(record.deploymentUrl!.replace("localhost", "127.0.0.1"))).json() as Promise<{ boots: number; uid: number }>;
+    try {
+      let log = "";
+      const first = await service.run({ ...job("volume-app"), volumes }, { onLog: (_source, text) => void (log += text) });
+      created.push(first);
+      expect(await visit(first)).toEqual({ boots: 1, uid: 1000 }); // the image's "node" user wrote to the new volume
+      expect(log).toContain(`Created volume ${volumeName} at /data`);
+      await docker.removeContainer(first.containerId!);
+
+      const second = await service.run({ ...job("volume-app"), volumes });
+      created.push(second);
+      expect(await visit(second)).toEqual({ boots: 2, uid: 1000 }); // a new container, the same data
+      await docker.removeContainer(second.containerId!);
+
+      // Never someone else's volume, even by name; Shipyard's own only when asked.
+      const foreign = `shipyard-it-foreign-${randomUUID().slice(0, 8)}`;
+      await dockerode.createVolume({ Name: foreign });
+      await service.removeVolumes([foreign]);
+      expect(await dockerode.getVolume(foreign).inspect()).toMatchObject({ Name: foreign });
+      await dockerode.getVolume(foreign).remove();
+
+      await service.removeVolumes([volumeName, volumeName]); // idempotent
+      await expect(dockerode.getVolume(volumeName).inspect()).rejects.toMatchObject({ statusCode: 404 });
+    } finally {
+      await dockerode.getVolume(volumeName).remove().catch(() => {});
     }
   });
 

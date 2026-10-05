@@ -42,7 +42,12 @@ export function createProjectRouter(projects: ProjectService, deployments: Deplo
   router.delete("/projects/:id", async (req, res) => {
     const user = requireUser(req);
     const { id } = parseInput(idParamsSchema, req.params, "project id");
-    await projects.delete(id, user.id);
+    const { deleteData } = parseInput(
+      z.object({ deleteData: z.enum(["true", "false"]).default("false") }),
+      req.query,
+      "query",
+    );
+    await projects.delete(id, user.id, { deleteData: deleteData === "true" });
     res.status(204).end();
   });
 

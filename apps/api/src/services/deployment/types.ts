@@ -35,6 +35,8 @@ export interface DeploymentJob {
   healthCheck?: HealthCheckSettings;
   /** Custom hostnames routed to this deployment besides its generated one. */
   domains?: readonly string[];
+  /** Named volumes to mount; created on first use. */
+  volumes?: ReadonlyArray<{ name: string; mountPath: string }>;
   /** CPU/memory limits and restart policy. Default: none, never restarted. */
   resources?: ContainerResources;
   /** Decrypted variables: `runtime` goes into the container, `build` becomes build args. */

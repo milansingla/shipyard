@@ -18,6 +18,7 @@ import { AccessService } from "../../src/modules/access/AccessService.js";
 import { OrganizationService } from "../../src/modules/access/OrganizationService.js";
 import { ConfigSync } from "../../src/modules/services/ConfigSync.js";
 import { ServiceService } from "../../src/modules/services/ServiceService.js";
+import { VolumeService } from "../../src/modules/services/VolumeService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
@@ -150,6 +151,9 @@ let lastJob: DeploymentJob | null = null;
 /** shipyard.yaml per repository name, as the fake git "reads" it at the branch head. */
 const repoFiles = new Map<string, string>();
 
+/** Docker volumes the fake engine was asked to delete, with their data. */
+const removedVolumes: string[] = [];
+
 /** Every job, in the order the fake engine ran them. */
 const jobs: DeploymentJob[] = [];
 
@@ -210,6 +214,9 @@ const fakeEngine: EngineLike = {
   },
   async ensureRoutable() {},
   async removeNetwork() {},
+  async removeVolumes(names) {
+    for (const name of names) removedVolumes.push(name);
+  },
   artifactNames: (job) => ({ imageName: `shipyard/${job.name}:x`, containerName: `shipyard-${job.name}-x` }),
   async followLogs(_containerId, _tail, onChunk, signal) {
     onChunk({ stream: "stdout", text: "hello\n" });
@@ -312,6 +319,7 @@ beforeAll(async () => {
       audit,
       organizations: new OrganizationService({ prisma, access, audit, logger: silentLogger }),
       services: new ServiceService({ prisma, access, deployments, audit, logger: silentLogger }),
+      volumes: new VolumeService({ prisma, access, audit, logger: silentLogger }),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
         service: auth,
@@ -341,6 +349,7 @@ beforeEach(async () => {
   removedContainers.clear();
   jobs.length = 0;
   repoFiles.clear();
+  removedVolumes.length = 0;
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
   await prisma.auditLog.deleteMany();
@@ -1740,3 +1749,122 @@ services:
   });
 });
 
+
+describe("persistent volumes", () => {
+  async function serviceOf(cookie: string, repo: string, organizationId?: string) {
+    const created = await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}`, organizationId });
+    expect(created.status).toBe(201);
+    const projectId = created.body!.data.id as string;
+    const [web] = (await call(cookie, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    return { projectId, serviceId: web!.id as string };
+  }
+  const addVolume = (cookie: string, serviceId: string, body: object) => call(cookie, "POST", `/api/services/${serviceId}/volumes`, body);
+
+  it("mounts a service's volumes into every later deployment, under a name no other service can reuse", async () => {
+    const alice = await sessionFor(ALICE);
+    const { projectId, serviceId } = await serviceOf(alice, "uploads");
+    const created = await addVolume(alice, serviceId, { name: "uploads", mountPath: "/app/uploads" });
+    expect(created.status).toBe(201);
+    expect(created.body!.data).toMatchObject({ name: "uploads", mountPath: "/app/uploads", dockerName: `shipyard-${serviceId}-uploads` });
+
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(lastJob?.volumes).toEqual([{ name: `shipyard-${serviceId}-uploads`, mountPath: "/app/uploads" }]);
+
+    const listed = await call(alice, "GET", `/api/services/${serviceId}/volumes`);
+    expect(listed.body!.data.map((v: Record<string, unknown>) => v.name)).toEqual(["uploads"]);
+    const audit = await prisma.auditLog.findFirstOrThrow({ where: { action: "VOLUME_CREATED" } });
+    expect(audit.metadata).toMatchObject({ service: "web", volume: "uploads", mountPath: "/app/uploads" });
+  });
+
+  it("validates names and paths; one name and one path per service", async () => {
+    const alice = await sessionFor(ALICE);
+    const { serviceId } = await serviceOf(alice, "paths");
+    for (const body of [
+      { name: "Data", mountPath: "/data" },
+      { name: "data", mountPath: "data" },
+      { name: "data", mountPath: "/" },
+      { name: "data", mountPath: "/etc" },
+      { name: "data", mountPath: "/app/../etc" },
+      { name: "data", mountPath: "/data", extra: true },
+    ]) {
+      expect({ body, status: (await addVolume(alice, serviceId, body)).status }).toEqual({ body, status: 400 });
+    }
+    expect((await addVolume(alice, serviceId, { name: "data", mountPath: "/data" })).status).toBe(201);
+    expect((await addVolume(alice, serviceId, { name: "data", mountPath: "/other" })).status).toBe(409);
+    expect((await addVolume(alice, serviceId, { name: "other", mountPath: "/data" })).status).toBe(409);
+  });
+
+  it("removing a volume only detaches it; deleting its data must be asked for explicitly", async () => {
+    const alice = await sessionFor(ALICE);
+    const { projectId, serviceId } = await serviceOf(alice, "keep-data");
+    const api = (await call(alice, "POST", `/api/projects/${projectId}/services`, { name: "api", public: false })).body!.data;
+    const cache = (await addVolume(alice, serviceId, { name: "cache", mountPath: "/cache" })).body!.data;
+    await addVolume(alice, api.id, { name: "db", mountPath: "/var/lib/data" });
+
+    const detached = await call(alice, "DELETE", `/api/volumes/${cache.id}`);
+    expect(detached.status).toBe(200);
+    expect(detached.body!.data).toEqual({ dockerName: `shipyard-${serviceId}-cache` });
+    expect(removedVolumes).toEqual([]); // the data stays on the server
+    expect(await prisma.auditLog.findFirstOrThrow({ where: { action: "VOLUME_DELETED" } })).toMatchObject({
+      metadata: { service: "web", volume: "cache", dataKept: true },
+    });
+
+    // A service or project with volumes isn't deleted by accident.
+    const refused = await call(alice, "DELETE", `/api/services/${api.id}`);
+    expect(refused.status).toBe(409);
+    expect(refused.body!.error).toMatchObject({ code: "VOLUMES_EXIST" });
+    expect(refused.body!.error.message).toContain("deleteData=true");
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}`)).status).toBe(409);
+    expect((await call(alice, "DELETE", `/api/services/${api.id}?deleteData=maybe`)).status).toBe(400);
+    expect(await prisma.service.count({ where: { projectId } })).toBe(2);
+
+    expect((await call(alice, "DELETE", `/api/services/${api.id}?deleteData=true`)).status).toBe(204);
+    expect(removedVolumes).toEqual([`shipyard-${api.id}-db`]);
+    expect(await prisma.volume.count({ where: { serviceId: api.id } })).toBe(0);
+  });
+
+  it("deleting a project with deleteData=true removes its volumes after its containers", async () => {
+    const alice = await sessionFor(ALICE);
+    const { projectId, serviceId } = await serviceOf(alice, "gone");
+    await addVolume(alice, serviceId, { name: "data", mountPath: "/data" });
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}?deleteData=true`)).status).toBe(204);
+    expect(removedVolumes).toEqual([`shipyard-${serviceId}-data`]);
+    expect(await prisma.project.count({ where: { id: projectId } })).toBe(0);
+  });
+
+  it("only admins manage volumes; viewers can see them; strangers get 404", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const carol = await sessionFor(CAROL);
+    const orgId = (await call(alice, "POST", "/api/organizations", { name: "Volume Team" })).body!.data.id as string;
+    await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "bob", role: "DEVELOPER" });
+    const { serviceId } = await serviceOf(alice, "team-vol", orgId);
+    const volume = (await addVolume(alice, serviceId, { name: "data", mountPath: "/data" })).body!.data;
+
+    expect((await call(bob, "GET", `/api/services/${serviceId}/volumes`)).status).toBe(200);
+    expect((await addVolume(bob, serviceId, { name: "more", mountPath: "/more" })).status).toBe(403);
+    expect((await call(bob, "DELETE", `/api/volumes/${volume.id}`)).status).toBe(403);
+    expect((await call(carol, "GET", `/api/services/${serviceId}/volumes`)).status).toBe(404);
+    expect((await call(carol, "DELETE", `/api/volumes/${volume.id}`)).status).toBe(404);
+  });
+
+  it("shipyard.yaml adds volumes, and never moves or removes one", async () => {
+    const alice = await sessionFor(ALICE);
+    repoFiles.set("yaml-vol", "version: 1\nservices:\n  web:\n    volumes:\n      uploads: /app/uploads\n");
+    const { projectId, serviceId } = await serviceOf(alice, "yaml-vol");
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(lastJob?.volumes).toEqual([{ name: `shipyard-${serviceId}-uploads`, mountPath: "/app/uploads" }]);
+
+    repoFiles.set("yaml-vol", "version: 1\nservices:\n  web:\n    volumes:\n      uploads: /srv/uploads\n");
+    const second = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    const log = (await call(alice, "GET", `/api/deployments/${second}/logs?type=build`)).body!.data.content as string;
+    expect(log).toContain("volume uploads of web stays at /app/uploads");
+    expect(await prisma.volume.findMany({ where: { serviceId }, select: { mountPath: true } })).toEqual([{ mountPath: "/app/uploads" }]);
+  });
+});

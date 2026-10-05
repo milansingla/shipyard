@@ -46,6 +46,7 @@ export type EngineLike = Pick<
   | "ensureRoutable"
   | "artifactNames"
   | "removeNetwork"
+  | "removeVolumes"
 >;
 
 export interface DeploymentServiceDeps {
@@ -495,6 +496,11 @@ export class DeploymentService {
     return deployment;
   }
 
+  /** Deletes Docker volumes and their data. Only after their containers are gone. */
+  async removeVolumes(dockerNames: readonly string[]): Promise<void> {
+    await this.deps.engine.removeVolumes(dockerNames);
+  }
+
   /** Like destroyProjectDeployments, for one service (see ServiceService.delete). */
   async destroyServiceDeployments(projectId: string, serviceId: string, finalize: () => Promise<void>): Promise<void> {
     this.lockProject(projectId);
@@ -636,6 +642,10 @@ export class DeploymentService {
         domains: await this.serviceDomains(project.id, service.id, primaryId),
         resources: effectiveResources(project, service),
         healthCheck: effectiveHealthCheck(project, service),
+        volumes: (await this.deps.prisma.volume.findMany({ where: { serviceId: service.id } })).map((volume) => ({
+          name: volume.dockerName,
+          mountPath: volume.mountPath,
+        })),
         env: (await this.deps.environment?.forDeployment(project.id, service.id)) ?? undefined,
       };
 

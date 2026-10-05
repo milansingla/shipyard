@@ -46,5 +46,23 @@ export const updateServiceSchema = z
   .strictObject(settings)
   .refine((input) => Object.keys(input).length > 0, "Nothing to update.");
 
+/** Lowercase label, unique within the service. */
+export const volumeNameSchema = z
+  .string()
+  .trim()
+  .regex(/^[a-z](?:[a-z0-9-]{0,28}[a-z0-9])?$/, "must be 1–30 lowercase letters, digits or -, starting with a letter");
+
+/** An absolute path in the container; not the root or a system directory. */
+export const mountPathSchema = z
+  .string()
+  .trim()
+  .max(200)
+  .regex(/^\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/, "must be an absolute path like /app/uploads")
+  // "." too: /app/./x and /app/x would be two volumes on one directory.
+  .refine((p) => !p.split("/").some((part) => part === "." || part === ".."), "must not contain . or .. segments")
+  .refine((p) => !/^\/(proc|sys|dev|etc|bin|sbin|lib|lib64|usr|boot|run)(\/|$)/.test(p), "must not be a system directory");
+
+export const createVolumeSchema = z.strictObject({ name: volumeNameSchema, mountPath: mountPathSchema });
+
 export type CreateServiceInput = z.infer<typeof createServiceSchema>;
 export type UpdateServiceInput = z.infer<typeof updateServiceSchema>;

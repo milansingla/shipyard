@@ -56,6 +56,40 @@ sets a variable for one service only, overriding a project-wide one with
 the same name for that service. Each ciphertext is bound to its project,
 scope and key.
 
+## Persistent volumes
+
+A container's files are thrown away with it, at every deploy. A **volume**
+keeps a directory across deployments: uploads, an SQLite file, a cache.
+
+Project page → a service → **Add a volume**, or
+`POST /api/services/:id/volumes {"name": "uploads", "mountPath": "/app/uploads"}`
+(admins), or `volumes:` in [shipyard.yaml](configuration.md). It is mounted
+from the next deployment on, into every deployment, rollback and restart of
+that service.
+
+| Rule | Why |
+| ---- | --- |
+| Name: 1–30 lowercase letters, digits, `-`; one per name and per path in a service; at most 10 | |
+| Path: absolute, no `.`/`..` segments, not `/` or a system directory (`/etc`, `/usr`, `/proc`, …) | Mounting over the image's own system files breaks it, or hides what it needs |
+| Docker volume `shipyard-<service id>-<name>` | The id, not the project slug: slugs are reused after a project is deleted, so a slug-based name could hand one project's leftover data to a new one |
+| A new volume is handed to the image's user (`chown`, once, by a short-lived container with no network) | Docker creates volumes owned by root; apps that run as `node` couldn't write to them otherwise. The image needs a `chown` binary (every Alpine/Debian image has one) |
+
+**Removing data is never implied:**
+
+- `DELETE /api/volumes/:id` (**Detach**) only stops mounting it. The data
+  stays on the server; adding a volume with the same name to the same service
+  brings it back. `docker volume rm <dockerName>` deletes it for good.
+- Deleting a service or project that has volumes is refused (409
+  `VOLUMES_EXIST`) unless the request says `?deleteData=true`. The dashboard
+  asks you to type the name. Then the containers are removed first, then the
+  volumes, then the rows.
+- Shipyard only ever removes volumes labelled `shipyard.managed`.
+
+Volumes live on this server's disk, inside Docker. There are no snapshots or
+backups yet (back up `/var/lib/docker/volumes` or use `docker run --rm -v …
+tar`), no size limit, and a volume can't be shared between services: each
+service has its own.
+
 ## Migration
 
 The `services` migration gave every existing project a `web` service (public,

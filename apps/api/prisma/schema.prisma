@@ -197,6 +197,8 @@ enum AuditAction {
   SERVICE_CREATED
   SERVICE_CHANGED
   SERVICE_DELETED
+  VOLUME_CREATED
+  VOLUME_DELETED
 }
 
 /// Who did what, append-only. Kept when the project is deleted (no foreign
@@ -250,6 +252,27 @@ model ProjectDomain {
   @@map("project_domains")
 }
 
+/// Persistent data for a service: a Docker named volume mounted at `mountPath`.
+/// It outlives every container, so redeploys and rollbacks keep the data.
+/// Deleting it (or its service or project) always needs an explicit request.
+model Volume {
+  id        String   @id @default(uuid()) @db.Uuid
+  serviceId String   @db.Uuid
+  /// Restrict: the database refuses to drop a volume's row behind Shipyard's back.
+  service   Service  @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  /// Lowercase label, unique within the service.
+  name      String
+  /// Absolute path inside the container, e.g. /app/uploads.
+  mountPath String
+  /// Name of the Docker volume.
+  dockerName String  @unique
+  createdAt DateTime @default(now())
+
+  @@unique([serviceId, name])
+  @@unique([serviceId, mountPath])
+  @@map("volumes")
+}
+
 enum ServiceSource {
   DASHBOARD
   CONFIG_FILE
@@ -297,6 +320,7 @@ model Service {
   updatedAt    DateTime    @updatedAt
   deployments  Deployment[]
   domains      ProjectDomain[]
+  volumes      Volume[]
 
   @@unique([projectId, name])
   @@map("services")

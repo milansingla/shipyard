@@ -3,7 +3,8 @@ import { z } from "zod";
 
 import { AppError, ErrorCode } from "../../lib/errors.js";
 import { healthCheckPathSchema } from "../../modules/projects/project.schemas.js";
-import { serviceNameSchema, sourceDirSchema } from "../../modules/services/service.schemas.js";
+import { mountPathSchema, serviceNameSchema, sourceDirSchema, volumeNameSchema } from "../../modules/services/service.schemas.js";
+import { MAX_VOLUMES_PER_SERVICE } from "../../modules/services/VolumeService.js";
 
 /** File names Shipyard looks for at the repository root, in order. */
 export const CONFIG_FILE_NAMES = ["shipyard.yaml", "shipyard.yml"] as const;
@@ -32,6 +33,11 @@ const serviceSchema = z.strictObject({
       memoryMb: z.int().min(64).max(262_144).optional(),
     })
     .optional(),
+  /** name → mount path. Only ever added from the file: removing one is a dashboard action. */
+  volumes: z
+    .record(volumeNameSchema, mountPathSchema)
+    .refine((volumes) => Object.keys(volumes).length <= MAX_VOLUMES_PER_SERVICE, `at most ${MAX_VOLUMES_PER_SERVICE} volumes`)
+    .optional(),
 });
 
 const configSchema = z.strictObject({
@@ -58,6 +64,7 @@ export interface ConfiguredService {
     cpuLimit?: number;
     memoryLimitMb?: number;
   };
+  volumes: { name: string; mountPath: string }[];
 }
 
 /**
@@ -96,7 +103,11 @@ export function parseShipyardConfig(source: string, fileName = "shipyard.yaml"):
       ...(service.resources?.cpu !== undefined && { cpuLimit: service.resources.cpu }),
       ...(service.resources?.memoryMb !== undefined && { memoryLimitMb: service.resources.memoryMb }),
     };
-    return { name, settings };
+    const volumes = Object.entries(service.volumes ?? {}).map(([volume, mountPath]) => ({ name: volume, mountPath }));
+    if (new Set(volumes.map((v) => v.mountPath)).size !== volumes.length) {
+      throw invalid(fileName, `is invalid at services.${name}.volumes: two volumes can't share a mount path`);
+    }
+    return { name, settings, volumes };
   });
 }
 

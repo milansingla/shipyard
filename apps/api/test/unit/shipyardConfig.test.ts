@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { mountPathSchema } from "../../src/modules/services/service.schemas.js";
 import { parseShipyardConfig } from "../../src/services/config/shipyardConfig.js";
 
 describe("shipyard.yaml", () => {
@@ -19,6 +20,8 @@ services:
     resources:
       cpu: 0.5
       memoryMb: 512
+    volumes:
+      uploads: /app/uploads
   api:
     source: apps/api
     port: 4000
@@ -42,9 +45,10 @@ services:
           cpuLimit: 0.5,
           memoryLimitMb: 512,
         },
+        volumes: [{ name: "uploads", mountPath: "/app/uploads" }],
       },
-      { name: "api", settings: { type: "WEB", sourceDir: "apps/api", port: 4000, public: false } },
-      { name: "jobs", settings: { type: "WORKER", sourceDir: "apps/worker", startCommand: "node worker.js" } },
+      { name: "api", settings: { type: "WEB", sourceDir: "apps/api", port: 4000, public: false }, volumes: [] },
+      { name: "jobs", settings: { type: "WORKER", sourceDir: "apps/worker", startCommand: "node worker.js" }, volumes: [] },
     ]);
   });
 
@@ -57,6 +61,9 @@ services:
     ["version: 1\nservices:\n  jobs:\n    type: worker\n    public: true", "workers can't be public"],
     ["version: 1\nservices:\n  web:\n    start:\n      command: \"a\\nb\"", "at services.web.start.command"],
     ["version: 1\nservices: {}", "at least one service"],
+    ["version: 1\nservices:\n  web:\n    volumes:\n      data: relative/path", "at services.web.volumes.data"],
+    ["version: 1\nservices:\n  web:\n    volumes:\n      data: /etc/app", "system directory"],
+    ["version: 1\nservices:\n  web:\n    volumes:\n      a: /data\n      b: /data", "share a mount path"],
   ])("explains what is wrong with %j", (source, message) => {
     expect(() => parseShipyardConfig(source)).toThrow(message);
   });
@@ -67,4 +74,17 @@ services:
     bomb.push("services:\n  web: {}");
     expect(() => parseShipyardConfig(bomb.join("\n"))).toThrow("shipyard.yaml");
   });
+});
+
+describe("volume mount paths", () => {
+  it.each(["/data", "/app/uploads", "/var/lib/postgresql/data", "/home/node/.cache"])("accepts %s", (p) => {
+    expect(mountPathSchema.safeParse(p).success).toBe(true);
+  });
+
+  it.each(["/", "data", "/app/../etc", "/app/./x", "/app//x", "/etc", "/etc/ssl", "/proc/self", "/usr/local", "/dev", "/app/x y", "/app\0"])(
+    "refuses %j",
+    (p) => {
+      expect(mountPathSchema.safeParse(p).success).toBe(false);
+    },
+  );
 });
