@@ -1,7 +1,8 @@
-# Local development infrastructure for Shipyard.
-#   docker compose up -d      start
-#   docker compose down       stop (data is kept in the named volume)
+# Local development infrastructure for Shipyard: PostgreSQL and Traefik.
+#   docker compose up -d      start   (npm run db:up)
+#   docker compose down       stop    (data is kept in the named volume)
 #   docker compose down -v    stop AND delete the database
+# Variables like ${SHIPYARD_HTTP_PORT} are read from the .env file next to this one.
 services:
   postgres:
     image: postgres:17-alpine
@@ -21,6 +22,37 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  # Reverse proxy in front of deployed apps: <project>.<SHIPYARD_PUBLIC_DOMAIN> → that
+  # project's live container. It only reads the route table Shipyard writes (file
+  # provider) and has NO access to the Docker socket. See docs/routing.md.
+  traefik:
+    image: traefik:v3.7
+    container_name: shipyard-traefik
+    restart: unless-stopped
+    command:
+      - --entrypoints.web.address=:80
+      # Drop headers like X_Forwarded_For that some backends would read as X-Forwarded-For.
+      - --entrypoints.web.http.aliasHeadersStrategy=delete
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      - --log.level=WARN
+      - --global.checkNewVersion=false
+      - --global.sendAnonymousUsage=false
+    ports:
+      # Loopback only. Serving to a network needs HTTPS first (V3).
+      - "127.0.0.1:${SHIPYARD_HTTP_PORT:-80}:80"
+    volumes:
+      # Must be <SHIPYARD_DATA_DIR>/traefik, where the API writes routes.yml. Read-only for Traefik.
+      - ${SHIPYARD_DATA_DIR:-~/.shipyard}/traefik:/etc/traefik/dynamic:ro
+    networks:
+      - edge
+
+networks:
+  # Traefik reaches deployment containers by name on this network. Shipyard
+  # attaches every deployment container to it when routing is on.
+  edge:
+    name: shipyard-edge
 
 volumes:
   shipyard-postgres:

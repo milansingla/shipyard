@@ -1,6 +1,6 @@
 # Architecture
 
-## Current shape (V2 · Milestone 5)
+## Current shape (V2 · Milestone 7)
 
 ```
  Browser ──► apps/web (Next.js, :3000) ── pages + rewrite /api/* ──┐
@@ -23,11 +23,15 @@
             │              ├─ prepareBuild        own Dockerfile or generate one │
             │              ├─ DockerService       build / run / logs (Dockerode) │
             │              ├─ HealthCheckService  HTTP probe                     │
-            │              └─ WorkspaceService    temp clone dirs                │
-            └────────────┬──────────────────────────────────┬────────────────────┘
-                         │ Prisma (pg adapter)              │ Docker Engine API (unix socket)
-                         ▼                                  ▼
-                    PostgreSQL                        Docker daemon ──► app containers
+            │              ├─ WorkspaceService    temp clone dirs                │
+            │              └─ Router              TraefikRouter: routes.yml +    │
+            │                                     cutover check (or plain ports) │
+            └────────────┬──────────────────────────────────┬──────────┬─────────┘
+                         │ Prisma (pg adapter)              │ Docker   │ writes routes.yml
+                         ▼                                  ▼ API      ▼
+                    PostgreSQL                        Docker daemon   Traefik (:80, no Docker socket)
+                                                           │             │ <slug>.localhost
+                                                           └──► app containers ◄┘ (network shipyard-edge)
 ```
 
 ## Responsibilities
@@ -43,6 +47,7 @@
 | `GitService`         | `git` CLI, hardening flags          | deployments, Docker        |
 | `DockerService`      | images, containers, labels, logs    | deployments, statuses      |
 | `HealthCheckService` | HTTP probing, timeouts              | Docker internals           |
+| `TraefikRouter`      | route table file, confirming a cutover through Traefik | database, Docker API |
 | `WorkspaceService`   | safe temp directories               | git, Docker                |
 
 **Why split `DeploymentEngine` and `DockerService`?** The deployment is a
@@ -95,6 +100,7 @@ containers it didn't create. Details: [database.md](database.md).
 | Redis / queue | One process, handful of deploys. Revisit if deploys must survive restarts or run on several workers. |
 | WebSockets    | Polling is enough for logs/status in a dashboard at this scale.          |
 | Kubernetes    | Single host. Docker + Traefik covers routing and isolation needs for V2. |
+| Traefik's Docker provider | It needs the Docker socket (root) and routes before Shipyard's health check. Shipyard writes the routes itself — [routing.md](routing.md). |
 | Microservices | One deployable is easier to understand, debug and run.                  |
 
 ## Evolution of V0.1

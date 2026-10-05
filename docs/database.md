@@ -33,7 +33,7 @@ A repository + branch Shipyard knows how to deploy.
 | Field                                | Notes                                                              |
 | ------------------------------------ | ------------------------------------------------------------------ |
 | `ownerId`                            | The user who created it; every query is scoped by it |
-| `slug` (unique)                      | URL/Docker-safe form of `name`; used in container/image names and, from M7, hostnames |
+| `slug` (unique)                      | URL/Docker-safe form of `name`; used in container/image names and hostnames (`<slug>.<SHIPYARD_PUBLIC_DOMAIN>`) |
 | `repositoryUrl`                      | Normalised HTTPS clone URL, validated against the host allowlist   |
 | `repositoryOwner`, `repositoryName`  | Parsed once at creation; avoids re-parsing for display             |
 | `branch`                             | Resolved against the real remote at creation (default branch if omitted) |
@@ -50,7 +50,7 @@ history is what makes "what was running at 14:02?" and rollback possible.
 | `branch`                              | Copied from the project at deploy time (the project may change later) |
 | `commitSha`                           | Exact commit built; set after clone                          |
 | `imageName`, `containerName`          | Deterministic from slug + id, so known before Docker runs    |
-| `containerId`, `hostPort`, `deploymentUrl` | Filled as the deployment progresses; cleared on stop     |
+| `containerId`, `hostPort`, `deploymentUrl` | Filled as the deployment progresses; cleared on stop. `deploymentUrl` is the stable `http://<slug>.<domain>` with routing on, else `http://localhost:<hostPort>` |
 | `errorMessage`                        | Why it FAILED — kept in the DB even if the log file is lost  |
 | `startedAt`, `finishedAt`             | Timing of the pipeline                                       |
 
@@ -89,9 +89,13 @@ fails, the row is deleted again so GitHub's retry can succeed. Rows older than
 
 ## Known limits
 
+- The route table Traefik reads (`<SHIPYARD_DATA_DIR>/traefik/routes.yml`) is
+  *derived* from this database (one route per RUNNING deployment) and rebuilt
+  at startup; it is never read back as a source of truth.
+
 - The "one deployment per project at a time" lock is in memory: correct for one
   API process only. Moving it into PostgreSQL is planned for V3.
-- Slugs are unique across all users (they become container names and, in M7,
+- Slugs are unique across all users (they become container names and
   hostnames), so two users can't both have a project named `api`.
 
 ## Tests

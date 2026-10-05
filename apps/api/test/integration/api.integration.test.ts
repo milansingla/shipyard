@@ -20,6 +20,7 @@ import { WebhookService } from "../../src/modules/webhooks/WebhookService.js";
 import { DeploymentStatus as S } from "../../src/services/deployment/status.js";
 import type { DeploymentState } from "../../src/services/deployment/types.js";
 import { GitHubClient } from "../../src/services/github/GitHubClient.js";
+import type { Router } from "../../src/services/routing/Router.js";
 import { createTestPrisma, resetTables } from "../helpers/db.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
@@ -104,7 +105,26 @@ function repo(owner: string, name: string, isPrivate: boolean) {
 /** While set, every fake deployment pauses after CLONING until it resolves. */
 let holdRuns: Promise<void> | null = null;
 
-/** Walks a deployment to RUNNING instantly, without Docker. */
+/** The route table as the router would have it: hostname label → deployment id. */
+const liveRoutes = new Map<string, string>();
+
+/** Behaves like TraefikRouter, minus Traefik: switching is instant. */
+const fakeRouter: Router = {
+  network: null,
+  urlFor: (name) => `http://${name}.localhost`,
+  async activate(target) {
+    liveRoutes.set(target.name, target.deploymentId);
+  },
+  async deactivate(name, deploymentId) {
+    if (liveRoutes.get(name) === deploymentId) liveRoutes.delete(name);
+  },
+  async sync(targets) {
+    liveRoutes.clear();
+    for (const target of targets) liveRoutes.set(target.name, target.deploymentId);
+  },
+};
+
+/** Walks a deployment to RUNNING instantly, without Docker, routing it like the real engine. */
 const fakeEngine: EngineLike = {
   async run(job, observer = {}) {
     const state: DeploymentState = {
@@ -114,15 +134,19 @@ const fakeEngine: EngineLike = {
       commitSha: "c".repeat(40),
       imageName: `shipyard/${job.name}:x`,
       containerName: `shipyard-${job.name}-x`,
-      containerId: "fake-container",
+      containerId: `container-${job.id}`,
       containerPort: 3000,
       hostPort: 49_999,
-      deploymentUrl: "http://localhost:49999",
+      deploymentUrl: null,
       errorMessage: null,
       startedAt: new Date(),
       finishedAt: null,
     };
     for (const status of [S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.RUNNING]) {
+      if (status === S.RUNNING) {
+        await fakeRouter.activate({ name: job.name, deploymentId: job.id, containerName: state.containerName, containerPort: 3000 });
+        state.deploymentUrl = fakeRouter.urlFor(job.name, 49_999);
+      }
       const previous = state.status;
       state.status = status;
       await observer.onStatusChange?.(state, previous);
@@ -133,16 +157,19 @@ const fakeEngine: EngineLike = {
   async stop() {
     return { containerName: "x", status: S.STOPPED, hostPort: null, deploymentUrl: null };
   },
-  async restart() {
-    return { containerName: "x", status: S.RUNNING, hostPort: 49_998, deploymentUrl: "http://localhost:49998" };
+  async restart(containerId, routeName) {
+    const deploymentId = containerId.replace(/^container-/, "");
+    await fakeRouter.activate({ name: routeName, deploymentId, containerName: "x", containerPort: 3000 });
+    return { containerName: "x", status: S.RUNNING, hostPort: 49_998, deploymentUrl: fakeRouter.urlFor(routeName, 49_998) };
   },
   async getLogs() {
     return [{ stream: "stdout" as const, text: "hello\n" }];
   },
   async destroy() {},
   async inspect() {
-    return { running: true, exitCode: null, hostPort: 49_999, deploymentUrl: "http://localhost:49999" };
+    return { running: true, exitCode: null, hostPort: 49_999 };
   },
+  async ensureRoutable() {},
 };
 
 const APP_URL = "http://localhost:3000";
@@ -189,6 +216,7 @@ beforeAll(async () => {
   deployments = new DeploymentService({
     prisma,
     engine: fakeEngine,
+    router: fakeRouter,
     buildLogs: new BuildLogStore(dataDir),
     allowedGitHosts: ["github.com"],
     logger: silentLogger,
@@ -222,6 +250,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   holdRuns = null;
   await deployments.waitForIdle();
+  liveRoutes.clear();
   await resetTables(prisma);
   await prisma.webhookDelivery.deleteMany();
 });
@@ -610,5 +639,62 @@ describe("GitHub push webhooks", () => {
     const res = await deliver({}, { contentType: "application/x-www-form-urlencoded" });
     expect(res.status).toBe(415);
     expect(res.body.error.message).toContain("application/json");
+  });
+});
+
+describe("routing (zero-downtime redeploys)", () => {
+  async function deployAndWait(cookie: string, projectId: string): Promise<string> {
+    const res = await call(cookie, "POST", `/api/projects/${projectId}/deploy`);
+    expect(res.status).toBe(202);
+    await deployments.waitForIdle();
+    return res.body!.data.id as string;
+  }
+
+  it("moves the project's hostname to each new deployment; retiring the old one never takes it away", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/shop" });
+    const projectId = created.body!.data.id as string;
+
+    const first = await deployAndWait(alice, projectId);
+    expect(liveRoutes).toEqual(new Map([["shop", first]]));
+
+    const second = await deployAndWait(alice, projectId);
+    expect(liveRoutes).toEqual(new Map([["shop", second]]));
+    const firstAfter = await call(alice, "GET", `/api/deployments/${first}`);
+    expect(firstAfter.body!.data).toMatchObject({ status: S.STOPPED, deploymentUrl: null });
+    expect((await call(alice, "GET", `/api/deployments/${second}`)).body!.data.deploymentUrl).toBe("http://shop.localhost");
+
+    // Rollback: restarting the older deployment takes the hostname back, then retires the newer one.
+    expect((await call(alice, "POST", `/api/deployments/${first}/restart`)).status).toBe(200);
+    expect(liveRoutes).toEqual(new Map([["shop", first]]));
+    expect((await call(alice, "GET", `/api/deployments/${second}`)).body!.data.status).toBe(S.STOPPED);
+
+    // Stopping the live deployment takes it off the hostname.
+    await call(alice, "POST", `/api/deployments/${first}/stop`);
+    expect(liveRoutes.size).toBe(0);
+  });
+
+  it("deleting a project removes its route", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/blog" });
+    const projectId = created.body!.data.id as string;
+    await deployAndWait(alice, projectId);
+    expect(liveRoutes.has("blog")).toBe(true);
+
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}`)).status).toBe(204);
+    expect(liveRoutes.has("blog")).toBe(false);
+  });
+
+  it("at startup, rebuilds the route table from the database's RUNNING deployments", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/docs" });
+    const live = await deployAndWait(alice, created.body!.data.id as string);
+
+    // A stale route (e.g. a project deleted while Shipyard was down) and a lost one.
+    liveRoutes.clear();
+    liveRoutes.set("deleted-project", "gone");
+
+    await deployments.reconcileOnStartup();
+    expect(liveRoutes).toEqual(new Map([["docs", live]]));
   });
 });

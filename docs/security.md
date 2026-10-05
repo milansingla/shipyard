@@ -69,6 +69,11 @@ scanning.
 | Webhook payload choosing what runs | Payload only *selects* projects; clone URL and branch come from the project | `WebhookService` |
 | Server paths in error messages     | git failures explained; workspace paths never shown                           | `GitService.explainGitFailure` |
 | GitHub token leak                  | AES-256-GCM at rest; never in API responses; scope `read:user`              | `lib/secretBox.ts` |
+| Reverse proxy as a path to root    | Traefik gets no Docker socket: it only reads the route file, mounted read-only | `docker-compose.yml` |
+| Injection into proxy config        | Route values validated (DNS-label slugs/names, port range, id charset); file written as JSON | `TraefikRouter.ts` |
+| Bypassing the proxy                | With routing on, containers may only publish on 127.0.0.1 (config refuses `0.0.0.0`) | `config/env.ts` |
+| Spoofed forwarding headers         | Traefik drops alias headers like `X_Forwarded_For`                          | `docker-compose.yml` |
+| Traffic to an unhealthy version    | Route moves only after the health check, and only counts once Traefik confirms it | `DeploymentEngine`, `TraefikRouter` |
 
 Details of the sign-in design: [github.md](github.md).
 
@@ -84,6 +89,11 @@ Details of the sign-in design: [github.md](github.md).
   image layers; reclaim with `docker image prune`.
 - No memory/CPU limits on containers (would break some apps without per-project config).
 - No egress restrictions for deployed containers.
+- All deployed apps share the `shipyard-edge` network and can reach each other
+  by container name (on the default bridge they could by IP). Per-project
+  networks are a later item.
+- Traefik serves plain HTTP on loopback only. Exposing apps beyond this machine
+  needs HTTPS (V3).
 - One webhook secret for all repositories: anyone who has it can make Shipyard
   redeploy the **latest commit** of any project's branch (never other code —
   the clone URL comes from the project, not the payload). Per-project secrets

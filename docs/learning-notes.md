@@ -402,3 +402,81 @@ leaked; per-project secrets are a V3 item.
 | Repository webhooks         | GitHub App (org-wide)            | No app registration; GitHub App in V3      |
 | In-memory "deploy again" flag | Persistent job queue           | Single process; push again after a restart |
 | Branch head, not payload SHA | `git fetch <sha>`               | Shallow clone simplicity; coalescing-friendly |
+
+---
+
+## Milestone 7 — Traefik routing, zero-downtime redeploys
+
+Code: [`services/routing/`](../apps/api/src/services/routing/), step 6 of
+`DeploymentEngine.run`, `DeploymentService.stopDeployment` / `syncRoutes`,
+`docker-compose.yml`. Overview: [routing.md](routing.md).
+
+### Understand Before Interview
+
+#### Key concepts
+
+1. **Reverse proxy** — one entry point that forwards each request to a backend
+   chosen by rules (here: the `Host` header). Apps stop needing their own ports.
+2. **Host-based routing** — many apps share port 80; `shop.localhost` and
+   `blog.localhost` differ only in the `Host` header the browser sends.
+3. **Blue-green deployment** — run the new version next to the old one, switch
+   traffic when the new one is ready, keep the old one for rollback. Shipyard's
+   redeploys and rollbacks are exactly that.
+4. **Confirming a cutover** — config reloads are asynchronous (Traefik applies
+   at most one change every ~2s). "I wrote the file" ≠ "traffic moved".
+   Shipyard asks Traefik until the `X-Shipyard-Deployment` header names the new
+   deployment, and only then stops the old one.
+5. **Atomic file replacement** — write a temp file, `rename()` it over the
+   target: readers see the old file or the new one, never half of one. Also the
+   only change Docker Desktop's file sharing reliably reports to Traefik.
+6. **Derived state** — the route file is computed from the database and rebuilt
+   at startup; it is never read back as truth.
+7. **Graceful shutdown** — `docker stop` sends SIGTERM and waits 10s; an app that
+   closes its server and finishes in-flight requests loses none of them.
+
+#### Likely interview questions
+
+**How does a redeploy avoid downtime?**
+The old container keeps serving while the new one builds, starts and passes
+its health check (directly, on a loopback port). Then the route is switched and
+Shipyard waits until Traefik serves the hostname from the new container. Only
+then is the deployment RUNNING and the old container stopped. The integration
+test keeps four clients hitting the app through a real Traefik during a
+redeploy and a rollback, and requires every response to be a 200.
+
+**Why not use Traefik's Docker provider with labels? It's the usual setup.**
+Two reasons. It needs the Docker socket, which is root on the host, in an
+internet-facing process. And it starts routing to a container as soon as it
+runs; Shipyard's rule is "no traffic before the health check passes". Writing
+the route file ourselves keeps *when* in Shipyard's hands.
+
+**What if Traefik never picks up the change?**
+After 15s the deployment fails with `ROUTING_FAILED`, the previous route is
+written back, and the new container stops. The old version never stopped
+serving.
+
+**Why can't Shipyard just sleep 2s after writing the file?**
+The delay depends on Traefik's throttle, file-system events and load. It was
+measured at 0.03s for one change and ~2s for the next. Polling for proof is
+correct for any delay; a sleep is only right by luck.
+
+**Why do containers still publish a port?**
+For the health check. Shipyard runs on the host, and on macOS the host can't
+reach container IPs, so a loopback-only published port is the portable way to
+check a container before it gets traffic.
+
+**How is rollback zero-downtime?**
+Restarting an older STOPPED deployment runs the same cutover: health check,
+switch the route, confirm, then retire the current deployment.
+
+#### Trade-offs to be able to defend
+
+| Decision                         | Alternative                    | Why this, for now                                  |
+| -------------------------------- | ------------------------------ | -------------------------------------------------- |
+| File provider, one file          | Docker labels                  | No socket access; Shipyard decides when traffic moves |
+| One file, rewritten each change  | One file per project           | Deleting files isn't reliably seen through Docker Desktop; one table is simpler to reason about |
+| Probe via response header        | Traefik's API                  | No extra Traefik entry point to expose and secure  |
+| `*.localhost`, HTTP, loopback    | Real domains + Let's Encrypt   | Zero DNS setup locally; HTTPS is V3                |
+| Opt-in (`SHIPYARD_PUBLIC_DOMAIN`) | Always on                      | CLI and setups without Traefik keep working        |
+| Shared `shipyard-edge` network   | Network per project            | Simple; isolation between apps is a later item     |
+

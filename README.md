@@ -4,15 +4,16 @@ A small, understandable, self-hosted deployment platform — think a tiny
 Render/Railway you can read end to end.
 
 ```
-GitHub repo → clone → detect → docker build → container → health check → URL
+GitHub repo → clone → detect → docker build → container → health check → http://<project>.localhost
 ```
 
-> **Status: V2, Milestone 5.** A dashboard to sign in with GitHub, pick a
-> repository and branch, deploy, and follow each deployment's stages and logs.
-> Behind it: a REST API with background deployments, per-user projects,
+> **Status: V2 complete (Milestone 7).** A dashboard to sign in with GitHub,
+> pick a repository and branch, deploy, and follow each deployment's stages and
+> logs. Behind it: a REST API with background deployments, per-user projects,
 > deployment history in PostgreSQL, and Dockerfile generation for Node.js apps.
-> Pushes to a project's branch deploy automatically via GitHub webhooks.
-> Traefik routing (stable hostnames, zero-downtime switching) is next.
+> Pushes to a project's branch deploy automatically via GitHub webhooks. Each
+> project lives at a stable address like `http://shop.localhost` behind
+> Traefik, and redeploys switch over with zero downtime.
 > See [the roadmap](#roadmap).
 
 ## Requirements
@@ -29,9 +30,14 @@ GitHub repo → clone → detect → docker build → container → health check
 ```bash
 npm install
 cp .env.example .env      # optional — every variable has a safe default
-npm run db:up             # PostgreSQL in Docker on 127.0.0.1:5433
+npm run db:up             # PostgreSQL (127.0.0.1:5433) and Traefik (127.0.0.1:80) in Docker
 npm run db:deploy         # apply migrations
 ```
+
+Set `SHIPYARD_PUBLIC_DOMAIN=localhost` in `.env` to reach each project at
+`http://<project>.localhost` through Traefik (port 80 taken? set
+`SHIPYARD_HTTP_PORT`). Without it, each deployment gets its own
+`http://localhost:<port>` URL. See [docs/routing.md](docs/routing.md).
 
 Then set up GitHub sign-in (one-time, ~2 minutes): create a GitHub OAuth App and
 fill `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SHIPYARD_SECRET_KEY` and
@@ -44,6 +50,7 @@ fill `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SHIPYARD_SECRET_KEY` and
 # Any public GitHub repo with a Dockerfile — or a Node.js app (package.json) without one
 npm run shipyard -- deploy https://github.com/<owner>/<repo>
 npm run shipyard -- deploy https://github.com/<owner>/<repo> --branch develop
+# (CLI deployments aren't stored in the database, so they always use a port URL, not Traefik)
 
 # Manage it using the container name printed by deploy
 npm run shipyard -- logs    shipyard-<repo>-<id> [--tail 100]
@@ -67,7 +74,9 @@ npm run dev:web   # terminal 2 — dashboard on http://localhost:3000
 
 Open <http://localhost:3000>, sign in with GitHub, choose **New project**, pick
 a repository and branch, and **Create and deploy**. The deployment page follows
-the pipeline stage by stage and streams the build log.
+the pipeline stage by stage and streams the build log. Once RUNNING, the app is
+live at `http://<project>.localhost`, and stays at that address across
+redeploys.
 
 The dashboard proxies `/api/*` to the API, so the browser only ever talks to
 one origin (no CORS; the session cookie and CSRF checks work unchanged). See
@@ -123,7 +132,7 @@ your own projects. Responses are `{ "data": … }` or
 
 ```bash
 npm test                  # unit tests — fast, no Docker or network needed
-npm run test:integration  # real Docker, PostgreSQL (shipyard_test, reset each run) and GitHub clone
+npm run test:integration  # real Docker, Traefik, PostgreSQL (shipyard_test, reset each run) and GitHub clone
 npm run typecheck
 ```
 
@@ -134,7 +143,7 @@ apps/web/            Next.js dashboard (proxies /api to apps/api)
 apps/api/            Express API + CLI + deployment engine (TypeScript)
   prisma/            schema + migrations
   src/modules/       projects, deployments (HTTP routes + database rules)
-  src/services/      git, docker, detection, build, deployment engine, workspace
+  src/services/      git, docker, detection, build, deployment engine, routing, workspace
   test/unit/         fast tests
   test/integration/  real Docker / network tests
 examples/hello-node/ sample deployable app
@@ -146,6 +155,7 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 
 - [Architecture](docs/architecture.md) — components and why they are split this way
 - [Deployment engine](docs/deployment-engine.md) — pipeline, statuses, health checks, debugging
+- [Routing](docs/routing.md) — Traefik, stable hostnames, zero-downtime redeploys
 - [Database](docs/database.md) — schema and persistence decisions
 - [GitHub](docs/github.md) — sign-in setup, sessions, authorization, repository selection
 - [Dashboard](docs/dashboard.md) — how the web app talks to the API, and its visual language
@@ -160,4 +170,4 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [x] **M4** GitHub OAuth, repository & branch selection
 - [x] **M5** Next.js dashboard
 - [x] **M6** GitHub webhooks (auto-deploy on push)
-- [ ] **M7** Traefik routing, zero-downtime redeploy
+- [x] **M7** Traefik routing, zero-downtime redeploy

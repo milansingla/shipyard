@@ -15,6 +15,7 @@ import type { DeploymentStatus } from "../../src/services/deployment/status.js";
 import type { DeploymentJob, DeploymentObserver } from "../../src/services/deployment/types.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
+import type { Router } from "../../src/services/routing/Router.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
@@ -58,6 +59,9 @@ function harness(
     files?: Record<string, string>;
     buildFails?: boolean;
     healthFails?: boolean;
+    /** Behave like the Traefik router (own network, hostname URLs) instead of plain ports. */
+    routed?: boolean;
+    routeFails?: boolean;
   } = {},
 ): Harness {
   const calls: string[] = [];
@@ -90,7 +94,7 @@ function harness(
       }
     },
     async createAndStartContainer(opts) {
-      calls.push(`start:${opts.containerName}:${opts.containerPort}`);
+      calls.push(`start:${opts.containerName}:${opts.containerPort}:${opts.network ?? "bridge"}`);
       return { id: "container-id", hostPort: 49153 };
     },
     async getContainerState() {
@@ -105,8 +109,22 @@ function harness(
     },
     inspectManagedContainer: unused,
     restartContainer: unused,
+    connectToNetwork: unused,
     removeContainer: unused,
     removeImage: unused,
+  };
+
+  const router: Router = {
+    network: options.routed ? "shipyard-edge" : null,
+    urlFor: (name, hostPort) => (options.routed ? `http://${name}.localhost` : `http://localhost:${hostPort}`),
+    async activate(target) {
+      calls.push(`route:${target.name}->${target.containerName}:${target.containerPort}`);
+      if (options.routeFails) {
+        throw new AppError(ErrorCode.ROUTING_FAILED, "Traefik did not start sending hello.localhost to this deployment.");
+      }
+    },
+    async deactivate() {},
+    async sync() {},
   };
 
   const engine = new DeploymentEngine({
@@ -122,6 +140,7 @@ function harness(
       },
     },
     workspace: new WorkspaceService(workspaceRoot),
+    router,
     logger: silentLogger,
   });
 
@@ -148,8 +167,9 @@ describe("DeploymentEngine.run", () => {
       "clone:main",
       "build:shipyard/hello:3f2a9c1e77b4:8080:p1",
       "dockerfile:Dockerfile:present",
-      "start:shipyard-hello-3f2a9c1e77b4:8080",
+      "start:shipyard-hello-3f2a9c1e77b4:8080:bridge",
       "health:http://127.0.0.1:49153/",
+      "route:hello->shipyard-hello-3f2a9c1e77b4:8080",
     ]);
     expect(state).toMatchObject({
       id: JOB_ID,
@@ -247,6 +267,30 @@ describe("DeploymentEngine.run", () => {
     expect(h.calls.slice(-2)).toEqual(["logs", "stop:container-id"]);
     expect(logs).toEqual(["Error: listen EADDRINUSE\n"]);
     expect(error.deployment).toMatchObject({ containerId: "container-id", deploymentUrl: null });
+  });
+
+  it("with a proxy: joins its network and moves the hostname only once the app is healthy", async () => {
+    const h = harness({ routed: true });
+    const state = await h.engine.run(job(), { onStatusChange: (record) => void h.calls.push(record.status) });
+
+    expect(h.calls).toContain("start:shipyard-hello-3f2a9c1e77b4:8080:shipyard-edge");
+    expect(h.calls.slice(-4)).toEqual([
+      "health:http://127.0.0.1:49153/",
+      S.HEALTHY,
+      "route:hello->shipyard-hello-3f2a9c1e77b4:8080",
+      S.RUNNING,
+    ]);
+    expect(state.deploymentUrl).toBe("http://hello.localhost");
+  });
+
+  it("when traffic can't be moved: FAILED, container stopped, so the previous deployment keeps serving", async () => {
+    const h = harness({ routed: true, routeFails: true });
+    const error = (await h.engine.run(job(), h.observer).catch((e: unknown) => e)) as DeploymentFailedError;
+
+    expect(error.code).toBe(ErrorCode.ROUTING_FAILED);
+    expect(h.statuses).toEqual([S.CLONING, S.BUILDING, S.STARTING, S.HEALTHY, S.FAILED]);
+    expect(h.calls.at(-1)).toBe("stop:container-id");
+    expect(error.deployment.deploymentUrl).toBeNull();
   });
 
   it("a failing observer fails the deployment instead of being ignored", async () => {

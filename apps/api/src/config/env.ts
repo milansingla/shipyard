@@ -11,6 +11,9 @@ const ROOT_ENV_FILE = fileURLToPath(new URL("../../../../.env", import.meta.url)
 
 const LOG_LEVELS = ["fatal", "error", "warn", "info", "debug", "trace", "silent"] as const;
 
+// One or more DNS labels: "localhost", "apps.example.com". No scheme, port or wildcard.
+const DOMAIN = /^(?=.{1,200}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/;
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   HOST: z.string().min(1).default("127.0.0.1"),
@@ -24,11 +27,20 @@ const envSchema = z.object({
   SHIPYARD_WORKSPACE_DIR: z.string().min(1).optional(),
   SHIPYARD_DATA_DIR: z.string().min(1).optional(),
   SHIPYARD_ALLOWED_GIT_HOSTS: z.string().default("github.com"),
-  // Restricted to two values until Traefik replaces host-port publishing.
+  // Only two sensible values. With Traefik routing, only loopback (health checks) is allowed.
   SHIPYARD_PUBLISH_HOST: z.enum(["127.0.0.1", "0.0.0.0"]).default("127.0.0.1"),
   SHIPYARD_HEALTHCHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
   SHIPYARD_GIT_CLONE_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
   SHIPYARD_BUILD_TIMEOUT_MS: z.coerce.number().int().positive().default(15 * 60_000),
+  /** Serve each project at <slug>.<domain> through Traefik. Unset = each deployment on its own port. */
+  SHIPYARD_PUBLIC_DOMAIN: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(DOMAIN, 'must be a domain name such as "localhost" or "apps.example.com" (no scheme or port)')
+    .optional(),
+  /** Port Traefik listens on, on this host (docker-compose.yml publishes it). */
+  SHIPYARD_HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(80),
   /** Where browsers reach this API; used for the OAuth callback URL. Default http://localhost:<PORT>. */
   SHIPYARD_PUBLIC_URL: z.url({ protocol: /^https?$/ }).optional(),
   /** Where the browser is sent after signing in (the dashboard). Default: SHIPYARD_PUBLIC_URL. */
@@ -61,6 +73,14 @@ export interface AppConfig {
   publishHost: "127.0.0.1" | "0.0.0.0";
   gitCloneTimeoutMs: number;
   buildTimeoutMs: number;
+  /** null = no proxy: each deployment is reached on its own published port. */
+  routing: {
+    domain: string;
+    /** Where Traefik listens on this host. */
+    httpPort: number;
+    /** Traefik's dynamic configuration directory (mounted by docker-compose.yml). */
+    routesDir: string;
+  } | null;
   healthCheck: {
     timeoutMs: number;
     intervalMs: number;
@@ -105,6 +125,22 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     throw new AppError(ErrorCode.CONFIG_INVALID, "SHIPYARD_ALLOWED_GIT_HOSTS must list at least one host.");
   }
 
+  const dataDir = path.resolve(parsed.SHIPYARD_DATA_DIR ?? path.join(os.homedir(), ".shipyard"));
+  const routing = parsed.SHIPYARD_PUBLIC_DOMAIN
+    ? {
+        domain: parsed.SHIPYARD_PUBLIC_DOMAIN,
+        httpPort: parsed.SHIPYARD_HTTP_PORT,
+        routesDir: path.join(dataDir, "traefik"),
+      }
+    : null;
+  if (routing && parsed.SHIPYARD_PUBLISH_HOST !== "127.0.0.1") {
+    // Visitors come in through Traefik; a port published on every interface would bypass it.
+    throw new AppError(
+      ErrorCode.CONFIG_INVALID,
+      "With SHIPYARD_PUBLIC_DOMAIN set, apps are reached through Traefik: SHIPYARD_PUBLISH_HOST must be 127.0.0.1.",
+    );
+  }
+
   const publicUrl = trimTrailingSlash(parsed.SHIPYARD_PUBLIC_URL ?? `http://localhost:${parsed.PORT}`);
 
   return {
@@ -117,11 +153,12 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     workspaceDir: path.resolve(
       parsed.SHIPYARD_WORKSPACE_DIR ?? path.join(os.tmpdir(), "shipyard", "workspaces"),
     ),
-    dataDir: path.resolve(parsed.SHIPYARD_DATA_DIR ?? path.join(os.homedir(), ".shipyard")),
+    dataDir,
     allowedGitHosts,
     publishHost: parsed.SHIPYARD_PUBLISH_HOST,
     gitCloneTimeoutMs: parsed.SHIPYARD_GIT_CLONE_TIMEOUT_MS,
     buildTimeoutMs: parsed.SHIPYARD_BUILD_TIMEOUT_MS,
+    routing,
     healthCheck: {
       timeoutMs: parsed.SHIPYARD_HEALTHCHECK_TIMEOUT_MS,
       intervalMs: 1_000,

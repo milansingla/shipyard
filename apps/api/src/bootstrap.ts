@@ -16,12 +16,15 @@ import { HealthCheckService } from "./services/deployment/HealthCheckService.js"
 import { DockerService } from "./services/docker/DockerService.js";
 import { GitService } from "./services/git/GitService.js";
 import { GitHubClient } from "./services/github/GitHubClient.js";
+import { DirectPortRouter, type Router } from "./services/routing/Router.js";
+import { EDGE_NETWORK, TraefikRouter, createTraefikProbe } from "./services/routing/TraefikRouter.js";
 import { WorkspaceService } from "./services/workspace/WorkspaceService.js";
 
 export interface EngineServices {
   docker: DockerService;
   git: GitService;
   engine: DeploymentEngine;
+  router: Router;
 }
 
 export interface ApiServices extends EngineServices {
@@ -39,7 +42,11 @@ export interface ApiServices extends EngineServices {
  * wired together. Everything else receives its dependencies as arguments,
  * which is what makes the services testable with fakes.
  */
-export function createEngineServices(config: AppConfig, logger: Logger): EngineServices {
+export function createEngineServices(
+  config: AppConfig,
+  logger: Logger,
+  router: Router = createRouter(config, logger),
+): EngineServices {
   // Dockerode honours DOCKER_HOST; otherwise it uses the local Docker socket.
   const docker = new DockerService(
     new Docker(),
@@ -53,10 +60,23 @@ export function createEngineServices(config: AppConfig, logger: Logger): EngineS
     docker,
     healthCheck: new HealthCheckService(config.healthCheck),
     workspace: new WorkspaceService(config.workspaceDir),
+    router,
     logger: logger.child({ component: "engine" }),
   });
 
-  return { docker, git, engine };
+  return { docker, git, engine, router };
+}
+
+/** Traefik when SHIPYARD_PUBLIC_DOMAIN is set; otherwise each deployment is reached on its own port. */
+function createRouter(config: AppConfig, logger: Logger): Router {
+  if (!config.routing) return new DirectPortRouter();
+  const { domain, httpPort, routesDir } = config.routing;
+  return new TraefikRouter(
+    // Traefik applies at most one configuration change every ~2s; 15s leaves room for a busy host.
+    { network: EDGE_NETWORK, domain, httpPort, routesDir, cutoverTimeoutMs: 15_000, probeIntervalMs: 250 },
+    createTraefikProbe(httpPort, 3_000),
+    logger.child({ component: "router" }),
+  );
 }
 
 /** Everything the HTTP API needs, including the database. */
@@ -67,6 +87,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
   const deployments = new DeploymentService({
     prisma,
     engine: engineServices.engine,
+    router: engineServices.router,
     buildLogs: new BuildLogStore(config.dataDir),
     allowedGitHosts: config.allowedGitHosts,
     logger: logger.child({ component: "deployments" }),

@@ -9,13 +9,19 @@ import type { DeploymentJob, DeploymentState } from "../../services/deployment/t
 import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
+import type { RouteTarget, Router } from "../../services/routing/Router.js";
 import type { BuildLogStore, BuildLogWriter } from "./BuildLogStore.js";
 
-export type EngineLike = Pick<DeploymentEngine, "run" | "stop" | "restart" | "getLogs" | "destroy" | "inspect">;
+export type EngineLike = Pick<
+  DeploymentEngine,
+  "run" | "stop" | "restart" | "getLogs" | "destroy" | "inspect" | "ensureRoutable"
+>;
 
 export interface DeploymentServiceDeps {
   prisma: PrismaClient;
   engine: EngineLike;
+  /** The same router the engine uses: stopping takes a deployment out of it, startup rebuilds it. */
+  router: Pick<Router, "urlFor" | "deactivate" | "sync">;
   buildLogs: Pick<BuildLogStore, "open" | "read" | "remove">;
   allowedGitHosts: readonly string[];
   logger: Logger;
@@ -50,9 +56,11 @@ const IN_PROGRESS: DeploymentStatus[] = [
  *
  * - every status change is persisted to PostgreSQL
  * - at most one deploy/restart per project at a time
- * - a new deployment only replaces the old one AFTER it is RUNNING
+ * - a new deployment only replaces the old one AFTER it is RUNNING, i.e. after
+ *   the router confirmed visitors reach it (zero-downtime redeploys)
  * - deploys run in the background; the API returns immediately
  * - after a crash/restart of Shipyard, stored statuses are reconciled with Docker
+ *   and the route table is rebuilt from the RUNNING deployments
  *
  * Pushes that arrive while a project is busy are coalesced: the project is
  * marked, and ONE deploy of the branch's latest commit starts when the lock is
@@ -180,12 +188,13 @@ export class DeploymentService {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "This deployment has no container to restart.");
     }
 
+    const project = await this.getProject(deployment.projectId, ownerId);
     this.lockProject(deployment.projectId);
     try {
       const starting = await this.moveTo(deployment, DeploymentStatus.STARTING);
       let result;
       try {
-        result = await this.deps.engine.restart(deployment.containerId);
+        result = await this.deps.engine.restart(deployment.containerId, project.slug);
       } catch (error) {
         await this.markFailed(id, error);
         throw error;
@@ -213,6 +222,7 @@ export class DeploymentService {
     try {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { projectId } });
       for (const deployment of deployments) {
+        await this.deactivateRoute(deployment);
         // If Docker is unreachable this throws and the project is NOT deleted,
         // so no containers are orphaned. The user can simply retry.
         await this.deps.engine.destroy({ containerId: deployment.containerId, imageName: deployment.imageName });
@@ -252,9 +262,12 @@ export class DeploymentService {
       summary.stopped += 1;
     }
 
-    const running = await prisma.deployment.findMany({ where: { status: DeploymentStatus.RUNNING } });
+    const running = await prisma.deployment.findMany({
+      where: { status: DeploymentStatus.RUNNING },
+      include: { project: { select: { slug: true } } },
+    });
     for (const deployment of running) {
-      const reason = await this.checkStillRunning(deployment);
+      const reason = await this.checkStillRunning(deployment, deployment.project.slug);
       if (reason) {
         await this.markFailed(deployment.id, reason);
         summary.failed += 1;
@@ -262,6 +275,8 @@ export class DeploymentService {
         summary.refreshed += 1;
       }
     }
+
+    await this.syncRoutes();
 
     if (summary.failed + summary.stopped > 0) logger.warn(summary, "Reconciled deployments after startup");
     return summary;
@@ -346,6 +361,9 @@ export class DeploymentService {
     assertTransition(deployment.status, DeploymentStatus.STOPPING);
     const stopping = await this.moveTo(deployment, DeploymentStatus.STOPPING);
     try {
+      // Out of the router first: visitors get a clean "not found", not errors from a stopping app.
+      // A deployment being retired no longer has the route, so this is a no-op for it.
+      await this.deactivateRoute(deployment);
       if (deployment.containerId) await this.deps.engine.stop(deployment.containerId);
     } catch (error) {
       // Removed outside Shipyard: it is certainly not running any more.
@@ -394,18 +412,28 @@ export class DeploymentService {
       .catch((error: unknown) => this.deps.logger.error({ err: error, deploymentId: id }, "Could not mark FAILED"));
   }
 
-  /** Returns a failure reason, or null if the container is still running (refreshing its port). */
-  private async checkStillRunning(deployment: Deployment): Promise<string | null> {
+  /**
+   * Returns a failure reason, or null if the container is still running. Refreshes
+   * its port and URL (the URL changes when routing was turned on or off).
+   */
+  private async checkStillRunning(deployment: Deployment, slug: string): Promise<string | null> {
     if (!deployment.containerId) return "Deployment has no container.";
     try {
       const container = await this.deps.engine.inspect(deployment.containerId);
       if (!container.running) {
         return `Container exited${container.exitCode === null ? "" : ` with code ${container.exitCode}`} while Shipyard was not running.`;
       }
-      if (container.hostPort !== deployment.hostPort) {
+      // Not fatal: the app still runs; the router just can't reach it until this is fixed.
+      await this.deps.engine
+        .ensureRoutable(deployment.containerId)
+        .catch((error: unknown) =>
+          this.deps.logger.warn({ err: error, deploymentId: deployment.id }, "Router cannot reach this deployment"),
+        );
+      const deploymentUrl = container.hostPort === null ? null : this.deps.router.urlFor(slug, container.hostPort);
+      if (container.hostPort !== deployment.hostPort || deploymentUrl !== deployment.deploymentUrl) {
         await this.deps.prisma.deployment.update({
           where: { id: deployment.id },
-          data: { hostPort: container.hostPort, deploymentUrl: container.deploymentUrl },
+          data: { hostPort: container.hostPort, deploymentUrl },
         });
       }
       return null;
@@ -413,6 +441,38 @@ export class DeploymentService {
       if (error instanceof NotFoundError) return "Container no longer exists.";
       throw error;
     }
+  }
+
+  /**
+   * Rebuilds the router's table from the database: one route per RUNNING
+   * deployment. If a project somehow has two, the most recent one wins.
+   */
+  private async syncRoutes(): Promise<void> {
+    const running = await this.deps.prisma.deployment.findMany({
+      where: { status: DeploymentStatus.RUNNING },
+      include: { project: { select: { slug: true } } },
+      orderBy: { finishedAt: "asc" },
+    });
+    const targets = new Map<string, RouteTarget>();
+    for (const deployment of running) {
+      if (!deployment.containerName || deployment.containerPort === null) continue;
+      targets.set(deployment.project.slug, {
+        name: deployment.project.slug,
+        deploymentId: deployment.id,
+        containerName: deployment.containerName,
+        containerPort: deployment.containerPort,
+      });
+    }
+    await this.deps.router.sync([...targets.values()]);
+  }
+
+  /** Takes the deployment out of the router, if the route still points at it. */
+  private async deactivateRoute(deployment: Pick<Deployment, "id" | "projectId">): Promise<void> {
+    const project = await this.deps.prisma.project.findUnique({
+      where: { id: deployment.projectId },
+      select: { slug: true },
+    });
+    if (project) await this.deps.router.deactivate(project.slug, deployment.id);
   }
 
   /** Unscoped: only for re-reading a row whose access was already checked. */

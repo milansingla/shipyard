@@ -32,6 +32,8 @@ export interface ManagedContainer extends ContainerState {
   deploymentId: string | null;
   containerPort: number;
   hostPort: number | null;
+  /** Docker networks the container is attached to. */
+  networks: string[];
 }
 
 export interface CreateContainerOptions {
@@ -39,6 +41,8 @@ export interface CreateContainerOptions {
   containerName: string;
   containerPort: number;
   labels: Record<string, string>;
+  /** Docker network to attach the container to (instead of the default bridge), e.g. the proxy's. */
+  network?: string | null;
 }
 
 export interface StartedContainer {
@@ -156,6 +160,7 @@ export class DockerService {
 
   async createAndStartContainer(options: CreateContainerOptions): Promise<StartedContainer> {
     const portKey = `${options.containerPort}/tcp`;
+    if (options.network) await this.assertNetworkExists(options.network);
 
     let container: Docker.Container;
     try {
@@ -168,6 +173,7 @@ export class DockerService {
         HostConfig: {
           // HostPort "" = let Docker pick a free ephemeral port.
           PortBindings: { [portKey]: [{ HostIp: this.options.publishHost, HostPort: "" }] },
+          ...(options.network ? { NetworkMode: options.network } : {}),
           LogConfig: RUNTIME_LOG_CONFIG,
           SecurityOpt: ["no-new-privileges:true"],
           PidsLimit: 512,
@@ -217,6 +223,7 @@ export class DockerService {
       deploymentId: labels[ShipyardLabel.DEPLOYMENT_ID] ?? null,
       containerPort,
       hostPort: binding?.HostPort ? Number(binding.HostPort) : null,
+      networks: Object.keys(info.NetworkSettings.Networks ?? {}),
       running: info.State.Running,
       exitCode: info.State.Running ? null : info.State.ExitCode,
     };
@@ -248,6 +255,16 @@ export class DockerService {
     }
   }
 
+  /** Attaches a running or stopped container to a network. */
+  async connectToNetwork(containerId: string, network: string): Promise<void> {
+    await this.assertNetworkExists(network);
+    try {
+      await this.docker.getNetwork(network).connect({ Container: containerId });
+    } catch (error) {
+      throw this.dockerError(ErrorCode.CONTAINER_START_FAILED, `Could not attach container to network ${network}`, error);
+    }
+  }
+
   async restartContainer(containerId: string): Promise<void> {
     try {
       await this.docker.getContainer(containerId).restart({ t: STOP_TIMEOUT_SECONDS });
@@ -271,6 +288,22 @@ export class DockerService {
     } catch (error) {
       if (isDockerNotFound(error)) return;
       throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not remove image", error);
+    }
+  }
+
+  /** Checked up front: Docker's own error for a missing network doesn't say how to fix it. */
+  private async assertNetworkExists(network: string): Promise<void> {
+    try {
+      await this.docker.getNetwork(network).inspect();
+    } catch (error) {
+      if (isDockerNotFound(error)) {
+        throw new AppError(
+          ErrorCode.CONTAINER_START_FAILED,
+          `Docker network "${network}" doesn't exist. Start Traefik with \`npm run db:up\`; it creates the network.`,
+          { statusCode: 422 },
+        );
+      }
+      throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not inspect Docker network", error);
     }
   }
 

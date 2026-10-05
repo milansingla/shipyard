@@ -1,10 +1,11 @@
 import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { prepareBuild } from "../build/prepareBuild.js";
-import { type DockerService, ShipyardLabel } from "../docker/DockerService.js";
+import { type DockerService, type ManagedContainer, ShipyardLabel } from "../docker/DockerService.js";
 import type { LogChunk } from "../docker/logs.js";
 import { buildContainerName, buildImageName } from "../docker/naming.js";
 import type { SourceProvider } from "../git/GitService.js";
+import type { Router } from "../routing/Router.js";
 import type { WorkspaceService } from "../workspace/WorkspaceService.js";
 import type { HealthCheckService } from "./HealthCheckService.js";
 import { DeploymentStatus, assertTransition } from "./status.js";
@@ -26,6 +27,7 @@ export type EngineDocker = Pick<
   | "getLogs"
   | "stopContainer"
   | "restartContainer"
+  | "connectToNetwork"
   | "removeContainer"
   | "removeImage"
 >;
@@ -35,6 +37,7 @@ export interface DeploymentEngineDeps {
   docker: EngineDocker;
   healthCheck: Pick<HealthCheckService, "waitUntilHealthy">;
   workspace: Pick<WorkspaceService, "prepare" | "cleanup">;
+  router: Router;
   logger: Logger;
 }
 
@@ -52,7 +55,7 @@ export class DeploymentFailedError extends AppError {
 const FAILURE_LOG_TAIL = 50;
 
 /**
- * The mechanics of a deployment: clone → detect/generate Dockerfile → build → start → health check.
+ * The mechanics of a deployment: clone → detect/generate Dockerfile → build → start → health check → route.
  *
  * It enforces the status order for ONE run and reports progress to an observer.
  * It knows nothing about the database, projects, or which other deployments
@@ -122,6 +125,7 @@ export class DeploymentEngine {
         containerName: state.containerName,
         containerPort: state.containerPort,
         labels,
+        network: this.deps.router.network,
       });
       state.containerId = container.id;
       state.hostPort = container.hostPort;
@@ -134,8 +138,17 @@ export class DeploymentEngine {
       log("system", `Health check passed (HTTP ${health.statusCode} after ${health.attempts} attempt(s))\n`);
       await moveTo(DeploymentStatus.HEALTHY);
 
-      // 6. Route. Today: the published host port. Milestone "Traefik": a stable hostname.
-      state.deploymentUrl = publicUrl(container.hostPort);
+      // 6. Route: move the project's URL to this container. Resolves only once visitors
+      //    actually reach it; until then the previous deployment keeps serving.
+      const url = this.deps.router.urlFor(job.name, container.hostPort);
+      await this.deps.router.activate({
+        name: job.name,
+        deploymentId: job.id,
+        containerName: state.containerName,
+        containerPort: state.containerPort,
+      });
+      state.deploymentUrl = url;
+      log("system", `Live at ${url}\n`);
       await moveTo(DeploymentStatus.RUNNING);
 
       logger.info({ url: state.deploymentUrl, commitSha: state.commitSha }, "Deployment running");
@@ -181,8 +194,11 @@ export class DeploymentEngine {
     return { containerName: container.name, status: DeploymentStatus.STOPPED, hostPort: null, deploymentUrl: null };
   }
 
-  /** Restarts the container and waits until it is healthy again. */
-  async restart(containerReference: string): Promise<ContainerActionResult> {
+  /**
+   * Restarts the container, waits until it is healthy again, then points the
+   * route `routeName` at it. Restarting an older deployment is a rollback.
+   */
+  async restart(containerReference: string, routeName: string): Promise<ContainerActionResult> {
     const before = await this.deps.docker.inspectManagedContainer(containerReference);
     await this.deps.docker.restartContainer(before.id);
 
@@ -197,31 +213,49 @@ export class DeploymentEngine {
       getContainerState: () => this.deps.docker.getContainerState(after.id),
     });
 
+    await this.joinRouterNetwork(after);
+    await this.deps.router.activate({
+      name: routeName,
+      deploymentId: after.deploymentId ?? after.id,
+      containerName: after.name,
+      containerPort: after.containerPort,
+    });
+
     return {
       containerName: after.name,
       status: DeploymentStatus.RUNNING,
       hostPort: after.hostPort,
-      deploymentUrl: publicUrl(after.hostPort),
+      deploymentUrl: this.deps.router.urlFor(routeName, after.hostPort),
     };
+  }
+
+  /**
+   * Makes sure the router can reach an existing container. Containers started
+   * before routing was turned on are not on its network yet.
+   */
+  async ensureRoutable(containerReference: string): Promise<void> {
+    await this.joinRouterNetwork(await this.deps.docker.inspectManagedContainer(containerReference));
   }
 
   /** Current container state, for reconciling stored status with reality. */
   async inspect(
     containerReference: string,
-  ): Promise<{ running: boolean; exitCode: number | null; hostPort: number | null; deploymentUrl: string | null }> {
+  ): Promise<{ running: boolean; exitCode: number | null; hostPort: number | null }> {
     const container = await this.deps.docker.inspectManagedContainer(containerReference);
-    return {
-      running: container.running,
-      exitCode: container.exitCode,
-      hostPort: container.hostPort,
-      deploymentUrl: container.hostPort === null ? null : publicUrl(container.hostPort),
-    };
+    return { running: container.running, exitCode: container.exitCode, hostPort: container.hostPort };
   }
 
   /** Removes a deployment's container and image. Missing artifacts are ignored. */
   async destroy(artifacts: { containerId: string | null; imageName: string | null }): Promise<void> {
     if (artifacts.containerId) await this.deps.docker.removeContainer(artifacts.containerId);
     if (artifacts.imageName) await this.deps.docker.removeImage(artifacts.imageName);
+  }
+
+  private async joinRouterNetwork(container: ManagedContainer): Promise<void> {
+    const { network } = this.deps.router;
+    if (network && !container.networks.includes(network)) {
+      await this.deps.docker.connectToNetwork(container.id, network);
+    }
   }
 
   private async transition(
@@ -266,8 +300,4 @@ export class DeploymentEngine {
 // Published ports are bound to 127.0.0.1 or 0.0.0.0; either way, loopback reaches them.
 function healthCheckUrl(hostPort: number): string {
   return `http://127.0.0.1:${hostPort}/`;
-}
-
-function publicUrl(hostPort: number): string {
-  return `http://localhost:${hostPort}`;
 }

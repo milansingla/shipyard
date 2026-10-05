@@ -100,3 +100,32 @@ describe("parseConfig: URLs and GitHub sign-in", () => {
     );
   });
 });
+
+describe("parseConfig: Traefik routing", () => {
+  it("is off by default: each deployment is reached on its own port", () => {
+    expect(parseConfig({}).routing).toBeNull();
+  });
+
+  it("routes <slug>.<domain> through Traefik on port 80, with routes kept in the data dir", () => {
+    const config = parseConfig({ SHIPYARD_PUBLIC_DOMAIN: " Apps.Example.com ", SHIPYARD_DATA_DIR: "/srv/shipyard" });
+    expect(config.routing).toEqual({
+      domain: "apps.example.com",
+      httpPort: 80,
+      routesDir: path.join("/srv/shipyard", "traefik"),
+    });
+    expect(parseConfig({ SHIPYARD_PUBLIC_DOMAIN: "localhost", SHIPYARD_HTTP_PORT: "8000" }).routing?.httpPort).toBe(8000);
+  });
+
+  it.each(["http://localhost", "localhost:80", "*.example.com", ".localhost", "exa mple.com", "a`b"])(
+    "rejects the domain %j",
+    (domain) => {
+      expect(() => parseConfig({ SHIPYARD_PUBLIC_DOMAIN: domain })).toThrow("SHIPYARD_PUBLIC_DOMAIN");
+    },
+  );
+
+  it("refuses to also publish apps on every interface, bypassing Traefik", () => {
+    expect(() => parseConfig({ SHIPYARD_PUBLIC_DOMAIN: "localhost", SHIPYARD_PUBLISH_HOST: "0.0.0.0" })).toThrow(
+      "SHIPYARD_PUBLISH_HOST must be 127.0.0.1",
+    );
+  });
+});

@@ -4,6 +4,7 @@ Code: [`services/deployment/DeploymentEngine.ts`](../apps/api/src/services/deplo
 (mechanics of one run) and
 [`modules/deployments/DeploymentService.ts`](../apps/api/src/modules/deployments/DeploymentService.ts)
 (persistence, one-at-a-time per project, retiring the previous deployment).
+Routing and zero-downtime switching: [routing.md](routing.md).
 
 ## Pipeline
 
@@ -21,10 +22,12 @@ validate input ──✗──► ValidationError (no deployment is created)
   BUILDING ── docker build (tar of the clone; .dockerignore applied, .git excluded)
       │       workspace deleted (source now lives in the image)
   STARTING ── docker create + start, PORT=<port>, published on 127.0.0.1:<random>
+      │       (with routing: attached to the shipyard-edge network)
       │       health check loop
-  HEALTHY ─── app answered HTTP < 500
-      │       routing registered (today: host port URL; later: Traefik)
-  RUNNING
+  HEALTHY ─── app answered HTTP < 500 — the previous deployment is still serving
+      │       route: <slug>.<domain> → this container, confirmed through Traefik
+      │       (without routing: URL = http://localhost:<published port>)
+  RUNNING ─── DeploymentService then retires the previous deployment
 
 any step fails ──► FAILED  (errorMessage stored, runtime logs captured,
                             container stopped but kept for inspection)
@@ -46,8 +49,10 @@ any step fails ──► FAILED  (errorMessage stored, runtime logs captured,
 
 ### Why HEALTHY and RUNNING are separate
 HEALTHY says *the process works*. RUNNING says *users can reach it*. With
-Traefik (M7) there's real work between them — registering the route — and a
-redeploy will only switch traffic once the new version is HEALTHY.
+routing on, there's real work between them: Shipyard points the project's
+hostname at the new container and waits until Traefik actually serves it from
+there. A deployment that fails that step (`ROUTING_FAILED`) never took traffic,
+and the previous one keeps serving. See [routing.md](routing.md#the-cutover-redeploy).
 
 ## Health checks
 
@@ -135,14 +140,17 @@ at the end). See [database.md](database.md#decisions) for why logs are files.
 ## Restart & stop
 
 Restart = `docker restart` → re-read the host port (Docker may assign a new
-ephemeral one) → health check → RUNNING. It responds only after the health
-check, unlike deploy (202, background). Stop is idempotent.
+ephemeral one) → health check → route → RUNNING. It responds only after the
+health check, unlike deploy (202, background). Stop takes the deployment out
+of the router, then stops the container; it is idempotent.
 
 Only one deploy/restart per project runs at a time (409 `DEPLOYMENT_IN_PROGRESS`).
 A new deployment retires the previous one only **after** it is RUNNING, so a
 failed deploy leaves the old version serving. Retired containers are stopped,
 not removed: restarting an older STOPPED deployment brings it back and retires
-the current one — the V2 rollback mechanism.
+the current one — the V2 rollback mechanism. With routing on, both redeploys
+and rollbacks switch traffic without downtime; restarting the *live*
+deployment does not (it is the same container).
 
 ## Debugging
 
@@ -168,6 +176,7 @@ LOG_LEVEL=debug npm run shipyard -- deploy <url>  # 6. Verbose engine logs
 | `DOCKER_BUILD_FAILED`                     | A step in the Dockerfile failed — read the build log   |
 | `exited with code N before becoming healthy` | App crashed on boot — check runtime logs            |
 | health check times out with `ECONNREFUSED` | App listens on `localhost` or a different port       |
+| `ROUTING_FAILED`                          | Traefik not running or reading another directory — [routing.md](routing.md#debugging) |
 
 Cleaning up everything Shipyard created:
 

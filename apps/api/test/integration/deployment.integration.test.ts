@@ -16,6 +16,7 @@ import { DockerService } from "../../src/services/docker/DockerService.js";
 import { formatLogChunks } from "../../src/services/docker/logs.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
+import { DirectPortRouter } from "../../src/services/routing/Router.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
@@ -49,6 +50,7 @@ function engine(sourceDir: string): DeploymentEngine {
     docker,
     healthCheck: new HealthCheckService({ timeoutMs: 30_000, intervalMs: 500, requestTimeoutMs: 2_000 }),
     workspace: new WorkspaceService(workspaceRoot),
+    router: new DirectPortRouter(), // Traefik routing: routing.integration.test.ts
     logger: silentLogger,
   });
 }
@@ -107,7 +109,7 @@ describe("deployment engine against real Docker", () => {
     const info = await dockerode.getContainer(record.containerId!).inspect();
     expect(info.HostConfig.PortBindings?.["3000/tcp"]?.[0]?.HostIp).toBe("127.0.0.1");
 
-    const restarted = await service.restart(record.containerName);
+    const restarted = await service.restart(record.containerName, "hello-node");
     expect(restarted.status).toBe(S.RUNNING);
     expect(restarted.deploymentUrl).toMatch(/^http:\/\/localhost:\d+$/);
 

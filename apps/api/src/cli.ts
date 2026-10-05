@@ -19,6 +19,7 @@ import { createLogger } from "./lib/logger.js";
 import { DeploymentFailedError } from "./services/deployment/DeploymentEngine.js";
 import type { DeploymentObserver } from "./services/deployment/types.js";
 import { formatLogChunks } from "./services/docker/logs.js";
+import { DirectPortRouter } from "./services/routing/Router.js";
 import { validateBranchName } from "./services/git/branchName.js";
 import { parseRepositoryUrl } from "./services/git/repositoryUrl.js";
 
@@ -57,7 +58,9 @@ async function main(): Promise<void> {
     level: config.logLevelExplicit ? config.logLevel : "error",
     pretty: config.env !== "production",
   });
-  const { engine } = createEngineServices(config, logger);
+  // CLI deployments aren't in the database, and the API rebuilds Traefik's routes from
+  // the database. So the CLI never routes: its deployments are reached on their port.
+  const { engine } = createEngineServices(config, logger, new DirectPortRouter());
 
   switch (command) {
     case "deploy": {
@@ -85,7 +88,7 @@ async function main(): Promise<void> {
       console.log(JSON.stringify(await engine.stop(target), null, 2));
       return;
     case "restart":
-      console.log(JSON.stringify(await engine.restart(target), null, 2));
+      console.log(JSON.stringify(await engine.restart(target, target), null, 2));
       return;
     default:
       throw new ValidationError(`Unknown command "${command}".\n${USAGE}`);
