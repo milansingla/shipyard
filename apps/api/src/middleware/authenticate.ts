@@ -9,11 +9,21 @@ export function sessionCookieName(secure: boolean): string {
   return secure ? "__Host-shipyard_session" : "shipyard_session";
 }
 
-/** Attaches `req.user` when the session cookie is valid. Never rejects: routes decide. */
-export function authenticate(auth: Pick<AuthService, "authenticate">, cookieName: string): RequestHandler {
+/**
+ * Attaches `req.user` from an `Authorization: Bearer shp_…` API key, or else
+ * from the session cookie. Never rejects: routes decide. A request that sends
+ * a Bearer header is judged by it alone (no silent fallback to a cookie).
+ */
+export function authenticate(auth: Pick<AuthService, "authenticate" | "authenticateApiKey">, cookieName: string): RequestHandler {
   return async (req, _res, next) => {
+    const bearer = /^Bearer (.+)$/i.exec(req.get("authorization") ?? "")?.[1];
+    if (bearer !== undefined) {
+      const user = await auth.authenticateApiKey(bearer.trim());
+      if (user) Object.assign(req, { user, authMethod: "apiKey" });
+      return next();
+    }
     const user = await auth.authenticate(readCookie(req.headers.cookie, cookieName));
-    if (user) req.user = user;
+    if (user) Object.assign(req, { user, authMethod: "session" });
     next();
   };
 }

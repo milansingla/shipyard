@@ -110,6 +110,17 @@ export interface ProjectDomain {
   createdAt: string;
 }
 
+export interface ApiKey {
+  id: string;
+  name: string;
+  /** First characters of the token, to tell keys apart. The token itself is never shown again. */
+  prefix: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revokedAt: string | null;
+}
+
 export interface DeploymentLogs {
   type: "build" | "runtime";
   content: string;

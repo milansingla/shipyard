@@ -13,6 +13,7 @@ import type { PrismaClient } from "../../src/db/prisma.js";
 import { NotFoundError } from "../../src/lib/errors.js";
 import { SecretBox } from "../../src/lib/secretBox.js";
 import { sessionCookieName } from "../../src/middleware/authenticate.js";
+import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
 import { AuthService } from "../../src/modules/auth/AuthService.js";
 import { BuildLogStore } from "../../src/modules/deployments/BuildLogStore.js";
 import { DeploymentService, type EngineLike } from "../../src/modules/deployments/DeploymentService.js";
@@ -270,7 +271,14 @@ beforeAll(async () => {
       deployments,
       environment,
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, logger: silentLogger }),
-      auth: { service: auth, github, sessionCookie: SESSION_COOKIE, secureCookies: false, appUrl: APP_URL },
+      auth: {
+        service: auth,
+        github,
+        sessionCookie: SESSION_COOKIE,
+        secureCookies: false,
+        appUrl: APP_URL,
+        apiKeys: new ApiKeyService({ prisma, logger: silentLogger }),
+      },
       webhooks: {
         service: new WebhookService({ prisma, deployments, logger: silentLogger }),
         secret: WEBHOOK_SECRET,
@@ -1208,6 +1216,69 @@ describe("rate limiting per user", () => {
     } finally {
       rateLimits.deploys.limit = generous.limit;
     }
+  });
+});
+
+describe("API keys", () => {
+  const bearer = async (token: string, method: string, route: string, body?: unknown) => {
+    const res = await fetch(`${api}${route}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, ...(body !== undefined && { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, body: text ? (JSON.parse(text) as Record<string, any>) : null };
+  };
+
+  it("shows the token once, stores only its hash, and authenticates as its owner", async () => {
+    const alice = await sessionFor(ALICE);
+    const created = await call(alice, "POST", "/api/api-keys", { name: "laptop CLI" });
+    expect(created.status).toBe(201);
+    const token = created.body!.data.token as string;
+    expect(token).toMatch(/^shp_[A-Za-z0-9_-]{43}$/);
+    expect(created.body!.data.key).toMatchObject({ name: "laptop CLI", prefix: token.slice(0, 12), revokedAt: null });
+
+    const stored = await prisma.apiKey.findFirstOrThrow({ where: { name: "laptop CLI" } });
+    expect(JSON.stringify(stored)).not.toContain(token);
+    const listed = await call(alice, "GET", "/api/api-keys");
+    expect(JSON.stringify(listed.body)).not.toContain(token.slice(12));
+
+    expect((await bearer(token, "GET", "/api/auth/me")).body!.data.login).toBe("alice");
+    expect((await bearer(token, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/keyed" })).status).toBe(201);
+    expect((await prisma.apiKey.findFirstOrThrow({ where: { id: stored.id } })).lastUsedAt).not.toBeNull();
+  });
+
+  it("stops working when revoked or expired; a wrong key is just 'signed out'", async () => {
+    const alice = await sessionFor(ALICE);
+    const { token, key } = (await call(alice, "POST", "/api/api-keys", { name: "ci" })).body!.data;
+    expect((await call(alice, "DELETE", `/api/api-keys/${key.id}`)).status).toBe(204);
+    expect((await bearer(token, "GET", "/api/projects")).status).toBe(401);
+    expect((await call(alice, "DELETE", `/api/api-keys/${key.id}`)).status).toBe(204); // idempotent
+
+    const expiring = (await call(alice, "POST", "/api/api-keys", { name: "short", expiresInDays: 1 })).body!.data;
+    await prisma.apiKey.update({ where: { id: expiring.key.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect((await bearer(expiring.token, "GET", "/api/projects")).status).toBe(401);
+
+    expect((await bearer("shp_" + "x".repeat(43), "GET", "/api/projects")).status).toBe(401);
+  });
+
+  it("can't create more keys, and can't touch another user's keys", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const { token, key } = (await call(alice, "POST", "/api/api-keys", { name: "mine" })).body!.data;
+
+    const minted = await bearer(token, "POST", "/api/api-keys", { name: "escalate" });
+    expect(minted.status).toBe(403);
+    expect((await call(bob, "DELETE", `/api/api-keys/${key.id}`)).status).toBe(404);
+    expect((await call(bob, "GET", "/api/api-keys")).body!.data).toEqual([]);
+  });
+
+  it("is refused for users removed from the allowlist", async () => {
+    // A key whose owner is no longer on the allowlist (here: a login that never was).
+    const user = await prisma.user.create({ data: { githubId: 9_999n, login: "removed", githubAccessToken: "v1:x" } });
+    const service = new ApiKeyService({ prisma, logger: silentLogger });
+    const { token } = await service.create(user.id, { name: "old" });
+    expect((await bearer(token, "GET", "/api/projects")).status).toBe(401);
   });
 });
 

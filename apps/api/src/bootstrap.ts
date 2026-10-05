@@ -6,6 +6,7 @@ import type { Logger } from "./lib/logger.js";
 import type { AppAuth } from "./app.js";
 import { SecretBox } from "./lib/secretBox.js";
 import { sessionCookieName } from "./middleware/authenticate.js";
+import { ApiKeyService } from "./modules/auth/ApiKeyService.js";
 import { AuthService } from "./modules/auth/AuthService.js";
 import { BuildLogStore } from "./modules/deployments/BuildLogStore.js";
 import { DeploymentService } from "./modules/deployments/DeploymentService.js";
@@ -157,5 +158,6 @@ function createAuth(config: AppConfig, prisma: PrismaClient, secretBox: SecretBo
     sessionCookie: sessionCookieName(config.auth.secureCookies),
     secureCookies: config.auth.secureCookies,
     appUrl: config.appUrl,
+    apiKeys: new ApiKeyService({ prisma, logger: logger.child({ component: "api-keys" }) }),
   };
 }

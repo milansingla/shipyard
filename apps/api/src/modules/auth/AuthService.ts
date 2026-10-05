@@ -40,6 +40,8 @@ export interface CompleteLoginInput {
 
 /** 32 random bytes, base64url: 43 chars. Also a valid PKCE verifier (43–128 unreserved chars). */
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+/** API keys: a recognisable prefix (secret scanners and people can spot one) + a session-strength token. */
+export const API_KEY_PATTERN = /^shp_[A-Za-z0-9_-]{43}$/;
 
 /**
  * GitHub OAuth web flow + server-side sessions.
@@ -127,6 +129,24 @@ export class AuthService {
     return toAuthUser(session.user);
   }
 
+  /**
+   * The user for an API key (`Authorization: Bearer shp_…`), or null. Revoked,
+   * expired and unknown keys are all simply "not signed in"; the allowlist is
+   * re-checked exactly as for sessions.
+   */
+  async authenticateApiKey(token: string | undefined): Promise<AuthUser | null> {
+    if (!token || !API_KEY_PATTERN.test(token)) return null;
+    const key = await this.deps.prisma.apiKey.findUnique({ where: { hash: hashToken(token) }, include: { user: true } });
+    const now = this.now();
+    if (!key || key.revokedAt || (key.expiresAt && key.expiresAt <= now)) return null;
+    if (!this.isAllowed(key.user.login)) return null;
+    // At most one write a minute per key: "last used" doesn't need to be exact.
+    if (!key.lastUsedAt || now.getTime() - key.lastUsedAt.getTime() > 60_000) {
+      await this.deps.prisma.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: now } });
+    }
+    return toAuthUser(key.user);
+  }
+
   /** Idempotent: signing out twice, or with an unknown cookie, is fine. */
   async logout(sessionToken: string | undefined): Promise<void> {
     if (!sessionToken || !TOKEN_PATTERN.test(sessionToken)) return;
@@ -165,11 +185,11 @@ function toAuthUser(user: User): AuthUser {
   };
 }
 
-function randomToken(): string {
+export function randomToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
-function hashToken(token: string): string {
+export function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 

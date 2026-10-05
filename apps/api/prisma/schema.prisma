@@ -54,6 +54,7 @@ model User {
   projects          Project[]
   sessions          Session[]
   deploymentEvents  DeploymentEvent[]
+  apiKeys           ApiKey[]
 
   @@map("users")
 }
@@ -108,6 +109,26 @@ model Project {
 
   @@index([ownerId, createdAt(sort: Desc)])
   @@map("projects")
+}
+
+/// A personal access token for the CLI and scripts. Only sha256(token) is
+/// stored; the token itself is shown once, when it is created.
+model ApiKey {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @db.Uuid
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  /// First characters of the token ("shp_AbCd1234"), so people can tell keys apart.
+  prefix     String
+  /// sha256(token), hex.
+  hash       String    @unique
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+
+  @@index([userId])
+  @@map("api_keys")
 }
 
 /// What Docker does when a running app's process exits.

@@ -4,6 +4,17 @@ Code: [`modules/auth/`](../apps/api/src/modules/auth/),
 [`services/github/GitHubClient.ts`](../apps/api/src/services/github/GitHubClient.ts),
 [`middleware/authenticate.ts`](../apps/api/src/middleware/authenticate.ts)
 
+## API keys
+
+Dashboard → **API keys** creates a personal access token (`shp_…`) for the
+CLI and scripts: `Authorization: Bearer shp_…`. It acts as you, with your
+permissions. Only its SHA-256 hash is stored, so the key is shown exactly
+once; revoke it there if it leaks. Keys can't create other keys (that needs
+a signed-in browser), may expire (30/90/365 days or never), record when they
+were last used, and stop working the moment their owner leaves the
+allowlist. Bearer requests carry no cookies, so the CSRF origin check
+doesn't apply to them.
+
 ## Setup
 
 1. GitHub → **Settings → Developer settings → OAuth Apps → New OAuth App**

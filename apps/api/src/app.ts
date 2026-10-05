@@ -7,6 +7,8 @@ import { originCheck } from "./middleware/originCheck.js";
 import { DEFAULT_RATE_LIMITS, type RateLimits, isDeploy, isWrite, rateLimit } from "./middleware/rateLimit.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { createAuthRouter } from "./modules/auth/auth.routes.js";
+import { createApiKeyRouter } from "./modules/auth/apiKey.routes.js";
+import type { ApiKeyService } from "./modules/auth/ApiKeyService.js";
 import type { AuthService } from "./modules/auth/AuthService.js";
 import { createDeploymentRouter } from "./modules/deployments/deployment.routes.js";
 import type { DeploymentService } from "./modules/deployments/DeploymentService.js";
@@ -30,6 +32,7 @@ export interface AppAuth {
   secureCookies: boolean;
   /** Where the browser goes after signing in. */
   appUrl: string;
+  apiKeys: ApiKeyService;
 }
 
 export interface AppDeps {
@@ -84,6 +87,7 @@ export function createApp(deps: AppDeps): Express {
     app.use("/api", rateLimit("reads", limits.reads, (req) => (isWrite(req) ? null : user(req))));
     app.use("/api", createAuthRouter(auth.service, auth));
     app.use("/api", createGitHubRouter(auth.service, auth.github));
+    app.use("/api", createApiKeyRouter(auth.apiKeys));
   } else {
     // Answer sign-in routes with the setup instructions (503) rather than a bare 404,
     // so the dashboard can tell the operator what to configure.

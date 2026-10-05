@@ -144,6 +144,9 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
             )}
             <span className="hidden font-semibold sm:inline">{user.login}</span>
           </span>
+          <Link href="/account" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
+            API keys
+          </Link>
           <Button variant="secondary" busy={busy} onClick={() => void signOut()}>
             Sign out
           </Button>
