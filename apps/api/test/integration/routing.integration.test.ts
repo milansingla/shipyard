@@ -18,6 +18,7 @@ import { DockerService } from "../../src/services/docker/DockerService.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
 import { DEPLOYMENT_HEADER, TraefikRouter, createTraefikProbe } from "../../src/services/routing/TraefikRouter.js";
+import { LocalRegistry } from "../../src/services/registry/ImageRegistry.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
@@ -58,6 +59,7 @@ function engine(sourceDir: string): DeploymentEngine {
     healthCheck: new HealthCheckService({ timeoutMs: 30_000, intervalMs: 500, requestTimeoutMs: 2_000 }),
     workspace: new WorkspaceService(workspaceRoot),
     router,
+    registry: new LocalRegistry(),
     logger: silentLogger,
   });
 }

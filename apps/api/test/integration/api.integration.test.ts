@@ -196,6 +196,7 @@ const fakeEngine: EngineLike = {
     return { running: true, exitCode: null, hostPort: 49_999 };
   },
   async ensureRoutable() {},
+  artifactNames: (job) => ({ imageName: `shipyard/${job.name}:x`, containerName: `shipyard-${job.name}-x` }),
   async followLogs(_containerId, _tail, onChunk, signal) {
     onChunk({ stream: "stdout", text: "hello\n" });
     // Like `docker logs --follow`: keeps going until the container stops or the client leaves.

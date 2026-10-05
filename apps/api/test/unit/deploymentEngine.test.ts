@@ -15,6 +15,7 @@ import type { DeploymentStatus } from "../../src/services/deployment/status.js";
 import type { DeploymentJob, DeploymentObserver } from "../../src/services/deployment/types.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
+import { type ImageRegistry, LocalRegistry, RemoteRegistry } from "../../src/services/registry/ImageRegistry.js";
 import type { Router } from "../../src/services/routing/Router.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
@@ -62,6 +63,7 @@ function harness(
     /** Behave like the Traefik router (own network, hostname URLs) instead of plain ports. */
     routed?: boolean;
     routeFails?: boolean;
+    registry?: ImageRegistry;
   } = {},
 ): Harness {
   const calls: string[] = [];
@@ -155,6 +157,7 @@ function harness(
     },
     workspace: new WorkspaceService(workspaceRoot),
     router,
+    registry: options.registry ?? new LocalRegistry(),
     logger: silentLogger,
   });
 
@@ -362,6 +365,24 @@ describe("DeploymentEngine.run", () => {
 
     expect(h.calls).toContain(`resources:${JSON.stringify(resources)}`);
     expect(systemLog).toContain("Resources: 0.5 CPU, 512 MB memory, always restarted");
+  });
+
+  it("names images after the registry and pushes them after the build, before starting", async () => {
+    const pushes: string[] = [];
+    const registry = new RemoteRegistry("ghcr.io/acme", { username: "bot", password: "s3cret" }, {
+      async pushImage(imageName, credentials) {
+        pushes.push(`${imageName} as ${credentials?.username}`);
+      },
+    });
+    const h = harness({ registry });
+    let buildLog = "";
+    const state = await h.engine.run(job(), { onLog: (kind, text) => void (kind === "build" && (buildLog += text)) });
+
+    expect(state.imageName).toBe("ghcr.io/acme/hello:3f2a9c1e77b4");
+    expect(pushes).toEqual(["ghcr.io/acme/hello:3f2a9c1e77b4 as bot"]);
+    expect(h.calls.findIndex((c) => c.startsWith("build:"))).toBeLessThan(h.calls.findIndex((c) => c.startsWith("start:")));
+    expect(buildLog).toContain("Pushed ghcr.io/acme/hello:3f2a9c1e77b4");
+    expect(buildLog).not.toContain("s3cret");
   });
 
   it("a failing observer fails the deployment instead of being ignored", async () => {

@@ -22,6 +22,7 @@ import { HealthCheckService } from "./services/deployment/HealthCheckService.js"
 import { DockerService } from "./services/docker/DockerService.js";
 import { GitService } from "./services/git/GitService.js";
 import { GitHubClient } from "./services/github/GitHubClient.js";
+import { type ImageRegistry, LocalRegistry, RemoteRegistry } from "./services/registry/ImageRegistry.js";
 import { DirectPortRouter, type Router } from "./services/routing/Router.js";
 import { EDGE_NETWORK, TraefikRouter, createTraefikProbe } from "./services/routing/TraefikRouter.js";
 import { WorkspaceService } from "./services/workspace/WorkspaceService.js";
@@ -72,10 +73,17 @@ export function createEngineServices(
     healthCheck: new HealthCheckService(config.healthCheck),
     workspace: new WorkspaceService(config.workspaceDir),
     router,
+    registry: createRegistry(config, docker),
     logger: logger.child({ component: "engine" }),
   });
 
   return { docker, git, engine, router };
+}
+
+/** A remote registry when SHIPYARD_REGISTRY is set; otherwise images stay in local Docker. */
+function createRegistry(config: AppConfig, docker: DockerService): ImageRegistry {
+  if (!config.registry) return new LocalRegistry();
+  return new RemoteRegistry(config.registry.prefix, config.registry.credentials, docker);
 }
 
 /** Traefik when SHIPYARD_PUBLIC_DOMAIN is set; otherwise each deployment is reached on its own port. */

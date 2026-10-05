@@ -169,6 +169,23 @@ EXPOSE 3000
 CMD ["pnpm","start"]
 ```
 
+### Image registry
+
+Where images live is the `ImageRegistry`'s decision
+([`services/registry/`](../apps/api/src/services/registry/ImageRegistry.ts)):
+
+| | Image name | After the build |
+| - | ---------- | --------------- |
+| `LocalRegistry` (default) | `shipyard/<slug>:<id>` | nothing: it stays in this host's Docker |
+| `RemoteRegistry` (`SHIPYARD_REGISTRY=ghcr.io/acme`) | `ghcr.io/acme/<slug>:<id>` | `docker push`, with `SHIPYARD_REGISTRY_USERNAME/PASSWORD` if set |
+
+The image is named for its registry from the start, so the build tags it
+directly and there is one name to push, run and remove. A failed push fails
+the deployment (`IMAGE_PUSH_FAILED`) before any container starts.
+Credentials travel in the push request only, never in logs. Development
+needs no registry. Pushing sets up later versions, where other machines pull
+images. Tested against a real `registry:2`.
+
 ### Build cache
 
 Docker reuses a build step's layer when the step and everything it depends

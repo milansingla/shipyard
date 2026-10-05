@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { resourceConfig } from "../../src/services/docker/DockerService.js";
+import { LocalRegistry } from "../../src/services/registry/ImageRegistry.js";
 
 import { interpretBuildEvent } from "../../src/services/docker/buildOutput.js";
 import { demuxDockerLogs, formatLogChunks } from "../../src/services/docker/logs.js";
 import {
   buildContainerName,
-  buildImageName,
   isValidContainerReference,
   shortId,
   toDockerSlug,
@@ -27,7 +27,7 @@ describe("naming", () => {
 
   it("builds image and container names from repo name + deployment id", () => {
     expect(shortId(ID)).toBe("3f2a9c1e77b4");
-    expect(buildImageName("Hello-World", ID)).toBe("shipyard/hello-world:3f2a9c1e77b4");
+    expect(new LocalRegistry().imageName("Hello-World", ID)).toBe("shipyard/hello-world:3f2a9c1e77b4");
     expect(buildContainerName("Hello-World", ID)).toBe("shipyard-hello-world-3f2a9c1e77b4");
   });
 

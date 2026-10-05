@@ -44,6 +44,17 @@ const envSchema = z.object({
   /** Contact for Let's Encrypt. Set = serve apps over HTTPS (docker-compose.production.yml). */
   SHIPYARD_ACME_EMAIL: z.email().optional(),
   SHIPYARD_HTTPS_PORT: z.coerce.number().int().min(1).max(65535).default(443),
+  /** Push deployment images here, e.g. ghcr.io/acme or localhost:5000/shipyard. Unset = keep them in local Docker. */
+  SHIPYARD_REGISTRY: z
+    .string()
+    .trim()
+    .regex(
+      /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/,
+      "must be a registry and optional path, like ghcr.io/acme or localhost:5000/shipyard (no scheme, tag or trailing /)",
+    )
+    .optional(),
+  SHIPYARD_REGISTRY_USERNAME: z.string().min(1).optional(),
+  SHIPYARD_REGISTRY_PASSWORD: z.string().min(1).optional(),
   /** Proxies whose X-Forwarded-For is believed (Express "trust proxy" syntax), e.g. "127.0.0.1". Unset = none. */
   SHIPYARD_TRUST_PROXY: z.string().trim().min(1).optional(),
   /** Where browsers reach this API; used for the OAuth callback URL. Default http://localhost:<PORT>. */
@@ -111,6 +122,8 @@ export interface AppConfig {
   githubWebhookSecret: string | null;
   /** Express "trust proxy"; false = X-Forwarded-For is ignored. */
   trustProxy: string | false;
+  /** null = images stay in local Docker. */
+  registry: { prefix: string; credentials: { username: string; password: string } | null } | null;
 }
 
 /** Pure: turns an env-like object into validated config. Throws on invalid input. */
@@ -181,6 +194,7 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     appUrl: trimTrailingSlash(parsed.SHIPYARD_APP_URL ?? publicUrl),
     githubWebhookSecret: parsed.GITHUB_WEBHOOK_SECRET ?? null,
     trustProxy: parsed.SHIPYARD_TRUST_PROXY ?? false,
+    registry: parseRegistry(parsed),
     auth: {
       ...parseAuth(parsed),
       sessionTtlMs: parsed.SHIPYARD_SESSION_TTL_HOURS * 60 * 60 * 1000,
@@ -220,6 +234,18 @@ function parseAuth(parsed: z.infer<typeof envSchema>): Pick<AppConfig["auth"], "
     );
   }
   return { github: { clientId, clientSecret }, secretKey, allowedUsers };
+}
+
+function parseRegistry(parsed: z.infer<typeof envSchema>): AppConfig["registry"] {
+  const { SHIPYARD_REGISTRY: prefix, SHIPYARD_REGISTRY_USERNAME: username, SHIPYARD_REGISTRY_PASSWORD: password } = parsed;
+  if ((username === undefined) !== (password === undefined)) {
+    throw new AppError(ErrorCode.CONFIG_INVALID, "Set both SHIPYARD_REGISTRY_USERNAME and SHIPYARD_REGISTRY_PASSWORD, or neither.");
+  }
+  if (!prefix) {
+    if (username) throw new AppError(ErrorCode.CONFIG_INVALID, "Registry credentials are set but SHIPYARD_REGISTRY isn't.");
+    return null;
+  }
+  return { prefix, credentials: username && password ? { username, password } : null };
 }
 
 function trimTrailingSlash(url: string): string {

@@ -20,10 +20,6 @@ export function shortId(deploymentId: string): string {
   return deploymentId.replace(/-/g, "").slice(0, 12).toLowerCase();
 }
 
-export function buildImageName(repositoryName: string, deploymentId: string): string {
-  return `shipyard/${toDockerSlug(repositoryName)}:${shortId(deploymentId)}`;
-}
-
 export function buildContainerName(repositoryName: string, deploymentId: string): string {
   return `shipyard-${toDockerSlug(repositoryName)}-${shortId(deploymentId)}`;
 }

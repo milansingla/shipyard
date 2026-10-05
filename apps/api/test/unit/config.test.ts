@@ -152,3 +152,24 @@ describe("parseConfig: trusted proxy", () => {
     expect(parseConfig({ SHIPYARD_TRUST_PROXY: " 127.0.0.1 " }).trustProxy).toBe("127.0.0.1");
   });
 });
+
+describe("parseConfig: image registry", () => {
+  it("keeps images local unless SHIPYARD_REGISTRY is set", () => {
+    expect(parseConfig({}).registry).toBeNull();
+    expect(parseConfig({ SHIPYARD_REGISTRY: "ghcr.io/acme" }).registry).toEqual({ prefix: "ghcr.io/acme", credentials: null });
+    expect(
+      parseConfig({ SHIPYARD_REGISTRY: "localhost:5000/shipyard", SHIPYARD_REGISTRY_USERNAME: "u", SHIPYARD_REGISTRY_PASSWORD: "p" }).registry,
+    ).toEqual({ prefix: "localhost:5000/shipyard", credentials: { username: "u", password: "p" } });
+  });
+
+  it.each([
+    [{ SHIPYARD_REGISTRY: "https://ghcr.io/acme" }, "SHIPYARD_REGISTRY"],
+    [{ SHIPYARD_REGISTRY: "ghcr.io/acme/" }, "SHIPYARD_REGISTRY"],
+    [{ SHIPYARD_REGISTRY: "ghcr.io/Acme" }, "SHIPYARD_REGISTRY"],
+    [{ SHIPYARD_REGISTRY: "ghcr.io/acme", SHIPYARD_REGISTRY_USERNAME: "u" }, "both"],
+    [{ SHIPYARD_REGISTRY_USERNAME: "u", SHIPYARD_REGISTRY_PASSWORD: "p" }, "isn't"],
+  ])("rejects %j", (env, message) => {
+    expect(() => parseConfig(env)).toThrow(message);
+  });
+});
+

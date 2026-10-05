@@ -9,6 +9,7 @@ import type { Logger } from "../../lib/logger.js";
 import { createContextFilter } from "./buildContext.js";
 import { type BuildEvent, interpretBuildEvent } from "./buildOutput.js";
 import { type LogChunk, type LogStream, demuxDockerLogs } from "./logs.js";
+import type { RegistryCredentials } from "../registry/ImageRegistry.js";
 import { isValidContainerReference } from "./naming.js";
 
 /**
@@ -203,6 +204,33 @@ export class DockerService {
 
     if (buildError !== null) {
       throw new AppError(ErrorCode.DOCKER_BUILD_FAILED, `Docker build failed: ${buildError}`, { statusCode: 422 });
+    }
+  }
+
+  /** Pushes a local image to its registry; credentials go in the request, never in logs. */
+  async pushImage(imageName: string, credentials: RegistryCredentials | null, onLog: (text: string) => void): Promise<void> {
+    let stream: NodeJS.ReadableStream;
+    try {
+      stream = await this.docker.getImage(imageName).push(credentials ? { authconfig: credentials } : {});
+    } catch (error) {
+      throw this.dockerError(ErrorCode.IMAGE_PUSH_FAILED, `Could not push ${imageName}`, error);
+    }
+    let failure: string | null = null;
+    await new Promise<void>((resolve, reject) => {
+      this.docker.modem.followProgress(
+        stream,
+        (error: Error | null) => (error ? reject(error) : resolve()),
+        (event: { status?: string; id?: string; error?: string; errorDetail?: { message?: string } }) => {
+          if (event.error) failure = event.errorDetail?.message ?? event.error;
+          // Layer-by-layer progress is noise; keep the outcome lines.
+          else if (event.status && !event.id) onLog(`${event.status}\n`);
+        },
+      );
+    }).catch((error: unknown) => {
+      throw this.dockerError(ErrorCode.IMAGE_PUSH_FAILED, `Could not push ${imageName}`, error);
+    });
+    if (failure) {
+      throw new AppError(ErrorCode.IMAGE_PUSH_FAILED, `Pushing ${imageName} failed: ${failure}`, { statusCode: 422 });
     }
   }
 

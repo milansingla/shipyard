@@ -9,7 +9,8 @@ import {
   ShipyardLabel,
 } from "../docker/DockerService.js";
 import type { LogChunk } from "../docker/logs.js";
-import { buildContainerName, buildImageName } from "../docker/naming.js";
+import { buildContainerName } from "../docker/naming.js";
+import type { ImageRegistry } from "../registry/ImageRegistry.js";
 import type { SourceProvider } from "../git/GitService.js";
 import type { Router } from "../routing/Router.js";
 import type { WorkspaceService } from "../workspace/WorkspaceService.js";
@@ -45,6 +46,7 @@ export interface DeploymentEngineDeps {
   healthCheck: Pick<HealthCheckService, "waitUntilHealthy">;
   workspace: Pick<WorkspaceService, "prepare" | "cleanup">;
   router: Router;
+  registry: ImageRegistry;
   logger: Logger;
 }
 
@@ -74,8 +76,8 @@ export class DeploymentEngine {
   constructor(private readonly deps: DeploymentEngineDeps) {}
 
   /** Image and container names are deterministic, so callers can know them up front. */
-  static artifactNames(job: Pick<DeploymentJob, "id" | "name">): { imageName: string; containerName: string } {
-    return { imageName: buildImageName(job.name, job.id), containerName: buildContainerName(job.name, job.id) };
+  artifactNames(job: Pick<DeploymentJob, "id" | "name">): { imageName: string; containerName: string } {
+    return { imageName: this.deps.registry.imageName(job.name, job.id), containerName: buildContainerName(job.name, job.id) };
   }
 
   async run(job: DeploymentJob, observer: DeploymentObserver = {}): Promise<DeploymentState> {
@@ -84,7 +86,7 @@ export class DeploymentEngine {
       status: DeploymentStatus.QUEUED,
       branch: job.branch,
       commitSha: null,
-      ...DeploymentEngine.artifactNames(job),
+      ...this.artifactNames(job),
       containerId: null,
       containerPort: null,
       hostPort: null,
@@ -128,6 +130,7 @@ export class DeploymentEngine {
         plan.dockerfile,
         env.build,
       );
+      await this.deps.registry.publish(state.imageName, (text) => log("build", text));
       // Source is baked into the image now; the clone is no longer needed.
       await this.deps.workspace.cleanup(workspacePath);
       workspacePath = null;
@@ -241,8 +244,13 @@ export class DeploymentEngine {
     const before = await this.deps.docker.inspectManagedContainer(containerReference);
     await this.deps.docker.restartContainer(before.id);
 
-    // Docker may assign a different ephemeral host port after a restart.
-    const after = await this.deps.docker.inspectManagedContainer(before.id);
+    // Docker may assign a different ephemeral host port after a restart, and
+    // can report no port at all for a moment while it re-publishes them.
+    let after = await this.deps.docker.inspectManagedContainer(before.id);
+    for (let attempt = 0; attempt < 20 && after.running && (after.hostPort === null || after.healthHostPort === null); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      after = await this.deps.docker.inspectManagedContainer(before.id);
+    }
     if (after.hostPort === null || after.healthHostPort === null) {
       throw new AppError(ErrorCode.CONTAINER_START_FAILED, "Container restarted without a published port.");
     }

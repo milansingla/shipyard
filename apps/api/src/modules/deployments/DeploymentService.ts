@@ -25,7 +25,7 @@ import type { BuildLogStore, BuildLogWriter } from "./BuildLogStore.js";
 
 export type EngineLike = Pick<
   DeploymentEngine,
-  "run" | "stop" | "restart" | "getLogs" | "followLogs" | "destroy" | "inspect" | "ensureRoutable"
+  "run" | "stop" | "restart" | "getLogs" | "followLogs" | "destroy" | "inspect" | "ensureRoutable" | "artifactNames"
 >;
 
 export interface DeploymentServiceDeps {
@@ -212,7 +212,7 @@ export class DeploymentService {
             projectId,
             trigger,
             branch: project.branch,
-            ...DeploymentEngine.artifactNames({ id, name: project.slug }),
+            ...this.deps.engine.artifactNames({ id, name: project.slug }),
           },
         });
         await tx.deploymentEvent.create({

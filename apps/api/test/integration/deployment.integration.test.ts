@@ -17,6 +17,7 @@ import { formatLogChunks } from "../../src/services/docker/logs.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
 import { DirectPortRouter } from "../../src/services/routing/Router.js";
+import { LocalRegistry, RemoteRegistry } from "../../src/services/registry/ImageRegistry.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
 
@@ -53,6 +54,7 @@ function engine(sourceDir: string): DeploymentEngine {
     healthCheck: new HealthCheckService({ timeoutMs: 30_000, intervalMs: 500, requestTimeoutMs: 2_000 }),
     workspace: new WorkspaceService(workspaceRoot),
     router: new DirectPortRouter(), // Traefik routing: routing.integration.test.ts
+    registry: new LocalRegistry(),
     logger: silentLogger,
   });
 }
@@ -301,6 +303,48 @@ describe("deployment engine against real Docker", () => {
       expect(body.built).toBe("second build");
     } finally {
       await fs.rm(source, { recursive: true, force: true });
+    }
+  });
+
+  it("pushes the image to a real registry when one is configured", async () => {
+    const port = 15_000 + Math.floor(Math.random() * 5_000);
+    const image = "registry:2";
+    if (!(await dockerode.getImage(image).inspect().then(() => true, () => false))) {
+      await new Promise((resolve, reject) =>
+        dockerode.pull(image, (error: unknown, stream: NodeJS.ReadableStream) =>
+          error ? reject(error) : dockerode.modem.followProgress(stream, (e) => (e ? reject(e) : resolve(null))),
+        ),
+      );
+    }
+    const registryContainer = await dockerode.createContainer({
+      Image: image,
+      name: `shipyard-it-registry-${port}`,
+      HostConfig: { PortBindings: { "5000/tcp": [{ HostIp: "127.0.0.1", HostPort: String(port) }] } },
+      ExposedPorts: { "5000/tcp": {} },
+    });
+    await registryContainer.start();
+    try {
+      // localhost registries are the one kind Docker allows over plain HTTP.
+      const registry = new RemoteRegistry(`localhost:${port}/shipyard-it`, null, docker);
+      const service = new DeploymentEngine({
+        source: localSource(HELLO_APP),
+        docker,
+        healthCheck: new HealthCheckService({ timeoutMs: 30_000, intervalMs: 500, requestTimeoutMs: 2_000 }),
+        workspace: new WorkspaceService(workspaceRoot),
+        router: new DirectPortRouter(),
+        registry,
+        logger: silentLogger,
+      });
+      let buildLog = "";
+      const record = await service.run(job("hello-node"), { onLog: (kind, text) => void (kind === "build" && (buildLog += text)) });
+      created.push(record);
+
+      expect(record.imageName).toMatch(new RegExp(`^localhost:${port}/shipyard-it/hello-node:[0-9a-f]{12}$`));
+      expect(buildLog).toContain(`Pushed ${record.imageName}`);
+      const tags = (await (await fetch(`http://127.0.0.1:${port}/v2/shipyard-it/hello-node/tags/list`)).json()) as { tags: string[] };
+      expect(tags.tags).toEqual([record.imageName.split(":").at(-1)]);
+    } finally {
+      await registryContainer.remove({ force: true });
     }
   });
 });
