@@ -74,6 +74,8 @@ scanning.
 | Secrets in API responses / logs    | Secret values never returned; logs carry variable names only               | `EnvironmentService`, `DeploymentEngine` |
 | Secrets in image layers            | Runtime variables set on the container, not the image; secrets can't be build args (they'd be in `docker history`) | `environment.schemas.ts` |
 | Overriding Shipyard's own settings | `PORT` reserved; names/values validated (no NUL, 32 KB max, 100 per project) | `environment.schemas.ts` |
+| Floods / brute force / runaway scripts | Rate limits: sign-in 60/min and webhooks 300/min per IP; per user 20 deploys, 120 other changes, 1200 reads per minute; 10 log streams. 429 with `Retry-After` and `RateLimit-*` headers | `middleware/rateLimit.ts` |
+| Spoofed client IPs                 | `X-Forwarded-For` ignored unless `SHIPYARD_TRUST_PROXY` names a trusted proxy (the dashboard proxy passes client-sent values through) | `app.ts` |
 | Reverse proxy as a path to root    | Traefik gets no Docker socket: it only reads the route file, mounted read-only | `docker-compose.yml` |
 | Injection into proxy config        | Route values validated (DNS-label slugs/names, port range, id charset); file written as JSON | `TraefikRouter.ts` |
 | Bypassing the proxy                | With routing on, containers may only publish on 127.0.0.1 (config refuses `0.0.0.0`) | `config/env.ts` |
@@ -87,7 +89,9 @@ Details of the sign-in design: [github.md](github.md).
 - **Signed-in users are trusted with the host.** Ownership stops users touching
   *each other's* projects, but any allowed user can deploy code that runs
   here (see "Docker access ≈ root" above). Only allowlist people you trust.
-- No rate limiting on sign-in or API endpoints yet (planned for V3).
+- Rate limits are per API process (in memory) and per IP behind a shared
+  proxy address unless `SHIPYARD_TRUST_PROXY` names a proxy that sets
+  `X-Forwarded-For` itself.
 - Sessions have a fixed lifetime; there is no "sign out everywhere" endpoint
   yet (deleting the user's `sessions` rows does it).
 - A cancelled build (timeout, `SHIPYARD_BUILD_TIMEOUT_MS`) may leave dangling

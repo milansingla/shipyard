@@ -4,6 +4,7 @@ import type { Logger } from "./lib/logger.js";
 import { createErrorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { authenticate, requireUser } from "./middleware/authenticate.js";
 import { originCheck } from "./middleware/originCheck.js";
+import { DEFAULT_RATE_LIMITS, type RateLimits, isDeploy, isWrite, rateLimit } from "./middleware/rateLimit.js";
 import { requestLogger } from "./middleware/requestLogger.js";
 import { createAuthRouter } from "./modules/auth/auth.routes.js";
 import type { AuthService } from "./modules/auth/AuthService.js";
@@ -47,6 +48,10 @@ export interface AppDeps {
   allowedOrigins?: readonly string[];
   logger: Logger;
   exposeInternalErrors: boolean;
+  /** Defaults to DEFAULT_RATE_LIMITS. */
+  rateLimits?: RateLimits;
+  /** Express "trust proxy" (SHIPYARD_TRUST_PROXY); default: trust no X-Forwarded-For. */
+  trustProxy?: string | false;
 }
 
 /** Builds the Express app without starting it — tests mount it on a random port. */
@@ -55,9 +60,16 @@ export function createApp(deps: AppDeps): Express {
   const app = express();
 
   app.disable("x-powered-by");
+  // X-Forwarded-For is only believed from a proxy the operator names: the
+  // dashboard's proxy passes a client-sent header through unchanged, so trusting
+  // it would let anyone pick their own IP and dodge per-IP limits.
+  app.set("trust proxy", deps.trustProxy ?? false);
+  const limits = deps.rateLimits ?? DEFAULT_RATE_LIMITS;
   app.locals.authConfigured = Boolean(auth);
   app.use(requestLogger(logger)); // first, so even requests rejected by the body parser are logged
   app.use(originCheck(deps.allowedOrigins ?? []));
+  app.use("/api/auth", rateLimit("sign-in", limits.signIn, (req) => req.ip ?? "unknown"));
+  app.use("/api/webhooks", rateLimit("webhooks", limits.webhooks, (req) => req.ip ?? "unknown"));
   // Before express.json(): webhook signatures are verified over the raw body.
   app.use("/api", createWebhookRouter(deps.webhooks?.service ?? null, deps.webhooks?.secret ?? null));
   app.use(express.json({ limit: "100kb" }));
@@ -65,6 +77,11 @@ export function createApp(deps: AppDeps): Express {
   app.use("/api", createHealthRouter(docker));
   if (auth) {
     app.use("/api", authenticate(auth.service, auth.sessionCookie));
+    // Per signed-in user (anonymous requests are refused by requireUser anyway).
+    const user = (req: Parameters<typeof isWrite>[0]) => req.user?.id ?? null;
+    app.use("/api", rateLimit("deploys", limits.deploys, (req) => (isDeploy(req) ? user(req) : null)));
+    app.use("/api", rateLimit("writes", limits.writes, (req) => (isWrite(req) && !isDeploy(req) ? user(req) : null)));
+    app.use("/api", rateLimit("reads", limits.reads, (req) => (isWrite(req) ? null : user(req))));
     app.use("/api", createAuthRouter(auth.service, auth));
     app.use("/api", createGitHubRouter(auth.service, auth.github));
   } else {

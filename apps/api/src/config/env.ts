@@ -44,6 +44,8 @@ const envSchema = z.object({
   /** Contact for Let's Encrypt. Set = serve apps over HTTPS (docker-compose.production.yml). */
   SHIPYARD_ACME_EMAIL: z.email().optional(),
   SHIPYARD_HTTPS_PORT: z.coerce.number().int().min(1).max(65535).default(443),
+  /** Proxies whose X-Forwarded-For is believed (Express "trust proxy" syntax), e.g. "127.0.0.1". Unset = none. */
+  SHIPYARD_TRUST_PROXY: z.string().trim().min(1).optional(),
   /** Where browsers reach this API; used for the OAuth callback URL. Default http://localhost:<PORT>. */
   SHIPYARD_PUBLIC_URL: z.url({ protocol: /^https?$/ }).optional(),
   /** Where the browser is sent after signing in (the dashboard). Default: SHIPYARD_PUBLIC_URL. */
@@ -107,6 +109,8 @@ export interface AppConfig {
   };
   /** null = push webhooks disabled. */
   githubWebhookSecret: string | null;
+  /** Express "trust proxy"; false = X-Forwarded-For is ignored. */
+  trustProxy: string | false;
 }
 
 /** Pure: turns an env-like object into validated config. Throws on invalid input. */
@@ -176,6 +180,7 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     publicUrl,
     appUrl: trimTrailingSlash(parsed.SHIPYARD_APP_URL ?? publicUrl),
     githubWebhookSecret: parsed.GITHUB_WEBHOOK_SECRET ?? null,
+    trustProxy: parsed.SHIPYARD_TRUST_PROXY ?? false,
     auth: {
       ...parseAuth(parsed),
       sessionTtlMs: parsed.SHIPYARD_SESSION_TTL_HOURS * 60 * 60 * 1000,

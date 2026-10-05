@@ -145,3 +145,10 @@ describe("parseConfig: HTTPS", () => {
   });
 });
 
+
+describe("parseConfig: trusted proxy", () => {
+  it("trusts no X-Forwarded-For unless a proxy is named", () => {
+    expect(parseConfig({}).trustProxy).toBe(false);
+    expect(parseConfig({ SHIPYARD_TRUST_PROXY: " 127.0.0.1 " }).trustProxy).toBe("127.0.0.1");
+  });
+});

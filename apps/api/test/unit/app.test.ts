@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.js";
 import { AppError, ErrorCode } from "../../src/lib/errors.js";
 import { createErrorHandler } from "../../src/middleware/errorHandler.js";
+import { DEFAULT_RATE_LIMITS } from "../../src/middleware/rateLimit.js";
 import type { DeploymentService } from "../../src/modules/deployments/DeploymentService.js";
 import type { ProjectService } from "../../src/modules/projects/ProjectService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
@@ -127,3 +128,25 @@ describe("error handler", () => {
     expect(JSON.parse(body)).toEqual({ error: { code: "INTERNAL_ERROR", message: "Internal server error." } });
   });
 });
+
+describe("rate limiting", () => {
+  it("limits sign-in attempts per IP with standard headers, and says when to retry", async () => {
+    const limits = { ...DEFAULT_RATE_LIMITS, signIn: { limit: 2, windowMs: 60_000 } };
+    const base = await start(
+      createApp({ docker: { ping: async () => true }, logger: silentLogger, exposeInternalErrors: false, rateLimits: limits }),
+    );
+    const first = await fetch(`${base}/api/auth/github/login`);
+    expect(first.headers.get("ratelimit-limit")).toBe("2");
+    expect(first.headers.get("ratelimit-remaining")).toBe("1");
+    await fetch(`${base}/api/auth/github/login`);
+
+    const refused = await fetch(`${base}/api/auth/github/login`);
+    expect(refused.status).toBe(429);
+    expect(Number(refused.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await refused.json()).toMatchObject({ error: { code: "RATE_LIMITED" } });
+
+    // Other routes aren't affected.
+    expect((await fetch(`${base}/api/health`)).status).toBe(200);
+  });
+});
+

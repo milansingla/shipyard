@@ -8,6 +8,7 @@ import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createApp } from "../../src/app.js";
+import type { RateLimits } from "../../src/middleware/rateLimit.js";
 import type { PrismaClient } from "../../src/db/prisma.js";
 import { NotFoundError } from "../../src/lib/errors.js";
 import { SecretBox } from "../../src/lib/secretBox.js";
@@ -198,6 +199,9 @@ const fakeEngine: EngineLike = {
 };
 
 const APP_URL = "http://localhost:3000";
+/** The whole suite signs in and deploys far more than a person would; tests tighten one rule when they need to. */
+const generous = { limit: 100_000, windowMs: 60_000 };
+const rateLimits: RateLimits = { signIn: { ...generous }, webhooks: { ...generous }, deploys: { ...generous }, writes: { ...generous }, reads: { ...generous } };
 const WEBHOOK_SECRET = "integration-test-webhook-secret";
 const SESSION_COOKIE = sessionCookieName(false);
 const ALICE = { id: 1001, login: "alice" };
@@ -274,6 +278,7 @@ beforeAll(async () => {
       allowedOrigins: [api, APP_URL],
       logger: silentLogger,
       exposeInternalErrors: true,
+      rateLimits,
     }),
   );
 });
@@ -1175,6 +1180,34 @@ describe("custom domains", () => {
     liveAliases.clear();
     await deployments.reconcileOnStartup();
     expect(liveAliases.get("boot")).toEqual(["boot.example.com"]);
+  });
+});
+
+describe("rate limiting per user", () => {
+  it("limits deploys per user, separately from other users and from reads", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const project = async (cookie: string, repo: string) =>
+      (await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` })).body!.data.id as string;
+    const aliceProject = await project(alice, "limited-a");
+    const bobProject = await project(bob, "limited-b");
+
+    rateLimits.deploys.limit = 2;
+    try {
+      for (let i = 0; i < 2; i += 1) {
+        expect((await call(alice, "POST", `/api/projects/${aliceProject}/deploy`)).status).toBe(202);
+        await deployments.waitForIdle();
+      }
+      const refused = await call(alice, "POST", `/api/projects/${aliceProject}/deploy`);
+      expect(refused.status).toBe(429);
+      expect(refused.body!.error.code).toBe("RATE_LIMITED");
+
+      expect((await call(bob, "POST", `/api/projects/${bobProject}/deploy`)).status).toBe(202); // Bob has his own budget
+      expect((await call(alice, "GET", `/api/projects/${aliceProject}`)).status).toBe(200); // reading still works
+      await deployments.waitForIdle();
+    } finally {
+      rateLimits.deploys.limit = generous.limit;
+    }
   });
 });
 

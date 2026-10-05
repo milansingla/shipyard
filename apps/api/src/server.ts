@@ -28,6 +28,7 @@ const app = createApp({
   allowedOrigins: [config.publicUrl, config.appUrl],
   logger: logger.child({ component: "http" }),
   exposeInternalErrors: config.env !== "production",
+  trustProxy: config.trustProxy,
 });
 
 const server = app.listen(config.port, config.host, () => {
