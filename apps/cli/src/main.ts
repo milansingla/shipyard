@@ -63,6 +63,7 @@ export const USAGE = `shipyard — deploy and manage apps on your Shipyard serve
   shipyard domains  <project>                                   list custom domains
   shipyard domains  <project> add <hostname>                    route a domain to it (point its DNS here)
   shipyard domains  <project> remove <hostname>
+  shipyard ask      "<question>"                                ask the AI assistant (it suggests; you run)
 
 <project> is a project's name, slug or id. Create an API key in the dashboard
 (API keys). SHIPYARD_URL and SHIPYARD_TOKEN override the saved login (CI).
@@ -109,6 +110,8 @@ export async function main(argv: readonly string[], io: Io): Promise<number> {
     const project = async () => resolveProject(api, args[0]);
 
     switch (command) {
+      case "ask":
+        return await ask(api, args.join(" "), io);
       case "projects":
         return await listProjects(api, io);
       case "status":
@@ -292,6 +295,20 @@ async function env(
     return 0;
   }
   throw new UsageError("Usage: shipyard env <project> [list | set KEY=value | unset KEY]");
+}
+
+/** The assistant's answer, and the commands for what it suggests: nothing runs from here. */
+async function ask(api: ApiClient, question: string, io: Io): Promise<number> {
+  if (question.trim().length < 3) throw new UsageError('Usage: shipyard ask "<question>"');
+  const reply = await api.request<{ answer: string; proposals: Array<{ label: string; method: string; path: string; reason: string }> }>("POST", "/ai/ask", {
+    question: question.trim(),
+  });
+  io.stdout(`${reply.answer}\n`);
+  if (reply.proposals.length > 0) {
+    io.stdout("\nSuggested (not run):\n");
+    for (const proposal of reply.proposals) io.stdout(`  ${proposal.label}: ${proposal.reason}\n    ${proposal.method} /api/v1${proposal.path}\n`);
+  }
+  return 0;
 }
 
 async function domains(api: ApiClient, project: Project, args: string[], io: Io): Promise<number> {

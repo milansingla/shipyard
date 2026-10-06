@@ -3,7 +3,7 @@
 Code: [`apps/cli/`](../apps/cli/) — no dependencies beyond Node.
 
 The CLI is a thin client of the HTTP API: every command is one or two API
-calls, authenticated with an API key. It has **no deployment logic of its
+calls (under `/api/v1`), authenticated with an API key. It has **no deployment logic of its
 own**, so it can't drift from what the dashboard does, and it gets the same
 permissions as its key's owner (team roles, rate limits, audit log).
 
@@ -17,6 +17,8 @@ permissions as its key's owner (team roles, rate limits, audit log).
 | `logs <project> [--build] [--follow] [--tail n]` | the live (or latest) deployment's logs, streamed with `--follow` |
 | `rollback <project>` | `POST /api/deployments/:id/rollback` on the live deployment |
 | `env <project> [list \| set K=V [--secret] [--build\|--both] \| unset K]` | `/api/projects/:id/env` |
+| `domains <project> [list \| add <hostname> \| remove <hostname>]` | `/api/projects/:id/domains` |
+| `ask "<question>"` | `POST /api/ai/ask`: prints the [assistant](ai.md)'s answer and the API calls it suggests; it never runs them |
 
 `<project>` is a name, slug or id. Errors print the API's own message and
 exit 1. `SHIPYARD_URL` + `SHIPYARD_TOKEN` override the saved login (CI).

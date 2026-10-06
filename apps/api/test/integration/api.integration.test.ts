@@ -3448,6 +3448,25 @@ describe("AI assistant", () => {
     });
     expect(viaKey.status).toBe(200);
 
+    // The CLI prints the answer and the suggested call; it doesn't make it.
+    const out: string[] = [];
+    aiTurns.push(
+      aiTurn("tool_use", [{ type: "tool_use", id: "c1", name: "propose_action", input: { action: "redeploy", project: "incident", reason: "Try again." } }]),
+      aiTurn("end_turn", [{ type: "text", text: "The last deploy failed its health check." }]),
+    );
+    const before = await prisma.deployment.count({ where: { projectId } });
+    const code = await runCli(["ask", "why", "did", "incident", "fail?"], {
+      env: { SHIPYARD_URL: api, SHIPYARD_TOKEN: token },
+      stdout: (t) => void out.push(t),
+      stderr: (t) => void out.push(t),
+      readLine: async () => "",
+      configPath: path.join(os.tmpdir(), `shipyard-cli-${randomUUID()}.json`),
+    });
+    expect(code).toBe(0);
+    expect(out.join("")).toContain("failed its health check");
+    expect(out.join("")).toContain(`POST /api/v1/projects/${projectId}/deploy`);
+    expect(await prisma.deployment.count({ where: { projectId } })).toBe(before);
+
     const off = new AiService({ prisma, access, deployments, source: { clone: async () => ({ path: "", commitSha: "" }) }, secrets: null, workspaceDir: dataDir, allowedGitHosts: [], model: null, logger: silentLogger });
     const user = await prisma.user.findFirstOrThrow({ where: { login: "alice" } });
     await expect(off.ask(user.id, "hi")).rejects.toMatchObject({ code: "AI_NOT_CONFIGURED", statusCode: 503 });

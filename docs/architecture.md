@@ -1,6 +1,49 @@
 # Architecture
 
-## Current shape (V3)
+## V5: a control plane and workers
+
+```
+ Browser ─► apps/web ─┐            CLI / CI (API keys, /api/v1) ─┐
+                      ▼                                          ▼
+ ┌──────────────── control plane: apps/api (server.ts) ───────────────────────────┐
+ │ HTTP: originCheck → authenticate (session | API key) → key scopes → rate limits │
+ │ modules/  projects · services · environments · cron · domains · env variables   │
+ │           access (orgs, teams, service accounts) · policies · audit · alerts    │
+ │           metrics · ai (advisory, read-only tools)                              │
+ │                                                                                 │
+ │ DeploymentService ── deploy_jobs queue (PostgreSQL, FOR UPDATE SKIP LOCKED)     │
+ │   claim → scheduler.pickWorker → lease (60 s, renewed) → engine for that worker │
+ │   lost lease → WORKER_LOST, retried only if no container had started            │
+ │                                                                                 │
+ │ engine for a worker:  built-in → DeploymentEngine + Docker on this host         │
+ │                       remote   → RemoteEngine ─► WorkerCalls (long-poll RPC) ───┼──┐
+ │ background loops: queue pump · lease renewal · worker heartbeats/offline ·      │  │
+ │   metrics sampling (30 s) · alert evaluation · cron · hourly cleanup            │  │
+ └──────┬───────────────────────────────┬──────────────────────────┬───────────────┘  │
+        │ Prisma                        │ Docker API               │ routes file      │ HTTPS, worker secret
+        ▼                               ▼                          ▼                  ▼
+   PostgreSQL                  built-in worker's containers   Traefik ──► apps   remote worker (src/worker/agent.ts):
+   (state, queue, metrics,                                    (local or at a     its own Docker + DeploymentEngine;
+    audit, alerts)                                            worker's address)  publishes ports for Traefik
+```
+
+- **One source of truth.** Every decision (who may do what, which worker,
+  what is live) is made by the control plane against PostgreSQL. Workers only
+  run what they are told and report back; they hold no database credentials.
+- **The queue is a table.** `deploy_jobs` with a partial unique index (one
+  RUNNING job per project/environment) gives FIFO per project, priorities
+  (manual before push), and survives restarts. No Redis.
+- **Workers are pull-based.** They long-poll for calls, so they need no
+  inbound ports from the control plane, only for app traffic from Traefik.
+- **Periodic work is in-process** with `unref`'d timers, each idempotent and
+  safe to run on a restarted process (see [operations.md](operations.md)).
+- **AI is a client, not an actor.** It reads through the same `AccessService`
+  as the API and returns proposals; see [ai.md](ai.md).
+
+Details: [workers.md](workers.md), [observability.md](observability.md),
+[operations.md](operations.md), [rbac.md](rbac.md), [environments.md](environments.md).
+
+## V3 shape (single host)
 
 ```
  Browser ──► apps/web (Next.js, :3000) ── pages + rewrite /api/* ──┐
@@ -101,9 +144,9 @@ containers it didn't create. Details: [database.md](database.md).
 
 | Not using     | Because                                                                 |
 | ------------- | ----------------------------------------------------------------------- |
-| Redis / queue | One process, handful of deploys. Revisit if deploys must survive restarts or run on several workers. |
+| Redis / message broker | The deploy queue is a PostgreSQL table (`SKIP LOCKED` claims, leases); worker calls are an in-memory long poll. One fewer system to run and back up. |
 | WebSockets    | Polling is enough for logs/status in a dashboard at this scale.          |
-| Kubernetes    | Single host. Docker + Traefik covers routing and isolation needs for V2. |
+| Kubernetes    | Docker on each worker + Traefik covers scheduling, routing and isolation at this scale. |
 | Traefik's Docker provider | It needs the Docker socket (root) and routes before Shipyard's health check. Shipyard writes the routes itself — [routing.md](routing.md). |
 | Microservices | One deployable is easier to understand, debug and run.                  |
 
