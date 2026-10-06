@@ -22,6 +22,8 @@
     "db:migrate": "npm run db:migrate -w @shipyard/api",
     "db:deploy": "npm run db:deploy -w @shipyard/api",
     "db:studio": "npm run db:studio -w @shipyard/api",
-    "shipyard:local": "npm run cli -w @shipyard/api --"
+    "shipyard:local": "npm run cli -w @shipyard/api --",
+    "backup": "npm run backup -w @shipyard/api --",
+    "restore": "npm run restore -w @shipyard/api --"
   }
 }

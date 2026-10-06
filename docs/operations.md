@@ -46,3 +46,60 @@ Platform channels (worker alerts): `POST /api/notification-channels` (`SHIPYARD_
   localhost services or cloud metadata. `SHIPYARD_ALLOW_PRIVATE_WEBHOOKS=true`
   lifts this for local development.
 - Delivery is best effort (5 s timeout); the last failure is shown on the channel.
+
+## Backups
+
+Code: [`ops/BackupService.ts`](../apps/api/src/ops/BackupService.ts),
+proven by [`backup.integration.test.ts`](../apps/api/test/integration/backup.integration.test.ts),
+which backs up, damages the data, restores, and checks every byte came back.
+
+```bash
+npm run backup -- /backups/$(date +%F)          # on the control plane
+npm run backup -- verify /backups/2026-10-06    # checksums only
+npm run restore -- /backups/2026-10-06 --yes    # destructive: stop the API first
+```
+
+| What | How | File |
+| ---- | --- | ---- |
+| Shipyard's database (projects, settings, encrypted variables, deployments, history, audit log) | `pg_dump -Fc` inside its container | `shipyard.dump` |
+| Each project's PostgreSQL service | `pg_dump -Fc` inside the running database: a consistent snapshot, which copying a live data directory is not | `db-<service>.dump` |
+| Every other persistent volume | `tar.gz` streamed from a short-lived container that mounts it read-only | `volume-<id>.tar.gz` |
+| What and how | `manifest.json`: every file with its size and sha256 | |
+
+- Everything streams through Docker; nothing needs host paths.
+- **Not included: `.env`.** Copy it yourself. Without `SHIPYARD_SECRET_KEY`
+  the variables in the dump can't be decrypted. Keep backups as secret as
+  `.env`: the dumps hold your apps' data.
+- Apps and images aren't backed up: they are rebuilt from Git by deploying.
+- Volumes and databases on **remote workers** are listed as skipped: run the
+  backup on that worker's machine too (`SHIPYARD_DB_CONTAINER` names the
+  container holding Shipyard's database, default `shipyard-postgres`).
+- Schedule it (cron on the host) and copy the directory off the machine.
+
+### Restore
+
+1. Stop the API (and workers).
+2. `npm run restore -- <dir> --yes`: checks the checksums first (a damaged
+   backup is refused), then replaces Shipyard's database (`pg_restore --clean`),
+   each volume's files, and each database service's contents (a database must
+   be deployed and running to be restored into; it is reported otherwise).
+3. Put `.env` back, start the API, deploy the projects (images are rebuilt).
+4. To try a backup without touching anything: create an empty database and
+   `npm run restore -- <dir> --yes --database <that one>` restores Shipyard's
+   database into it (the CI test does exactly this).
+
+## Disaster recovery
+
+Shipyard runs on one control plane: there is **no high availability**. If its
+machine is lost, recovery is a restore onto a new one.
+
+| | Value | Why |
+| - | ----- | --- |
+| **RPO** (data you can lose) | the time since the last backup, e.g. 24 h with a nightly backup | backups are periodic snapshots; there is no streaming replication |
+| **RTO** (time to recover) | about 30–60 min for a small installation | new machine with Docker, `npm run db:up`, restore, redeploy (builds dominate) |
+
+Strategy: nightly `npm run backup`, copied off site, kept 14 days;
+`npm run backup -- verify` after copying; a restore test into a scratch
+database monthly (or let the integration test do it on every CI run).
+Workers are disposable except for pinned projects' volumes, which their own
+backups cover.
