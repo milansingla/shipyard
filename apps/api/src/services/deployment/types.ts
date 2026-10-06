@@ -70,6 +70,8 @@ export interface DeploymentState {
   containerPort: number | null;
   /** Replica 1's published port. */
   hostPort: number | null;
+  /** Every replica's published port, in replica order. */
+  hostPorts: number[];
   replicas: number;
   deploymentUrl: string | null;
   errorMessage: string | null;

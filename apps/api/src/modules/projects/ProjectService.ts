@@ -130,7 +130,7 @@ export class ProjectService {
     const volumes = await this.deps.prisma.volume.findMany({ where: { service: { projectId: id } } });
     if (volumes.length > 0 && !options.deleteData) throw volumesExist(volumes.map((v) => v.name));
     await this.deps.deployments.destroyProjectDeployments(id, async () => {
-      await this.deps.deployments.removeVolumes(volumes.map((volume) => volume.dockerName));
+      await this.deps.deployments.removeVolumes(volumes.map((volume) => volume.dockerName), id);
       await this.deps.prisma.$transaction([
         this.deps.prisma.volume.deleteMany({ where: { service: { projectId: id } } }),
         this.deps.prisma.project.delete({ where: { id } }), // cascades to services and deployments

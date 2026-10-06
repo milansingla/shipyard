@@ -10,6 +10,14 @@ export interface RouteTarget {
   aliases?: readonly string[];
   /** The deployment's other replicas (container names), load-balanced with `containerName`. */
   replicaContainers?: readonly string[];
+  /** Each replica's published port on its machine (set by the engine). */
+  hostPorts?: readonly number[];
+  /**
+   * Explicit backend URLs, replacing container names: for containers on
+   * another worker, reached at that worker's address and published ports.
+   * Set by the control plane only, from the worker's registered address.
+   */
+  servers?: readonly string[];
   /**
    * The proxy checks each replica itself and skips those failing, so one
    * crashed replica doesn't fail a share of requests. Only set where a 2xx

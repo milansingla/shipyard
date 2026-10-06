@@ -23,6 +23,7 @@ const builtInWorker = await services.workers.registerBuiltIn({
   version: SHIPYARD_VERSION,
 });
 services.deployments.attachWorker(builtInWorker.id);
+await services.workerCalls.failOrphans();
 await services.deployments.reconcileOnStartup();
 await services.cron.reconcileOnStartup();
 services.deployments.startQueue();
@@ -51,6 +52,8 @@ const app = createApp({
   volumes: services.volumes,
   cron: services.cron,
   workers: services.workers,
+  workerCalls: services.workerCalls,
+  workerRouting: services.workerRouting,
   environments: services.environments,
   auth: services.auth,
   webhooks: services.webhooks,

@@ -173,7 +173,7 @@ export class ServiceService {
     const urlKeys = service.type === "POSTGRES" ? await this.urlVariablesOf(project.id, service.name) : [];
     await this.deps.deployments.destroyServiceDeployments(project.id, serviceId, async () => {
       // The containers using them are gone now, so the volumes can go too.
-      await this.deps.deployments.removeVolumes(volumes.map((volume) => volume.dockerName));
+      await this.deps.deployments.removeVolumes(volumes.map((volume) => volume.dockerName), project.id);
       await this.deps.prisma.$transaction([
         this.deps.prisma.volume.deleteMany({ where: { serviceId } }),
         this.deps.prisma.environmentVariable.deleteMany({ where: { projectId: project.id, scope: "project", environment: "ALL", key: { in: urlKeys } } }),

@@ -19,7 +19,7 @@ import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
 import type { DeployJob, Environment, Service } from "../../db/prisma.js";
-import { JOB_SLOTS_PER_WORKER, eligibleWorkers } from "./scheduler.js";
+import { JOB_SLOTS_PER_WORKER, eligibleWorkers, pickWorker } from "./scheduler.js";
 
 /** A running job's claim; its worker renews it every 20 s. */
 const LEASE_SECONDS = 60;
@@ -58,7 +58,10 @@ export type EngineLike = Pick<
 
 export interface DeploymentServiceDeps {
   prisma: PrismaClient;
+  /** This machine's engine (the built-in worker). */
   engine: EngineLike;
+  /** The engine of a remote worker, by id; omitted = every deployment runs here. */
+  remoteEngine?: (workerId: string) => EngineLike;
   access: AccessService;
   /** Decrypts the project's variables for each deployment; null = no variables (no secret key). */
   environment: Pick<EnvironmentService, "forDeployment"> | null;
@@ -133,8 +136,8 @@ export class DeploymentService {
   /** Projects held whole (deleting it or one of its services): no environment of theirs may start a job. */
   private readonly busyWholeProjects = new Set<string>();
   private readonly pending = new Set<Promise<unknown>>();
-  /** Jobs this process is running, by job id. */
-  private readonly activeJobs = new Map<string, Promise<void>>();
+  /** Jobs this process is orchestrating, by job id, with the worker running them (null = this machine, unregistered). */
+  private readonly activeJobs = new Map<string, { workerId: string | null; run: Promise<void> }>();
   /** This process's worker (the built-in one); null = not registered (tests, the CLI). */
   private localWorkerId: string | null = null;
   private pumping: Promise<void> | null = null;
@@ -146,7 +149,7 @@ export class DeploymentService {
   constructor(private readonly deps: DeploymentServiceDeps) {}
 
   /** Makes this process run queued jobs as `workerId` (the built-in worker). */
-  attachWorker(workerId: string): void {
+  attachWorker(workerId: string | null): void {
     this.localWorkerId = workerId;
   }
 
@@ -210,7 +213,7 @@ export class DeploymentService {
       return { type, content: "", message: "This deployment never started a container." };
     }
     try {
-      return { type, content: formatLogChunks(await this.deps.engine.getLogs(deployment.containerId, tail)) };
+      return { type, content: formatLogChunks(await this.engineFor(deployment.workerId).getLogs(deployment.containerId, tail)) };
     } catch (error) {
       if (error instanceof NotFoundError) {
         return { type, content: "", message: "The container no longer exists." };
@@ -239,7 +242,7 @@ export class DeploymentService {
     }
     if (!deployment.containerId) return { message: "This deployment never started a container." };
     try {
-      await this.deps.engine.followLogs(deployment.containerId, tail, (chunk) => onText(chunk.text), signal);
+      await this.engineFor(deployment.workerId).followLogs(deployment.containerId, tail, (chunk) => onText(chunk.text), signal);
       return {};
     } catch (error) {
       if (error instanceof NotFoundError) return { message: "The container no longer exists." };
@@ -437,7 +440,7 @@ export class DeploymentService {
       let result;
       try {
         const route = await this.routeFor(project, deployment);
-        result = await this.deps.engine.restart(deployment.containerId, route, async (stage) => {
+        result = await this.engineFor(deployment.workerId).restart(deployment.containerId, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
       } catch (error) {
@@ -493,13 +496,13 @@ export class DeploymentService {
       let result;
       try {
         const route = await this.routeFor(project, target);
-        result = await this.deps.engine.restart(target.containerId!, route, async (stage) => {
+        result = await this.engineFor(target.workerId).restart(target.containerId!, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
       } catch (error) {
         await this.markFailed(target.id, error, current.status);
         // Don't leave a half-started old version running next to the live one.
-        await this.deps.engine.stop(target.containerId!).catch(() => {});
+        await this.engineFor(target.workerId).stop(target.containerId!).catch(() => {});
         await this.revive(stopped);
         throw error;
       }
@@ -594,9 +597,42 @@ export class DeploymentService {
     return deployment;
   }
 
-  /** Deletes Docker volumes and their data. Only after their containers are gone. */
-  async removeVolumes(dockerNames: readonly string[]): Promise<void> {
-    await this.deps.engine.removeVolumes(dockerNames);
+  /**
+   * Deletes Docker volumes and their data, on every worker that ran the
+   * project (a volume lives where its containers ran). Only after the containers are gone.
+   */
+  async removeVolumes(dockerNames: readonly string[], projectId?: string): Promise<void> {
+    if (dockerNames.length === 0) return;
+    for (const workerId of projectId ? await this.workersOf(projectId) : [null]) {
+      await this.engineFor(workerId).removeVolumes(dockerNames);
+    }
+  }
+
+  /** Workers that hosted any deployment of the project (null = this machine). */
+  private async workersOf(projectId: string): Promise<Array<string | null>> {
+    const rows = await this.deps.prisma.deployment.findMany({ where: { projectId }, distinct: ["workerId"], select: { workerId: true } });
+    const ids = new Set<string | null>(rows.map((row) => (row.workerId === this.localWorkerId ? null : row.workerId)));
+    ids.add(null);
+    return [...ids];
+  }
+
+  /** Containers on another worker are reached at its address and their published ports. */
+  private async remoteServers(deployment: Pick<Deployment, "workerId" | "hostPorts">): Promise<{ servers?: string[] }> {
+    if (!deployment.workerId || deployment.workerId === this.localWorkerId) return {};
+    const worker = await this.deps.prisma.worker.findUnique({ where: { id: deployment.workerId }, select: { address: true } });
+    if (!worker?.address) return {};
+    return { servers: deployment.hostPorts.map((port) => `http://${worker.address}:${port}`) };
+  }
+
+  /** This machine's worker (or unregistered: then everything is local). */
+  isLocalWorker(workerId: string | null): boolean {
+    return !workerId || workerId === this.localWorkerId;
+  }
+
+  /** The engine of the worker hosting a deployment: this machine's, or a remote worker's. */
+  private engineFor(workerId: string | null): EngineLike {
+    if (!workerId || workerId === this.localWorkerId || !this.deps.remoteEngine) return this.deps.engine;
+    return this.deps.remoteEngine(workerId);
   }
 
   /** Like destroyProjectDeployments, for one service (see ServiceService.delete). */
@@ -606,7 +642,7 @@ export class DeploymentService {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { serviceId } });
       for (const deployment of deployments) {
         await this.deactivateRoute(deployment);
-        await this.deps.engine.destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
+        await this.engineFor(deployment.workerId).destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
         await this.deps.buildLogs.remove(deployment.id);
       }
       await finalize();
@@ -633,7 +669,7 @@ export class DeploymentService {
         if (deployment.status === DeploymentStatus.RUNNING || deployment.status === DeploymentStatus.HEALTHY) {
           await this.stopDeployment(deployment, { message: "Environment closed" });
         }
-        await this.deps.engine.destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
+        await this.engineFor(deployment.workerId).destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
       }
       await finalize();
     } finally {
@@ -649,10 +685,12 @@ export class DeploymentService {
         await this.deactivateRoute(deployment);
         // If Docker is unreachable this throws and the project is NOT deleted,
         // so no containers are orphaned. The user can simply retry.
-        await this.deps.engine.destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
+        await this.engineFor(deployment.workerId).destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
         await this.deps.buildLogs.remove(deployment.id);
       }
-      await this.deps.engine.removeNetwork(projectNetworkName(projectId));
+      for (const workerId of await this.workersOf(projectId)) {
+        await this.engineFor(workerId).removeNetwork(projectNetworkName(projectId));
+      }
       await finalize();
     } finally {
       this.unlockProject(projectId);
@@ -685,7 +723,7 @@ export class DeploymentService {
       (deployment) => !keep.has(deployment.id),
     );
     for (const deployment of interrupted) {
-      if (deployment.containerId) await engine.stop(deployment.containerId).catch(() => {});
+      if (deployment.containerId) await this.engineFor(deployment.workerId).stop(deployment.containerId).catch(() => {});
       await this.markFailed(
         deployment.id,
         `Interrupted: Shipyard stopped while this deployment was ${deployment.status}. Redeploy to try again.`,
@@ -696,7 +734,7 @@ export class DeploymentService {
 
     const stopping = await prisma.deployment.findMany({ where: { status: DeploymentStatus.STOPPING } });
     for (const deployment of stopping) {
-      if (deployment.containerId) await engine.stop(deployment.containerId).catch(() => {});
+      if (deployment.containerId) await this.engineFor(deployment.workerId).stop(deployment.containerId).catch(() => {});
       await this.moveTo(
         deployment,
         DeploymentStatus.STOPPED,
@@ -814,7 +852,7 @@ export class DeploymentService {
         stopped = await this.stopForReplacement(deployment, `Stopped for deployment ${displayId(deployment.id)}`);
         if (stopped.length > 0) logWriter.write(`Stopped the running ${service.name} first: two copies must never share its data\n`);
       }
-      await this.deps.engine.run(job, {
+      await this.engineFor(deployment.workerId).run(job, {
         onStatusChange: (state, previous) => this.persist(state, previous),
         onLog: (source, text) => logWriter.write(source === "runtime" ? prefixLines("[app] ", text) : text),
       });
@@ -867,6 +905,7 @@ export class DeploymentService {
           containerId: state.containerId,
           containerPort: state.containerPort,
           hostPort: state.hostPort,
+          hostPorts: state.hostPorts,
           replicas: state.replicas,
           deploymentUrl: state.deploymentUrl,
           errorMessage: state.errorMessage,
@@ -909,7 +948,7 @@ export class DeploymentService {
     });
     for (const candidate of candidates) {
       try {
-        await this.deps.engine.inspect(candidate.containerId!);
+        await this.engineFor(candidate.workerId).inspect(candidate.containerId!);
         return candidate;
       } catch (error) {
         if (!(error instanceof NotFoundError)) throw error;
@@ -949,7 +988,7 @@ export class DeploymentService {
       let current = await this.load(previous.id);
       try {
         current = await this.moveTo(current, DeploymentStatus.STARTING, {}, { message: "Restarted: its replacement failed" });
-        const result = await this.deps.engine.restart(previous.containerId!, null, async (stage) => {
+        const result = await this.engineFor(previous.workerId).restart(previous.containerId!, null, async (stage) => {
           current = await this.moveTo(current, stage);
         });
         await this.moveTo(current, DeploymentStatus.RUNNING, { hostPort: result.hostPort, deploymentUrl: null, errorMessage: null });
@@ -1003,7 +1042,7 @@ export class DeploymentService {
       // Out of the router first: visitors get a clean "not found", not errors from a stopping app.
       // A deployment being retired no longer has the route, so this is a no-op for it.
       await this.deactivateRoute(deployment);
-      if (deployment.containerId) await this.deps.engine.stop(deployment.containerId);
+      if (deployment.containerId) await this.engineFor(deployment.workerId).stop(deployment.containerId);
     } catch (error) {
       // Removed outside Shipyard: it is certainly not running any more.
       if (!(error instanceof NotFoundError)) {
@@ -1071,13 +1110,13 @@ export class DeploymentService {
   private async checkStillRunning(deployment: Deployment, routeName: string | null): Promise<string | null> {
     if (!deployment.containerId) return "Deployment has no container.";
     try {
-      const container = await this.deps.engine.inspect(deployment.containerId);
+      const container = await this.engineFor(deployment.workerId).inspect(deployment.containerId);
       if (!container.running) {
         return `Container exited${container.exitCode === null ? "" : ` with code ${container.exitCode}`} while Shipyard was not running.`;
       }
       // Not fatal: the app still runs; the router just can't reach it until this is fixed.
       if (routeName) {
-        await this.deps.engine
+        await this.engineFor(deployment.workerId)
           .ensureRoutable(deployment.containerId)
           .catch((error: unknown) =>
             this.deps.logger.warn({ err: error, deploymentId: deployment.id }, "Router cannot reach this deployment"),
@@ -1119,6 +1158,7 @@ export class DeploymentService {
         containerName: deployment.containerName,
         containerPort: deployment.containerPort,
         ...replicaRouting(deployment.containerName, deployment.replicas, effectiveHealthCheck(deployment.project, deployment.service)),
+        ...(await this.remoteServers(deployment)),
       });
     }
     await this.deps.router.sync([...targets.values()]);
@@ -1144,6 +1184,7 @@ export class DeploymentService {
         containerName: deployment.containerName,
         containerPort: deployment.containerPort,
         ...replicaRouting(deployment.containerName, deployment.replicas, effectiveHealthCheck(deployment.project, deployment.service)),
+        ...(await this.remoteServers(deployment)),
       });
     }
   }
@@ -1226,66 +1267,112 @@ export class DeploymentService {
   }
 
   private async pump(): Promise<void> {
-    while (this.activeJobs.size < JOB_SLOTS_PER_WORKER) {
-      if (!(await this.mayRunJobs())) return;
-      const job = await this.claimNext();
-      if (!job) return;
-      this.claimed += 1;
-      const run = this.runJob(job).finally(() => {
-        this.activeJobs.delete(job.id);
-        void this.reportLoad();
-        this.kick();
-      });
-      this.activeJobs.set(job.id, run);
-      this.track(run);
-      void this.reportLoad();
+    for (;;) {
+      let claimedAny = false;
+      for (const candidate of await this.claimable()) {
+        const workerId = await this.chooseWorker(candidate);
+        if (workerId === undefined) continue; // no worker for it right now
+        const job = await this.claim(candidate.id, workerId);
+        if (!job) continue;
+        this.claimed += 1;
+        claimedAny = true;
+        const run = this.runJob(job).finally(() => {
+          this.activeJobs.delete(job.id);
+          void this.reportLoad(job.workerId);
+          this.kick();
+        });
+        this.activeJobs.set(job.id, { workerId: job.workerId, run });
+        this.track(run);
+        void this.reportLoad(job.workerId);
+      }
+      if (!claimedAny) return;
     }
   }
 
-  /** The scheduler's verdict for this process: is the local worker one that should get work now? */
-  private async mayRunJobs(): Promise<boolean> {
-    if (!this.localWorkerId) return true; // not registered (tests, the CLI): run everything here
-    const workers = await this.deps.prisma.worker.findMany();
-    const local = workers.find((worker) => worker.id === this.localWorkerId);
-    if (!local) return true;
-    // Its own slots are counted here, not from its last heartbeat.
-    return eligibleWorkers([{ ...local, runningJobs: this.activeJobs.size }], { memoryMb: null }).length > 0;
+  /** Jobs running here for a worker (this process orchestrates every job). */
+  private jobsOn(workerId: string | null): number {
+    return [...this.activeJobs.values()].filter((job) => job.workerId === workerId).length;
   }
 
   /**
-   * Claims the next job this worker may run: the oldest of its project
-   * environment (FIFO per environment), highest priority across them, none
-   * whose environment is already running a job or is held by a restart here.
-   * SKIP LOCKED lets several workers claim at once without waiting on each
-   * other; the partial unique index is the last word on "one running per key".
+   * The scheduler: which worker should run this job now. undefined = none now
+   * (all busy, or its pinned worker is away). null = this machine, unregistered.
+   *
+   * - A project with volumes is pinned to the worker holding its data.
+   * - A project running on a worker that is still ONLINE stays there (its
+   *   services share a private network, which exists on one machine);
+   *   if that worker is draining or offline, the project moves.
+   * - Otherwise: the least busy eligible worker (see scheduler.ts).
    */
-  private async claimNext(): Promise<DeployJob | null> {
+  private async chooseWorker(job: Pick<DeployJob, "projectId" | "deploymentIds">): Promise<string | null | undefined> {
+    const { prisma } = this.deps;
+    if (!this.localWorkerId) return this.jobsOn(null) < JOB_SLOTS_PER_WORKER ? null : undefined;
+    const workers = (await prisma.worker.findMany({ where: { acceptsJobs: true } })).map((worker) => ({
+      ...worker,
+      runningJobs: this.jobsOn(worker.id),
+    }));
+    const services = await prisma.service.findMany({
+      where: { deployments: { some: { id: { in: job.deploymentIds } } } },
+      select: { memoryLimitMb: true },
+    });
+    const limits = services.map((service) => service.memoryLimitMb).filter((limit) => limit !== null);
+    const needs = { memoryMb: limits.length > 0 ? Math.max(...limits) : null };
+    const eligible = new Set(eligibleWorkers(workers, needs).map((worker) => worker.id));
+
+    const pinned = await prisma.deployment.findFirst({
+      where: { projectId: job.projectId, workerId: { not: null }, service: { volumes: { some: {} } } },
+      orderBy: { createdAt: "desc" },
+      select: { workerId: true },
+    });
+    if (pinned?.workerId) return eligible.has(pinned.workerId) ? pinned.workerId : undefined;
+
+    const live = await prisma.deployment.findFirst({
+      where: { projectId: job.projectId, status: DeploymentStatus.RUNNING, workerId: { not: null } },
+      orderBy: { finishedAt: "desc" },
+      select: { workerId: true },
+    });
+    const home = live?.workerId ? workers.find((worker) => worker.id === live.workerId) : undefined;
+    if (home?.status === "ONLINE") return eligible.has(home.id) ? home.id : undefined;
+    return pickWorker(workers, needs)?.id ?? undefined;
+  }
+
+  /**
+   * Jobs that could start now: the oldest of each project environment
+   * (FIFO per environment), highest priority across them, none whose
+   * environment is already running a job or is held by a restart here.
+   */
+  private async claimable(): Promise<DeployJob[]> {
     const busy = [...this.busyProjects];
     const whole = [...this.busyWholeProjects];
+    return this.deps.prisma.$queryRaw<DeployJob[]>`
+      SELECT j.* FROM "deploy_jobs" j
+      WHERE j."status" = 'QUEUED'
+        AND j."lockKey" <> ALL(${busy}::text[])
+        AND split_part(j."lockKey", '/', 1) <> ALL(${whole}::text[])
+        AND NOT EXISTS (SELECT 1 FROM "deploy_jobs" r WHERE r."lockKey" = j."lockKey" AND r."status" = 'RUNNING')
+        AND NOT EXISTS (
+          SELECT 1 FROM "deploy_jobs" e
+          WHERE e."lockKey" = j."lockKey" AND e."status" = 'QUEUED' AND e."createdAt" < j."createdAt"
+        )
+      ORDER BY j."priority" DESC, j."createdAt" ASC
+      LIMIT 20`;
+  }
+
+  /**
+   * Claims a job for a worker. SKIP LOCKED lets several processes claim at
+   * once without waiting on each other; the partial unique index is the last
+   * word on "one running per environment" (a lost race claims nothing).
+   */
+  private async claim(jobId: string, workerId: string | null): Promise<DeployJob | null> {
     try {
       const rows = await this.deps.prisma.$queryRaw<DeployJob[]>`
-        UPDATE "deploy_jobs" SET "status" = 'RUNNING', "workerId" = ${this.localWorkerId}::uuid, "attempts" = "attempts" + 1,
+        UPDATE "deploy_jobs" SET "status" = 'RUNNING', "workerId" = ${workerId}::uuid, "attempts" = "attempts" + 1,
           "startedAt" = now(), "leaseExpiresAt" = now() + make_interval(secs => ${LEASE_SECONDS})
-        WHERE "id" = (
-          SELECT j."id" FROM "deploy_jobs" j
-          WHERE j."status" = 'QUEUED'
-            AND (j."workerId" IS NULL OR j."workerId" = ${this.localWorkerId}::uuid)
-            AND j."lockKey" <> ALL(${busy}::text[])
-            AND split_part(j."lockKey", '/', 1) <> ALL(${whole}::text[])
-            AND NOT EXISTS (SELECT 1 FROM "deploy_jobs" r WHERE r."lockKey" = j."lockKey" AND r."status" = 'RUNNING')
-            AND NOT EXISTS (
-              SELECT 1 FROM "deploy_jobs" e
-              WHERE e."lockKey" = j."lockKey" AND e."status" = 'QUEUED' AND e."createdAt" < j."createdAt"
-            )
-          ORDER BY j."priority" DESC, j."createdAt" ASC
-          LIMIT 1
-          FOR UPDATE SKIP LOCKED
-        )
+        WHERE "id" = (SELECT "id" FROM "deploy_jobs" WHERE "id" = ${jobId}::uuid AND "status" = 'QUEUED' FOR UPDATE SKIP LOCKED)
         RETURNING *`;
       return rows[0] ?? null;
     } catch (error) {
-      // Another worker started a job of the same environment in between: try again later.
-      if ((error as { meta?: { code?: string } }).meta?.code === "23505" || String(error).includes("23505")) return null;
+      if (String(error).includes("23505") || String(error).includes("deploy_jobs_one_running_per_key")) return null;
       throw error;
     }
   }
@@ -1311,7 +1398,8 @@ export class DeploymentService {
       }
       if (deployments.length > 0) {
         await prisma.deployment.updateMany({ where: { id: { in: deployments.map((d) => d.id) } }, data: { workerId: job.workerId } });
-        await this.executeAll(project, deployments, await this.services(project.id), job.notes, environment);
+        const onWorker = deployments.map((deployment) => ({ ...deployment, workerId: job.workerId }));
+        await this.executeAll(project, onWorker, await this.services(project.id), job.notes, environment);
       }
       const outcome = await prisma.deployment.findMany({ where: { id: { in: job.deploymentIds } }, select: { status: true } });
       const failed = outcome.some((deployment) => deployment.status !== DeploymentStatus.RUNNING);
@@ -1365,17 +1453,15 @@ export class DeploymentService {
     return lost.length;
   }
 
-  /** Keeps the worker's load current for the scheduler between heartbeats. */
-  private async reportLoad(): Promise<void> {
-    if (!this.localWorkerId) return;
-    await this.deps.prisma.worker
-      .update({ where: { id: this.localWorkerId }, data: { runningJobs: this.activeJobs.size } })
-      .catch(() => {});
+  /** Keeps a worker's load current for the dashboard between heartbeats. */
+  private async reportLoad(workerId: string | null): Promise<void> {
+    if (!workerId) return;
+    await this.deps.prisma.worker.update({ where: { id: workerId }, data: { runningJobs: this.jobsOn(workerId) } }).catch(() => {});
   }
 
-  /** Jobs running in this process (for its heartbeat). */
+  /** Jobs this machine's worker is running (for its heartbeat). */
   get runningJobs(): number {
-    return this.activeJobs.size;
+    return this.jobsOn(this.localWorkerId);
   }
 
   /** Unscoped: for Shipyard's own work (verified pushes), never on a person's behalf. */

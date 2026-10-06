@@ -28,6 +28,7 @@ import type { CronService } from "./modules/cron/CronService.js";
 import { createProjectEnvironmentsRouter } from "./modules/environments/environment.routes.js";
 import type { ProjectEnvironments } from "./modules/environments/ProjectEnvironments.js";
 import { createWorkerAdminRouter, createWorkerAgentRouter } from "./modules/workers/worker.routes.js";
+import type { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import type { WorkerRegistry } from "./modules/workers/WorkerRegistry.js";
 import type { ServiceService } from "./modules/services/ServiceService.js";
 import type { VolumeService } from "./modules/services/VolumeService.js";
@@ -62,6 +63,10 @@ export interface AppDeps {
   cron?: CronService;
   environments?: ProjectEnvironments;
   workers?: WorkerRegistry;
+  /** Engine calls to remote workers; null = remote workers can't run deploys. */
+  workerCalls?: WorkerCalls | null;
+  /** Told to workers when they register: how app URLs look. */
+  workerRouting?: unknown;
   volumes?: VolumeService;
   /** null/omitted = GitHub sign-in not configured: protected routes answer 503. */
   auth?: AppAuth | null;
@@ -101,7 +106,7 @@ export function createApp(deps: AppDeps): Express {
   if (deps.workers) {
     // Workers authenticate with their own secrets, not user sessions.
     app.use("/api/workers/register", rateLimit("worker-register", limits.signIn, (req) => req.ip ?? "unknown"));
-    app.use("/api", createWorkerAgentRouter(deps.workers));
+    app.use("/api", createWorkerAgentRouter(deps.workers, deps.workerCalls ?? null, deps.workerRouting ?? null));
   }
   if (auth) {
     app.use("/api", authenticate(auth.service, auth.sessionCookie));

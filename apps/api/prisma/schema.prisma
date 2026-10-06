@@ -465,6 +465,8 @@ model Deployment {
   hostPort      Int?
   /// Identical containers this deployment runs (load-balanced). The first is containerName/containerId.
   replicas      Int       @default(1)
+  /// Each replica's published port on its worker, in replica order (Traefik reaches remote workers through them).
+  hostPorts     Int[]     @default([])
   /// The worker whose Docker runs (or ran) its containers.
   workerId      String?          @db.Uuid
   worker        Worker?          @relation(fields: [workerId], references: [id], onDelete: SetNull)
@@ -594,6 +596,8 @@ model Worker {
   /// DNS label, unique: re-registering with the same name replaces its secret.
   name            String       @unique
   hostname        String
+  /// Where the control plane and Traefik reach its published ports; null for the built-in worker (this machine).
+  address         String?
   cpus            Float
   memoryMb        Int
   version         String
@@ -610,6 +614,7 @@ model Worker {
   updatedAt       DateTime     @updatedAt
   jobs            DeployJob[]
   deployments     Deployment[]
+  calls           WorkerCall[]
 
   @@index([status, lastHeartbeatAt])
   @@map("workers")
@@ -660,4 +665,33 @@ model DeployJob {
   @@index([status, priority(sort: Desc), createdAt])
   @@index([lockKey, status])
   @@map("deploy_jobs")
+}
+
+enum WorkerCallStatus {
+  /// Waiting for the worker to pick it up.
+  PENDING
+  /// The worker is running it.
+  TAKEN
+  DONE
+  FAILED
+}
+
+/// An engine operation (run, stop, restart, logs…) the control plane asks a
+/// worker to perform on its Docker. Workers long-poll for them over HTTPS.
+model WorkerCall {
+  id         String           @id @default(uuid()) @db.Uuid
+  workerId   String           @db.Uuid
+  worker     Worker           @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  method     String
+  args       Json
+  status     WorkerCallStatus @default(PENDING)
+  result     Json?
+  /// {code, message} when FAILED.
+  error      Json?
+  createdAt  DateTime         @default(now())
+  takenAt    DateTime?
+  finishedAt DateTime?
+
+  @@index([workerId, status, createdAt])
+  @@map("worker_calls")
 }

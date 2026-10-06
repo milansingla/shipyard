@@ -22,6 +22,8 @@ export const ROUTES_FILE = "routes.yml";
 export const DEPLOYMENT_HEADER = "X-Shipyard-Deployment";
 
 const DNS_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+/** http://<host or IPv4>:<port>, nothing else: it goes into Traefik's configuration. */
+const SERVER_URL = /^http:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}$/;
 const DEPLOYMENT_ID = /^[A-Za-z0-9-]{1,64}$/;
 
 export interface TraefikRouterOptions {
@@ -190,12 +192,14 @@ export function traefikConfig(routes: readonly RouteTarget[], domain: string, tl
       // One certificate per hostname, requested from Let's Encrypt on first use.
       ...(tls && { tls: { certResolver: CERT_RESOLVER } }),
     };
-    const containers = [route.containerName, ...(route.replicaContainers ?? [])];
+    const urls = route.servers?.length
+      ? route.servers
+      : [route.containerName, ...(route.replicaContainers ?? [])].map((container) => `http://${container}:${route.containerPort}`);
     services[id] = {
       loadBalancer: {
-        servers: containers.map((container) => ({ url: `http://${container}:${route.containerPort}` })),
+        servers: urls.map((url) => ({ url })),
         // Several replicas: Traefik checks each and sends traffic only to those answering 2xx/3xx.
-        ...(containers.length > 1 &&
+        ...(urls.length > 1 &&
           route.healthCheck && {
             healthCheck: {
               path: route.healthCheck.path,
@@ -258,6 +262,7 @@ function assertRoutable(target: RouteTarget): void {
     DEPLOYMENT_ID.test(target.deploymentId) &&
     DNS_LABEL.test(target.containerName) && // Traefik resolves it through Docker's DNS
     (target.replicaContainers ?? []).every((name) => DNS_LABEL.test(name)) &&
+    (target.servers ?? []).every((url) => SERVER_URL.test(url)) &&
     (!target.healthCheck ||
       (/^\/[A-Za-z0-9._~!$&'()*+,;=:@%/?-]*$/.test(target.healthCheck.path) &&
         (target.healthCheck.port === null || (Number.isInteger(target.healthCheck.port) && target.healthCheck.port > 0 && target.healthCheck.port <= 65535)))) &&

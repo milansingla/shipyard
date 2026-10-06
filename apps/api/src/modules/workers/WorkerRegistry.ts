@@ -17,6 +17,8 @@ export interface WorkerInfo {
   cpus: number;
   memoryMb: number;
   version: string;
+  address?: string;
+  acceptsJobs?: boolean;
 }
 
 export interface WorkerRegistryDeps {
@@ -26,6 +28,8 @@ export interface WorkerRegistryDeps {
   /** Lower-cased GitHub logins allowed to see and drain workers. */
   admins: readonly string[];
   logger: Logger;
+  /** Called when workers go OFFLINE (their calls fail as WORKER_LOST). */
+  onOffline?: (workerIds: readonly string[]) => Promise<void>;
 }
 
 /** What the API shows: never the token hash. */
@@ -102,6 +106,7 @@ export class WorkerRegistry {
   async disconnect(workerId: string): Promise<void> {
     await this.deps.prisma.worker.update({ where: { id: workerId }, data: { status: "OFFLINE", runningJobs: 0 } });
     this.deps.logger.info({ workerId }, "Worker disconnected");
+    await this.deps.onOffline?.([workerId]);
   }
 
   /** Marks workers that stopped heartbeating OFFLINE. Returns their ids. */
@@ -113,6 +118,7 @@ export class WorkerRegistry {
     if (stale.length === 0) return [];
     await this.deps.prisma.worker.updateMany({ where: { id: { in: stale.map((w) => w.id) } }, data: { status: "OFFLINE" } });
     for (const worker of stale) this.deps.logger.warn({ workerId: worker.id, name: worker.name }, "Worker missed its heartbeats: OFFLINE");
+    await this.deps.onOffline?.(stale.map((worker) => worker.id));
     return stale.map((worker) => worker.id);
   }
 

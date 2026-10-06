@@ -107,6 +107,7 @@ export class DeploymentEngine {
       containerId: null,
       containerPort: null,
       hostPort: null,
+      hostPorts: [],
       replicas: 1,
       deploymentUrl: null,
       errorMessage: null,
@@ -213,6 +214,7 @@ export class DeploymentEngine {
           ...(prebuilt && { healthCommand: prebuilt.healthCommand }),
         });
         startedContainers.push(container.id);
+        if (container.hostPort !== null) state.hostPorts.push(container.hostPort);
         return container;
       };
       const checkReplica = async (container: StartedContainer, replica: number) => {
@@ -259,6 +261,7 @@ export class DeploymentEngine {
           deploymentId: job.id,
           containerName: state.containerName,
           containerPort: state.containerPort!,
+          hostPorts: state.hostPorts,
           ...replicaRouting(state.containerName, replicas, healthCheck),
         });
         state.deploymentUrl = url;
@@ -375,6 +378,7 @@ export class DeploymentEngine {
         deploymentId: first.deploymentId ?? first.id,
         containerName: first.name,
         containerPort: first.containerPort,
+        hostPorts: containers.map((container) => container.hostPort).filter((port) => port !== null),
         ...replicaRouting(first.name, containers.length, first.healthCheck),
       });
     }

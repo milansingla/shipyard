@@ -1,3 +1,4 @@
+import { AppError, ErrorCode } from "./lib/errors.js";
 import Docker from "dockerode";
 
 import type { AppConfig } from "./config/env.js";
@@ -23,6 +24,8 @@ import { CronService } from "./modules/cron/CronService.js";
 import { ProjectEnvironments } from "./modules/environments/ProjectEnvironments.js";
 import { PreviewService } from "./modules/environments/PreviewService.js";
 import { WorkerRegistry } from "./modules/workers/WorkerRegistry.js";
+import { RemoteEngine } from "./modules/workers/RemoteEngine.js";
+import { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
@@ -55,6 +58,8 @@ export interface ApiServices extends EngineServices {
   cron: CronService;
   environments: ProjectEnvironments;
   workers: WorkerRegistry;
+  workerCalls: WorkerCalls;
+  workerRouting: unknown;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -130,7 +135,27 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     ? new EnvironmentService({ prisma, secretBox, access, audit, logger: logger.child({ component: "environment" }) })
     : null;
 
+  // Remote workers: engine calls go over the worker call channel, and their apps
+  // are routed by Traefik here at the worker's address and published ports.
+  const workerCalls = new WorkerCalls({ prisma, logger: logger.child({ component: "worker-calls" }) });
+  const remoteEngines = new Map<string, RemoteEngine>();
+  const remoteEngine = (workerId: string): RemoteEngine => {
+    let engine = remoteEngines.get(workerId);
+    if (!engine) {
+      engine = new RemoteEngine(workerId, workerCalls, engineServices.engine, async (target) => {
+        const worker = await prisma.worker.findUnique({ where: { id: workerId }, select: { name: true, address: true } });
+        if (!worker?.address) {
+          throw new AppError(ErrorCode.ROUTING_FAILED, `Worker ${worker?.name ?? workerId} has no address (SHIPYARD_WORKER_ADDRESS): Traefik can't reach its apps.`, { statusCode: 422 });
+        }
+        await engineServices.router.activate({ ...target, servers: (target.hostPorts ?? []).map((port) => `http://${worker.address}:${port}`) });
+      });
+      remoteEngines.set(workerId, engine);
+    }
+    return engine;
+  };
+
   const deployments = new DeploymentService({
+    remoteEngine,
     prisma,
     access,
     audit,
@@ -193,6 +218,8 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     audit,
     environment,
     runner: engineServices.docker,
+    // A job runs where its service's live deployment runs.
+    runnerFor: (workerId) => (workerId && !deployments.isLocalWorker(workerId) ? remoteEngine(workerId) : engineServices.docker),
     logger: logger.child({ component: "cron" }),
   });
   const environments = new ProjectEnvironments({ prisma, access, deployments, logger: logger.child({ component: "environments" }) });
@@ -201,10 +228,17 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     joinToken: config.workers.joinToken,
     admins: config.workers.admins,
     logger: logger.child({ component: "workers" }),
+    onOffline: async (workerIds) => {
+      for (const workerId of workerIds) await workerCalls.failWorker(workerId, "the worker stopped responding.");
+    },
   });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
   return {
     workers,
+    workerCalls,
+    workerRouting: config.routing
+      ? { mode: "traefik", domain: config.routing.domain, httpPort: config.routing.httpPort, httpsPort: config.routing.tls?.httpsPort ?? null }
+      : { mode: "direct" },
     ...engineServices,
     prisma,
     projects,

@@ -26,6 +26,8 @@ export interface CronServiceDeps {
   audit: Pick<AuditService, "record">;
   environment: Pick<EnvironmentService, "forDeployment"> | null;
   runner: CronRunner;
+  /** The runner of the worker hosting a deployment (default: `runner`). */
+  runnerFor?: (workerId: string | null) => Pick<CronRunner, "runToCompletion">;
   logger: Logger;
   /** Runs at the same time, across all projects. Due jobs beyond it wait for the next tick. */
   maxConcurrentRuns?: number;
@@ -222,7 +224,8 @@ export class CronService {
     const containerName = buildContainerName(`${artifactName(project, service)}-${job.name}`, run.id);
     await prisma.cronRun.update({ where: { id: run.id }, data: { containerName } });
 
-    const execution = this.execute(job, run.id, {
+    const runner = this.deps.runnerFor?.(deployment.workerId) ?? this.deps.runner;
+    const execution = this.execute(job, run.id, runner, {
       imageName: deployment.imageName!,
       containerName,
       command: ["sh", "-c", job.command],
@@ -236,11 +239,11 @@ export class CronService {
     return { ...run, containerName };
   }
 
-  private async execute(job: CronJob, runId: string, options: OneOffContainerOptions): Promise<void> {
+  private async execute(job: CronJob, runId: string, runner: Pick<CronRunner, "runToCompletion">, options: OneOffContainerOptions): Promise<void> {
     const { prisma, logger } = this.deps;
     try {
       const env = this.deps.environment ? (await this.deps.environment.forDeployment(job.projectId, job.serviceId)).runtime : {};
-      const result = await this.deps.runner.runToCompletion({ ...options, env });
+      const result = await runner.runToCompletion({ ...options, env });
       const status = result.timedOut ? "TIMED_OUT" : result.exitCode === 0 ? "SUCCEEDED" : "FAILED";
       await prisma.cronRun.update({
         where: { id: runId },

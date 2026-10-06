@@ -84,3 +84,66 @@ QUEUED ──claim (lease 60 s)──► RUNNING ──► SUCCEEDED | FAILED
   are marked interrupted, and their deployments FAILED.
 - Restarts, rollbacks and closing an environment are refused (409) while a
   deploy job of that environment runs.
+
+## Remote workers
+
+Code: [`worker/agent.ts`](../apps/api/src/worker/agent.ts) (the worker),
+[`WorkerCalls`](../apps/api/src/modules/workers/WorkerCalls.ts) and
+[`RemoteEngine`](../apps/api/src/modules/workers/RemoteEngine.ts) (the control plane's side).
+
+The control plane keeps orchestration (queue, scheduler, database, routing);
+a worker performs the engine's operations on its own Docker: clone, build,
+start, health check, stop, restart, logs, cron runs, cleanup.
+
+```
+control plane                                  worker (npm run worker)
+  DeploymentService ──RemoteEngine.run(job)──►  worker_calls (in memory)
+                                   ◄── POST /api/workers/:id/calls/next   (long poll, 25 s)
+                                   ◄── …/calls/:callId/events             status, log lines, "route this"
+  Traefik ◄── route: http://<worker address>:<published port>
+                                   ◄── …/calls/:callId/complete           result, or {code, message}
+```
+
+### Running one
+
+On a machine with Docker and git:
+
+```bash
+SHIPYARD_CONTROL_PLANE_URL=https://shipyard.example.com   # the API
+SHIPYARD_WORKER_JOIN_TOKEN=<same as the control plane's>
+SHIPYARD_WORKER_NAME=builder-1
+SHIPYARD_WORKER_ADDRESS=10.0.0.5     # where Traefik reaches this machine
+SHIPYARD_PUBLISH_HOST=0.0.0.0        # so it can (firewall it to the control plane!)
+npm run worker                       # production: npm run build && npm run start:worker
+```
+
+Same image registry settings (`SHIPYARD_REGISTRY…`) on every machine, so a
+project can move between workers.
+
+### Rules
+
+- **Calls carry secrets, so they aren't stored**: a deploy's arguments include
+  the app's decrypted variables. They stay in the control plane's memory and
+  travel to the worker over the call channel (**use HTTPS** between
+  machines). The `worker_calls` table records method, status, timing and ids.
+- **One worker per project**: a project's services share a private Docker
+  network, which exists on one machine, so a project stays on the worker it
+  runs on while that worker is ONLINE. A project with volumes (a database's
+  data) is **pinned** to the worker holding them: its deploys wait if that
+  worker is away. Otherwise a draining or offline worker's projects move on
+  their next deploy.
+- **A worker that goes away** (missed heartbeats, or a clean disconnect): its
+  calls fail at once as `WORKER_LOST`, so its deployments are FAILED with
+  that reason instead of hanging.
+- **Logs**: build output streams to the control plane and is stored with the
+  deployment (which records its `workerId`); live runtime logs are streamed
+  from the worker on demand.
+- Calls live in the control plane's memory: if it restarts, calls in flight
+  fail (and are recorded as interrupted).
+
+### Limits
+
+- One control plane process (calls and the deploy lock for restarts are in its memory).
+- Traefik must reach each worker's address; there is no overlay network.
+- A pinned project (with volumes) can't move to another worker: its data is
+  on that machine. Back it up ([operations.md](operations.md)).

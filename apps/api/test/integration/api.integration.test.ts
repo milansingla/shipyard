@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { main as runCli } from "../../../cli/src/main.js";
 import { createApp } from "../../src/app.js";
@@ -24,6 +24,10 @@ import { type CronRunner, CronService } from "../../src/modules/cron/CronService
 import { ProjectEnvironments } from "../../src/modules/environments/ProjectEnvironments.js";
 import { PreviewService } from "../../src/modules/environments/PreviewService.js";
 import { WorkerRegistry } from "../../src/modules/workers/WorkerRegistry.js";
+import { WorkerCalls } from "../../src/modules/workers/WorkerCalls.js";
+import { RemoteEngine } from "../../src/modules/workers/RemoteEngine.js";
+import { runWorkerAgent } from "../../src/worker/agent.js";
+import type { RouteTarget } from "../../src/services/routing/Router.js";
 import type { OneOffContainerOptions, OneOffResult } from "../../src/services/docker/DockerService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
@@ -133,6 +137,7 @@ const fakeRouter: Router = {
   network: null,
   urlFor: (name) => `http://${name}.localhost`,
   async activate(target) {
+    routeTargets.push(target);
     liveRoutes.set(target.name, target.deploymentId);
     liveAliases.set(target.name, target.aliases ?? []);
   },
@@ -189,6 +194,7 @@ const fakeEngine: EngineLike = {
       containerPort: 3000,
       hostPort: 49_999,
       replicas: job.replicas ?? 1,
+      hostPorts: [49_999],
       deploymentUrl: null,
       errorMessage: null,
       failedStage: null,
@@ -266,6 +272,9 @@ let deployments: DeploymentService;
 let environment: EnvironmentService;
 let cron: CronService;
 let workers: WorkerRegistry;
+let workerCalls: WorkerCalls;
+/** Every route the control plane's router was asked to apply. */
+const routeTargets: RouteTarget[] = [];
 const WORKER_JOIN_TOKEN = "j".repeat(48);
 
 /** Stands in for Docker when a cron job runs: records what it was asked, answers `cronResult`. */
@@ -331,6 +340,11 @@ beforeAll(async () => {
       logger: silentLogger,
     }),
     engine: fakeEngine,
+    remoteEngine: (workerId) =>
+      new RemoteEngine(workerId, workerCalls, fakeEngine, async (target) => {
+        const worker = await prisma.worker.findUniqueOrThrow({ where: { id: workerId } });
+        await fakeRouter.activate({ ...target, servers: (target.hostPorts ?? []).map((port) => `http://${worker.address}:${port}`) });
+      }),
     environment,
     router: fakeRouter,
     buildLogs: new BuildLogStore(dataDir),
@@ -359,7 +373,17 @@ beforeAll(async () => {
       services: new ServiceService({ prisma, access, deployments, audit, environment, logger: silentLogger }),
       volumes: new VolumeService({ prisma, access, audit, logger: silentLogger }),
       environments: new ProjectEnvironments({ prisma, access, deployments, logger: silentLogger }),
-      workers: (workers = new WorkerRegistry({ prisma, joinToken: WORKER_JOIN_TOKEN, admins: ["alice"], logger: silentLogger })),
+      workers: (workers = new WorkerRegistry({
+        prisma,
+        joinToken: WORKER_JOIN_TOKEN,
+        admins: ["alice"],
+        logger: silentLogger,
+        onOffline: async (ids) => {
+          for (const id of ids) await workerCalls.failWorker(id, "the worker stopped responding.");
+        },
+      })),
+      workerCalls: (workerCalls = new WorkerCalls({ prisma, logger: silentLogger })),
+      workerRouting: { mode: "traefik", domain: "localhost", httpPort: 80, httpsPort: null },
       cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
@@ -402,6 +426,7 @@ beforeEach(async () => {
   repoFiles.clear();
   removedVolumes.length = 0;
   destroyedDeployments.length = 0;
+  routeTargets.length = 0;
   engineEvents.length = 0;
   failRuns.clear();
   cronCalls.length = 0;
@@ -2667,5 +2692,114 @@ describe("the deploy queue", () => {
     deployments.kick();
     await deployments.waitForIdle();
     expect((await prisma.deployment.findUniqueOrThrow({ where: { id: queued.id } })).status).toBe("RUNNING");
+  });
+});
+
+describe("remote workers", () => {
+  /** A worker's engine, without Docker: walks a deployment to RUNNING and routes it like the real one. */
+  function remoteFakeEngine(router: import("../../src/services/routing/Router.js").Router, calls: string[], hold?: Promise<void>) {
+    return {
+      ...fakeEngine,
+      async run(job: DeploymentJob, observer: import("../../src/services/deployment/types.js").DeploymentObserver = {}) {
+        calls.push(`run:${job.service?.alias}`);
+        const state: DeploymentState = {
+          id: job.id, status: S.QUEUED, branch: job.branch, commitSha: "e".repeat(40), imageName: `img/${job.name}`,
+          containerName: `shipyard-${job.name}-r`, containerId: `remote-${job.id}`, containerPort: 3000, hostPort: 40_001,
+          hostPorts: [40_001], replicas: 1, deploymentUrl: null, errorMessage: null, failedStage: null, startedAt: new Date(), finishedAt: null,
+        };
+        for (const status of [S.CLONING, S.DETECTING, S.BUILDING, S.STARTING, S.HEALTH_CHECKING, S.HEALTHY, S.ROUTING, S.RUNNING]) {
+          if (status === S.BUILDING) observer.onLog?.("build", "Step 1/3 on the remote worker\n");
+          if (status === S.STARTING && hold) await hold;
+          if (status === S.RUNNING) {
+            await router.activate({ name: job.routeName ?? job.name, deploymentId: job.id, containerName: state.containerName, containerPort: 3000, hostPorts: state.hostPorts });
+            state.deploymentUrl = router.urlFor(job.routeName ?? job.name, 40_001);
+          }
+          const previous = state.status;
+          state.status = status;
+          await observer.onStatusChange?.(state, previous);
+        }
+        return state;
+      },
+      async stop(reference: string) {
+        calls.push(`stop:${reference}`);
+        return { containerName: "x", status: S.STOPPED, hostPort: null, deploymentUrl: null };
+      },
+      async runToCompletion() {
+        return { exitCode: 0, timedOut: false, oomKilled: false, output: "" };
+      },
+    };
+  }
+
+  async function startAgent(name: string, calls: string[], hold?: Promise<void>) {
+    const controller = new AbortController();
+    const done = runWorkerAgent({
+      controlPlaneUrl: api,
+      joinToken: WORKER_JOIN_TOKEN,
+      info: { name, hostname: name, cpus: 4, memoryMb: 8192, version: "4.0.0", address: "10.0.0.5" },
+      createEngine: (router) => remoteFakeEngine(router, calls, hold) as never,
+      logger: silentLogger,
+      signal: controller.signal,
+    });
+    for (let i = 0; i < 50 && !(await prisma.worker.findUnique({ where: { name } })); i += 1) await new Promise((r) => setTimeout(r, 20));
+    return { stop: async () => { controller.abort(); await done; }, worker: await prisma.worker.findUniqueOrThrow({ where: { name } }) };
+  }
+
+  afterEach(() => deployments.attachWorker(null));
+
+  it("runs a deploy on a remote worker over HTTP: its logs and statuses come back, Traefik routes to its address", async () => {
+    const alice = await sessionFor(ALICE);
+    const builtIn = await workers.registerBuiltIn({ name: "control-plane", hostname: "cp", cpus: 2, memoryMb: 2048, version: "4.0.0" });
+    await prisma.worker.update({ where: { id: builtIn.id }, data: { status: "DRAINING" } }); // so the remote one gets the work
+    deployments.attachWorker(builtIn.id);
+    const calls: string[] = [];
+    const agent = await startAgent("builder-1", calls);
+    try {
+      const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/remote-app" })).body!.data.id as string;
+      const deployed = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+      await deployments.waitForIdle();
+      for (let i = 0; i < 100 && (await prisma.deployment.findUniqueOrThrow({ where: { id: deployed } })).status !== "RUNNING"; i += 1) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      expect(calls).toEqual(["run:web"]);
+      const row = await prisma.deployment.findUniqueOrThrow({ where: { id: deployed } });
+      expect(row).toMatchObject({ status: "RUNNING", workerId: agent.worker.id, hostPorts: [40_001], deploymentUrl: "http://remote-app.localhost" });
+      expect(routeTargets.at(-1)).toMatchObject({ name: "remote-app", deploymentId: deployed, servers: ["http://10.0.0.5:40001"] });
+      const log = (await call(alice, "GET", `/api/deployments/${deployed}/logs?type=build`)).body!.data.content as string;
+      expect(log).toContain("Step 1/3 on the remote worker");
+      expect(await prisma.deployJob.findFirstOrThrow({ where: { projectId } })).toMatchObject({ status: "SUCCEEDED", workerId: agent.worker.id });
+      // Recorded without its arguments: a deploy's carry the app's secrets.
+      const recorded = await prisma.workerCall.findFirstOrThrow({ where: { workerId: agent.worker.id, method: "run" } });
+      expect(recorded).toMatchObject({ status: "DONE", args: { method: "run", deploymentId: deployed } });
+
+      // Operating on it goes to its worker.
+      expect((await call(alice, "POST", `/api/deployments/${deployed}/stop`)).status).toBe(200);
+      expect(calls).toContain(`stop:remote-${deployed}`);
+    } finally {
+      await agent.stop();
+    }
+  });
+
+  it("a worker that goes away mid-deploy: the deployment fails as WORKER_LOST", async () => {
+    const alice = await sessionFor(ALICE);
+    const builtIn = await workers.registerBuiltIn({ name: "control-plane", hostname: "cp", cpus: 2, memoryMb: 2048, version: "4.0.0" });
+    await prisma.worker.update({ where: { id: builtIn.id }, data: { status: "DRAINING" } });
+    deployments.attachWorker(builtIn.id);
+    const calls: string[] = [];
+    const agent = await startAgent("builder-2", calls, new Promise(() => {})); // never gets past STARTING
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/lost-remote" })).body!.data.id as string;
+    const deployed = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    for (let i = 0; i < 100 && (await prisma.deployment.findUniqueOrThrow({ where: { id: deployed } })).status !== "BUILDING"; i += 1) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    // It stops heartbeating (its process is killed): the sweep finds it.
+    await prisma.worker.update({ where: { id: agent.worker.id }, data: { lastHeartbeatAt: new Date(Date.now() - 60_000) } });
+    await workers.sweep();
+    await deployments.waitForIdle();
+    expect(await prisma.deployment.findUniqueOrThrow({ where: { id: deployed } })).toMatchObject({
+      status: "FAILED",
+      errorMessage: "WORKER_LOST: the worker stopped responding.",
+    });
+    void agent.stop();
   });
 });
