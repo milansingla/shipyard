@@ -79,6 +79,23 @@ describe("diagnoseInstallFailure", () => {
     expect(message).toContain("  something odd happened");
   });
 
+  it("downloading the package manager failed: a network problem on the server, said plainly", () => {
+    const corepackError = `The command 'sh -c for attempt in $(seq 1 5); do corepack install --global pnpm@9 && exit 0; ...' returned a non-zero code: 1`;
+    const output = [
+      'Step 7/22 : RUN ["sh","-c","for attempt in $(seq 1 5); do corepack install --global pnpm@9 && exit 0; ..."]',
+      "Internal Error: Error when performing the request to https://registry.npmjs.org/pnpm; for troubleshooting help, see https://github.com/nodejs/corepack#troubleshooting",
+      "Shipyard: couldn't download pnpm@9 (attempt 1 of 5); retrying in 3s",
+      "Shipyard: couldn't download pnpm@9 from the npm registry after 5 attempts.",
+    ].join("\n");
+    const message = diagnoseInstallFailure({ ...pnpm, version: "9" }, corepackError, output)!;
+    expect(message.split("\n").slice(0, 3)).toEqual([
+      "Couldn't download pnpm@9 from the npm registry (registry.npmjs.org): the build had no working connection, even after retrying.",
+      "This is a network problem on this server, not in your code.",
+      "Fix: check this server's internet connection, DNS and proxy (Docker Desktop: Settings → Resources → Proxies), then redeploy.",
+    ]);
+    expect(message).toContain("Internal Error: Error when performing the request to https://registry.npmjs.org/pnpm");
+  });
+
   it("not the install (the build step failed): null, the original error stands", () => {
     expect(diagnoseInstallFailure(pnpm, "The command '/bin/sh -c pnpm run build' returned a non-zero code: 1", pnpmOutput)).toBeNull();
   });

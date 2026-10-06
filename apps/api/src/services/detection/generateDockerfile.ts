@@ -24,7 +24,10 @@ function base(project: NodeProject, stage = ""): { lines: string[]; user: string
     `FROM node:${project.nodeMajor}-slim${stage}`,
   ];
   if (project.packageManager === "npm") {
-    if (project.packageManagerVersion) lines.push(`RUN ${JSON.stringify(["npm", "install", "--global", `npm@${assertVersion(project.packageManagerVersion)}`])}`);
+    if (project.packageManagerVersion) {
+      const spec = `npm@${assertVersion(project.packageManagerVersion)}`;
+      lines.push(retriedDownload(["npm", "install", "--global", spec], spec));
+    }
   } else {
     // No prompt before downloading, and never rewrite package.json to pin a version.
     lines.push("ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0", "RUN corepack enable");
@@ -37,7 +40,26 @@ function packageManagerLines(project: NodeProject): string[] {
   if ((project.packageManager !== "pnpm" && project.packageManager !== "yarn") || !project.packageManagerVersion) return [];
   const spec = `${project.packageManager}@${assertVersion(project.packageManagerVersion)}`;
   // The reason quotes repository content: only plain characters reach the comment.
-  return [`# ${project.packageManagerReason.replace(/[^\w .,:;()"'@/^~<>=*|+→-]/g, "")}`, `RUN ${JSON.stringify(["corepack", "install", "--global", spec])}`];
+  return [`# ${project.packageManagerReason.replace(/[^\w .,:;()"'@/^~<>=*|+→-]/g, "")}`, retriedDownload(["corepack", "install", "--global", spec], spec)];
+}
+
+/** Attempts at a package-manager download before the build gives up. */
+export const DOWNLOAD_ATTEMPTS = 5;
+
+/**
+ * A download from the npm registry, retried with growing pauses (3s, 6s, …):
+ * corepack doesn't retry, and one dropped connection shouldn't fail a
+ * deployment. Every word of `command` is fixed or a validated version, so
+ * it is safe inside `sh -c`.
+ */
+function retriedDownload(command: readonly string[], what: string): string {
+  const run = command.join(" ");
+  const script =
+    `for attempt in $(seq 1 ${DOWNLOAD_ATTEMPTS}); do ${run} && exit 0; ` +
+    `[ "$attempt" -eq ${DOWNLOAD_ATTEMPTS} ] && break; ` +
+    `echo "Shipyard: couldn't download ${what} (attempt $attempt of ${DOWNLOAD_ATTEMPTS}); retrying in $((attempt * 3))s" >&2; sleep $((attempt * 3)); done; ` +
+    `echo "Shipyard: couldn't download ${what} from the npm registry after ${DOWNLOAD_ATTEMPTS} attempts." >&2; exit 1`;
+  return `RUN ${JSON.stringify(["sh", "-c", script])}`;
 }
 
 /** Install (and build) steps shared by servers and static sites: everything up to the built source. */

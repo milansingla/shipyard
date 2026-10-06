@@ -402,7 +402,7 @@ describe("package managers in monorepos", () => {
     const result = await plan(dir);
     const lines = result.dockerfileText.split("\n");
     expect(lines).toContain("FROM node:22-slim");
-    expect(lines).toContain('RUN ["corepack","install","--global","pnpm@9.15.0"]');
+    expect(result.dockerfileText).toContain("corepack install --global pnpm@9.15.0 && exit 0");
     // Workspace packages are needed by the install: the whole workspace goes in before it.
     expect(lines.indexOf("COPY --chown=node:node . .")).toBeLessThan(lines.indexOf('RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile'));
     expect(lines).toContain('RUN ["pnpm","--filter","web...","run","build"]');
@@ -435,7 +435,7 @@ describe("package managers in monorepos", () => {
     const result = await plan(dir, {}, path.join(dir, "backend"));
     expect(result.detection.packageManager).toBe("pnpm");
     expect(result.detection.contextDirectory).toBe("backend");
-    expect(result.dockerfileText).toContain('RUN ["corepack","install","--global","pnpm@9"]');
+    expect(result.dockerfileText).toContain("corepack install --global pnpm@9 && exit 0");
     expect(result.dockerfileText).toContain('RUN echo "Using pnpm $(pnpm --version)" && pnpm install\n');
     expect(result.log).toContain("backend has no lockfile of its own; the repository root uses pnpm");
   });

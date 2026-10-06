@@ -86,6 +86,7 @@ const CAUSES: readonly Cause[] = [
  * dependency install (the build itself failed, say).
  */
 export function diagnoseInstallFailure(install: InstallInfo, dockerError: string, output: string): string | null {
+  if (/corepack install --global|npm install --global npm@/.test(dockerError)) return diagnoseSetupFailure(install, output);
   if (!dockerError.includes(install.command)) return null;
   const text = stripAnsi(output);
   const step = installStepOutput(text, install.command);
@@ -102,6 +103,31 @@ export function diagnoseInstallFailure(install: InstallInfo, dockerError: string
   if (cause) lines.push(`Fix: ${cause.fix(install)}`);
   const excerpt = errorExcerpt(step);
   if (excerpt.length > 0) lines.push(`${install.manager} said:`, ...excerpt.map((line) => `  ${line}`));
+  return lines.join("\n");
+}
+
+/** Installing the package manager itself failed: the registry couldn't be reached (after retries) or the version doesn't exist. */
+function diagnoseSetupFailure(install: InstallInfo, output: string): string {
+  const text = stripAnsi(output);
+  const spec = `${install.manager}${install.version ? `@${install.version}` : ""}`;
+  const missing = /No matching version|Usage Error.*not found|404/i.test(text) && !/Error when performing the request/.test(text);
+  const lines = missing
+    ? [
+        `Couldn't install ${spec}: that version doesn't exist in the npm registry.`,
+        `Why: ${install.reason}`,
+        `Fix: set "packageManager" in package.json to a published version (e.g. "${install.manager}@<version>").`,
+      ]
+    : [
+        `Couldn't download ${spec} from the npm registry (registry.npmjs.org): the build had no working connection, even after retrying.`,
+        "This is a network problem on this server, not in your code.",
+        "Fix: check this server's internet connection, DNS and proxy (Docker Desktop: Settings → Resources → Proxies), then redeploy.",
+      ];
+  const detail = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /Internal Error|Error when performing|ECONN|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|couldn't download|fetch failed/i.test(line))
+    .slice(-4);
+  if (detail.length > 0) lines.push("Details:", ...detail.map((line) => `  ${line.length > 300 ? `${line.slice(0, 300)}…` : line}`));
   return lines.join("\n");
 }
 

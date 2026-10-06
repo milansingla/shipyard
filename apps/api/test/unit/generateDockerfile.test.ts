@@ -78,15 +78,26 @@ describe("generateNodeDockerfile", () => {
     );
     const lines = dockerfile.split("\n");
     expect(lines).toContain("ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0");
-    const install = lines.indexOf('RUN ["corepack","install","--global","pnpm@9.15.0"]');
+    const install = lines.findIndex((line) => line.startsWith('RUN ["sh","-c","for attempt') && line.includes("corepack install --global pnpm@9.15.0 && exit 0"));
     expect(install).toBeGreaterThan(lines.indexOf("USER node"));
     expect(install).toBeLessThan(lines.indexOf('RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile'));
     expect(lines[install - 1]).toBe('# packageManager "pnpm@9.15.0" in package.json → pnpm 9.15.0');
   });
 
+  it("retries the package-manager download with growing pauses, then says why it gave up", () => {
+    const dockerfile = generateNodeDockerfile(project({ packageManager: "pnpm", packageManagerVersion: "9", lockfile: "pnpm-lock.yaml" }), 3000);
+    const line = dockerfile.split("\n").find((l) => l.includes("corepack install --global pnpm@9"))!;
+    const [, , script] = JSON.parse(line.slice("RUN ".length)) as [string, string, string];
+    expect(script).toBe(
+      'for attempt in $(seq 1 5); do corepack install --global pnpm@9 && exit 0; [ "$attempt" -eq 5 ] && break; ' +
+        'echo "Shipyard: couldn\'t download pnpm@9 (attempt $attempt of 5); retrying in $((attempt * 3))s" >&2; sleep $((attempt * 3)); done; ' +
+        'echo "Shipyard: couldn\'t download pnpm@9 from the npm registry after 5 attempts." >&2; exit 1',
+    );
+  });
+
   it("yarn Berry: its major from corepack, --immutable", () => {
     const dockerfile = generateNodeDockerfile(project({ packageManager: "yarn", packageManagerMajor: 4, packageManagerVersion: "4", lockfile: "yarn.lock" }), 3000);
-    expect(dockerfile).toContain('RUN ["corepack","install","--global","yarn@4"]');
+    expect(dockerfile).toContain("corepack install --global yarn@4 && exit 0");
     expect(dockerfile).toContain('RUN echo "Using yarn $(yarn --version)" && yarn install --immutable');
   });
 
@@ -94,7 +105,7 @@ describe("generateNodeDockerfile", () => {
     expect(generateNodeDockerfile(project({ packageManager: "bun", packageManagerVersion: "1.1.38", lockfile: "bun.lock" }), 3000)).toContain("FROM oven/bun:1.1.38-slim");
     expect(generateNodeDockerfile(project({ packageManager: "bun", lockfile: "bun.lock" }), 3000)).toContain("FROM oven/bun:1-slim");
     const npm = generateNodeDockerfile(project({ packageManagerVersion: "10.9.2" }), 3000);
-    expect(npm).toContain('RUN ["npm","install","--global","npm@10.9.2"]');
+    expect(npm).toContain("npm install --global npm@10.9.2 && exit 0");
     expect(npm.indexOf("npm@10.9.2")).toBeLessThan(npm.indexOf("USER node"));
     expect(npm).not.toContain("corepack");
   });
