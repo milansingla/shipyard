@@ -7,14 +7,14 @@ Render/Railway you can read end to end.
 GitHub repo → clone → detect → docker build → container → health check → http://<project>.localhost
 ```
 
-> **Status: V3 — a single-server production deployment platform.** Sign in
-> with GitHub, pick a repository and branch, deploy. Each project lives at a
-> stable address (`http://shop.localhost`, or your own domain over HTTPS) and
-> redeploys and rollbacks switch traffic with zero downtime, only once the new
-> version passes its health check. Projects carry encrypted environment
-> variables and secrets, health-check settings, CPU/memory limits and a full
-> deployment history; logs stream live; pushes deploy automatically; the API
-> is rate limited. See [the roadmap](#roadmap).
+> **Status: V4 — a multi-service developer platform on one server.** Sign in
+> with GitHub, pick a repository, deploy. A project is a set of services (web,
+> workers, PostgreSQL) on a private network, declared in the dashboard or in
+> `shipyard.yaml`, with persistent volumes, replicas and rolling deploys, cron
+> jobs, a development environment and a preview per pull request. Every project
+> lives at a stable address (or your own domain over HTTPS) and switches
+> traffic with zero downtime. Teams with roles, API keys, an audit log and a
+> CLI. See [the roadmap](#roadmap).
 
 ## Requirements
 
@@ -215,5 +215,16 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [x] Custom domains, HTTPS via Let's Encrypt (production compose override)
 - [x] Rate limiting
 
-Next: **V4**, a multi-service developer platform (services, preview
-deployments, databases, teams).
+### V4 — developer platform (v4.0.0)
+
+- [x] API keys (hashed, shown once) and the `shipyard` CLI
+- [x] Audit log; organizations with OWNER/ADMIN/DEVELOPER/VIEWER roles
+- [x] Build cache (dependency installs reused) and an image registry abstraction
+- [x] Multi-service projects with private networking; `shipyard.yaml`
+- [x] Persistent volumes; self-hosted PostgreSQL services
+- [x] Replicas and rolling deployments, load-balanced by Traefik
+- [x] Cron jobs with recorded runs
+- [x] Development environments, per-environment variables, pull request previews
+
+Next: **V5**, the final release: workers and scheduling across machines,
+operations (metrics, alerts, backups), and AI assistance.
