@@ -86,6 +86,24 @@ scanning.
 | Spoofed forwarding headers         | Traefik drops alias headers like `X_Forwarded_For`                          | `docker-compose.yml` |
 | Traffic to an unhealthy version    | Route moves only after the health check, and only counts once Traefik confirms it | `DeploymentEngine`, `TraefikRouter` |
 
+### Added in V5
+
+| Risk | Mitigation | Where |
+| --- | --- | --- |
+| Rogue machines joining as workers | Registration needs `SHIPYARD_WORKER_JOIN_TOKEN` (constant-time compare, rate-limited per IP); each worker then gets its own `shpw_` secret, stored as sha256 | `WorkerRegistry` |
+| A worker answering another worker's calls | Every call is bound to the worker it was sent to; anything else is 404 | `WorkerCalls.waiterOf` |
+| Secrets in the database's call log | Engine calls carry decrypted variables, so they travel only in memory; `worker_calls` stores a redacted summary | `WorkerCalls` |
+| Stale access after removal | Removing someone from an organization also removes them from its teams, so an old grant can't revive if they're re-added | `OrganizationService.removeMember` |
+| Team grants escalating | A team grants VIEWER, DEVELOPER or ADMIN on projects of its own organization, never OWNER; only org ADMINs change teams | `TeamService` |
+| Over-powered automation | Service accounts are never OWNER and sign in only with API keys; keys are scoped read / deploy / write and never exceed their owner's role | `ServiceAccountService`, `middleware/apiKeyScopes.ts` |
+| SSRF through alert channels | HTTPS only, no credentials in URLs, no redirects; addresses checked at connect time (not just beforehand), so DNS rebinding can't reach private networks or cloud metadata | `services/notify/NotificationProvider.ts` |
+| Channel URLs leaking (they are credentials) | Encrypted at rest; shown masked | `AlertService` |
+| Breaking the rules by deploying | Organization policies (resource caps, health check required, domain suffixes, approval) are checked on every deploy and domain change, by the API, not the dashboard | `PolicyService` |
+| Untrusted pull requests | PRs from forks are never built; previews only get secrets set for Preview, never production ones (database URLs included) | `pullRequestEvent.ts`, `EnvironmentService.forDeployment` |
+| Audit search as an injection point | Bound parameters; `LIKE` wildcards in the user's text escaped | `AuditService` |
+| Backups running shell commands | `pg_dump` / `pg_restore` / `tar` run through Docker exec with argument arrays; manifest file names validated; sha256 per file checked before restoring | `ops/BackupService.ts` |
+| The AI assistant overstepping | It reads only through the asker's access checks, has no write tools (changes come back as proposals the user runs through the normal API), never receives variable values, and secret values printed in logs are masked before sending; quoted evidence is verified | `modules/ai/`, [ai.md](ai.md) |
+
 Details of the sign-in design: [github.md](github.md).
 
 ## Known gaps (tracked)
@@ -104,14 +122,22 @@ Details of the sign-in design: [github.md](github.md).
   too low breaks apps in confusing ways). Set them for anything you don't
   fully trust; disk and network bandwidth are not limited yet.
 - No egress restrictions for deployed containers.
-- PostgreSQL services have no backups or failover ([databases.md](databases.md)).
+- PostgreSQL services have no failover; backups are taken by `npm run backup` on
+  the machine they run on ([operations.md](operations.md)).
 - Volumes have no size limit: an app can fill the server's disk through one.
   Detached volumes keep their data until removed with `docker volume rm`.
-- All deployed apps share the `shipyard-edge` network and can reach each other
-  by container name (on the default bridge they could by IP). Per-project
-  networks are a later item.
-- Traefik serves plain HTTP on loopback only. Exposing apps beyond this machine
-  needs HTTPS (V3).
+- Each project's services talk on their own network (databases are only there),
+  but public web services also join `shipyard-edge` for Traefik, so they can
+  reach each other by container name.
+- **Workers are trusted.** Anyone with the join token can register a worker;
+  a worker receives the decrypted variables of the deploys it runs, and Traefik
+  sends app traffic to the address it registers. Treat the join token like a
+  root password, and use an `https://` control-plane URL so worker secrets and
+  variables aren't sent in clear text.
+- Content that reaches the AI assistant (logs, repository files) is written by
+  app authors and can try to steer the model. It holds no permissions, so the
+  worst case is a wrong answer or a proposal the user declines; but its
+  answers are advice, not verified facts.
 - One webhook secret for all repositories: anyone who has it can make Shipyard
   redeploy the **latest commit** of any project's branch (never other code —
   the clone URL comes from the project, not the payload). Per-project secrets

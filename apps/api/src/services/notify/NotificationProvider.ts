@@ -1,4 +1,7 @@
+import dns from "node:dns";
 import { lookup } from "node:dns/promises";
+import http from "node:http";
+import https from "node:https";
 import net from "node:net";
 
 import { AppError, ErrorCode, ValidationError } from "../../lib/errors.js";
@@ -29,7 +32,7 @@ export class WebhookProvider implements NotificationProvider {
 
   async send(url: string, notification: Notification): Promise<void> {
     await this.guard.check(url);
-    await post(url, notification);
+    await post(url, notification, this.guard);
   }
 }
 
@@ -42,24 +45,38 @@ export class SlackProvider implements NotificationProvider {
     const icon = notification.status === "RESOLVED" ? ":white_check_mark:" : notification.severity === "CRITICAL" ? ":rotating_light:" : ":warning:";
     const prefix = notification.status === "RESOLVED" ? "Resolved: " : "";
     const link = notification.url ? ` <${notification.url}|Open in Shipyard>` : "";
-    await post(url, { text: `${icon} *${prefix}${escapeSlack(notification.title)}*: ${escapeSlack(notification.message)}${link}` });
+    await post(url, { text: `${icon} *${prefix}${escapeSlack(notification.title)}*: ${escapeSlack(notification.message)}${link}` }, this.guard);
   }
 }
 
-async function post(url: string, body: unknown): Promise<void> {
-  let response: Response;
+/** POSTs JSON. Redirects aren't followed (one could point anywhere, including inside the network). */
+async function post(url: string, body: unknown, guard: UrlGuard): Promise<void> {
+  const target = new URL(url);
+  const payload = JSON.stringify(body);
+  let status: number;
   try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "user-agent": "Shipyard-Alerts" },
-      body: JSON.stringify(body),
-      redirect: "error", // a redirect could point anywhere, including inside the network
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+    status = await new Promise<number>((resolve, reject) => {
+      const request = (target.protocol === "https:" ? https : http).request(
+        target,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", "content-length": Buffer.byteLength(payload), "user-agent": "Shipyard-Alerts" },
+          lookup: guard.connectLookup(),
+          timeout: TIMEOUT_MS,
+        },
+        (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        },
+      );
+      request.on("timeout", () => request.destroy(new Error(`no answer within ${TIMEOUT_MS / 1000}s`)));
+      request.on("error", reject);
+      request.end(payload);
     });
   } catch (error) {
     throw new AppError(ErrorCode.NOTIFICATION_FAILED, `Could not reach the channel: ${(error as Error).message}`, { statusCode: 422 });
   }
-  if (!response.ok) throw new AppError(ErrorCode.NOTIFICATION_FAILED, `The channel answered ${response.status}.`, { statusCode: 422 });
+  if (status < 200 || status >= 300) throw new AppError(ErrorCode.NOTIFICATION_FAILED, `The channel answered ${status}.`, { statusCode: 422 });
 }
 
 /**
@@ -92,6 +109,27 @@ export class UrlGuard {
     if (addresses.length === 0) throw new ValidationError(`${host} doesn't resolve.`);
     const blocked = addresses.find(({ address }) => isPrivateAddress(address));
     if (blocked) throw new ValidationError(`${host} points into a private network (${blocked.address}); Shipyard only sends to public addresses.`);
+  }
+
+  /**
+   * The DNS lookup the request itself connects with, refusing private
+   * addresses. check() alone isn't enough: a host can answer with a public
+   * address for the check and a private one for the request (DNS rebinding).
+   * Checking at connect time means the address checked is the address used.
+   */
+  connectLookup(): typeof dns.lookup | undefined {
+    if (this.allowPrivate) return undefined;
+    const guarded = (hostname: string, options: dns.LookupOptions, callback: (...args: unknown[]) => void) => {
+      dns.lookup(hostname, { ...options, all: true }, (error, addresses) => {
+        if (error) return callback(error);
+        const blocked = addresses.find(({ address }) => isPrivateAddress(address));
+        if (blocked) return callback(new Error(`${hostname} points into a private network (${blocked.address})`));
+        if (addresses.length === 0) return callback(new Error(`${hostname} doesn't resolve`));
+        if (options.all) return callback(null, addresses);
+        callback(null, addresses[0]!.address, addresses[0]!.family);
+      });
+    };
+    return guarded as unknown as typeof dns.lookup;
   }
 }
 

@@ -3066,6 +3066,23 @@ describe("teams, service accounts and scoped API keys", () => {
     return { status: res.status, body: text ? (JSON.parse(text) as Record<string, any>) : null };
   };
 
+  it("removing someone from an organization removes them from its teams, so a grant can't come back", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const orgId = (await call(alice, "POST", "/api/organizations", { name: "Revival" })).body!.data.id as string;
+    await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "bob", role: "VIEWER" });
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/revival", organizationId: orgId })).body!.data.id as string;
+    const teamId = (await call(alice, "POST", `/api/organizations/${orgId}/teams`, { name: "ops" })).body!.data.id as string;
+    await call(alice, "POST", `/api/teams/${teamId}/members`, { login: "bob" });
+    await call(alice, "PUT", `/api/teams/${teamId}/projects/${projectId}`, { role: "ADMIN" });
+    expect((await call(bob, "GET", `/api/projects/${projectId}`)).body!.data.role).toBe("ADMIN");
+
+    const bobId = (await prisma.user.findFirstOrThrow({ where: { login: "bob" } })).id;
+    expect((await call(alice, "DELETE", `/api/organizations/${orgId}/members/${bobId}`)).status).toBe(204);
+    await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "bob", role: "VIEWER" });
+    expect((await call(bob, "GET", `/api/projects/${projectId}`)).body!.data.role).toBe("VIEWER");
+  });
+
   it("a team grants its members a role on chosen projects only", async () => {
     const alice = await sessionFor(ALICE);
     const bob = await sessionFor(BOB);

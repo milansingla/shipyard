@@ -141,7 +141,11 @@ export class OrganizationService {
     if (organization.personal) throw new ValidationError("You can't leave your personal organization.");
     if (!leaving) this.assertMayGrant(organization.role, current.role);
     if (current.role === OrgRole.OWNER) await this.assertNotLastOwner(organizationId);
-    await this.deps.prisma.membership.delete({ where: { organizationId_userId: { organizationId, userId: memberUserId } } });
+    // Their teams go too: a grant left behind would come back if they were ever re-added.
+    await this.deps.prisma.$transaction([
+      this.deps.prisma.teamMember.deleteMany({ where: { userId: memberUserId, team: { organizationId } } }),
+      this.deps.prisma.membership.delete({ where: { organizationId_userId: { organizationId, userId: memberUserId } } }),
+    ]);
     await this.deps.audit.record({
       action: "MEMBER_REMOVED",
       actorId: userId,
