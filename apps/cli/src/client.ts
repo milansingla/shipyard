@@ -26,7 +26,7 @@ export function createClient(baseUrl: string, token: string, fetchImpl: typeof f
   async function send(method: string, path: string, body?: unknown): Promise<Response> {
     let res: Response;
     try {
-      res = await fetchImpl(`${base}/api${path}`, {
+      res = await fetchImpl(`${base}/api/v1${path}`, {
         method,
         headers: { ...headers, ...(body !== undefined && { "content-type": "application/json" }) },
         body: body === undefined ? undefined : JSON.stringify(body),

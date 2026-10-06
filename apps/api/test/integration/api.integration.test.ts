@@ -3088,3 +3088,58 @@ describe("teams, service accounts and scoped API keys", () => {
     expect((await bearer(token, "DELETE", `/api/projects/${projectId}`)).status).toBe(403);
   });
 });
+
+describe("API versioning and audit search", () => {
+  it("serves the API under /api/v1 too, saying so", async () => {
+    const alice = await sessionFor(ALICE);
+    await call(alice, "POST", "/api/v1/projects", { repositoryUrl: "https://github.com/acme/versioned" });
+    const res = await fetch(`${api}/api/v1/projects`, { headers: { cookie: alice } });
+    expect(res.headers.get("api-version")).toBe("1");
+    const v1 = ((await res.json()) as { data: Array<{ slug: string }> }).data.map((p) => p.slug);
+    const plain = ((await call(alice, "GET", "/api/projects")).body!.data as Array<{ slug: string }>).map((p) => p.slug);
+    expect(v1).toEqual(["versioned"]);
+    expect(plain).toEqual(v1);
+  });
+
+  it("searches the audit log by action, person, text and time, within what you may see", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/audited" })).body!.data.id as string;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/STRIPE_KEY`, { value: "x", secret: true });
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    const search = async (cookie: string, query: string) =>
+      ((await call(cookie, "GET", `/api/audit-logs?${query}`)).body!.data as Array<Record<string, any>>).map((e) => e.action);
+
+    expect(await search(alice, "action=ENV_VAR_SET")).toEqual(["ENV_VAR_SET"]);
+    expect(await search(alice, "action=DEPLOYMENT_STARTED,DEPLOYMENT_SUCCEEDED")).toEqual(["DEPLOYMENT_SUCCEEDED", "DEPLOYMENT_STARTED"]);
+    expect(await search(alice, "actor=shipyard")).toEqual(["DEPLOYMENT_SUCCEEDED"]);
+    expect(await search(alice, "q=stripe_key")).toEqual(["ENV_VAR_SET"]); // in the details, any case
+    expect(await search(alice, "q=audit")).toContain("PROJECT_CREATED"); // the project's name
+    expect(await search(alice, "q=__")).toEqual([]); // _ is a literal, not a wildcard
+    expect(await search(alice, `to=${new Date(Date.now() - 60_000).toISOString()}`)).toEqual([]);
+    expect(await search(bob, "q=stripe_key")).toEqual([]); // not his organization
+    expect((await call(alice, "GET", "/api/audit-logs?action=drop%20table")).status).toBe(400);
+  });
+
+  it("the CLI manages domains (over /api/v1)", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/cli-domains" })).body!.data.id as string;
+    const { token } = (await call(alice, "POST", "/api/api-keys", { name: "cli" })).body!.data;
+    const out: string[] = [];
+    const run = (args: string[]) =>
+      runCli(args, {
+        env: { SHIPYARD_URL: api, SHIPYARD_TOKEN: token },
+        stdout: (t) => void out.push(t),
+        stderr: (t) => void out.push(t),
+        readLine: async () => "",
+        configPath: path.join(os.tmpdir(), `shipyard-cli-${randomUUID()}.json`),
+      });
+    expect(await run(["domains", "cli-domains", "add", "shop.example.com"])).toBe(0);
+    expect(await run(["domains", "cli-domains"])).toBe(0);
+    expect(out.join("")).toContain("shop.example.com");
+    expect((await call(alice, "GET", `/api/projects/${projectId}/domains`)).body!.data).toMatchObject([{ hostname: "shop.example.com" }]);
+    expect(await run(["domains", "cli-domains", "remove", "shop.example.com"])).toBe(0);
+    expect((await call(alice, "GET", `/api/projects/${projectId}/domains`)).body!.data).toEqual([]);
+  });
+});

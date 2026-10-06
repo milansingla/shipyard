@@ -60,6 +60,9 @@ export const USAGE = `shipyard — deploy and manage apps on your Shipyard serve
   shipyard env      <project>                                   list variables
   shipyard env      <project> set KEY=value [--secret] [--build | --both]
   shipyard env      <project> unset KEY
+  shipyard domains  <project>                                   list custom domains
+  shipyard domains  <project> add <hostname>                    route a domain to it (point its DNS here)
+  shipyard domains  <project> remove <hostname>
 
 <project> is a project's name, slug or id. Create an API key in the dashboard
 (API keys). SHIPYARD_URL and SHIPYARD_TOKEN override the saved login (CI).
@@ -116,6 +119,8 @@ export async function main(argv: readonly string[], io: Io): Promise<number> {
         return await logs(api, await project(), { build: Boolean(values.build), follow: Boolean(values.follow), tail: values.tail }, io);
       case "rollback":
         return await rollback(api, await project(), io);
+      case "domains":
+        return await domains(api, await project(), args.slice(1), io);
       case "env":
         return await env(api, await project(), args.slice(1), { secret: Boolean(values.secret), build: Boolean(values.build), both: Boolean(values.both) }, io);
       default:
@@ -287,6 +292,26 @@ async function env(
     return 0;
   }
   throw new UsageError("Usage: shipyard env <project> [list | set KEY=value | unset KEY]");
+}
+
+async function domains(api: ApiClient, project: Project, args: string[], io: Io): Promise<number> {
+  const [action = "list", hostname] = args;
+  if (action === "list") {
+    const list = await api.request<Array<{ hostname: string }>>("GET", `/projects/${project.id}/domains`);
+    io.stdout(list.length === 0 ? "No custom domains.\n" : `${list.map((domain) => domain.hostname).join("\n")}\n`);
+    return 0;
+  }
+  if (action === "add" && hostname) {
+    await api.request("POST", `/projects/${project.id}/domains`, { hostname });
+    io.stdout(`${hostname} routes to ${project.name} now. Point its DNS (A/AAAA or CNAME) at this server.\n`);
+    return 0;
+  }
+  if (action === "remove" && hostname) {
+    await api.request("DELETE", `/projects/${project.id}/domains/${encodeURIComponent(hostname)}`);
+    io.stdout(`Removed ${hostname}.\n`);
+    return 0;
+  }
+  throw new UsageError("Usage: shipyard domains <project> [list | add <hostname> | remove <hostname>]");
 }
 
 function short(id: string | null): string {

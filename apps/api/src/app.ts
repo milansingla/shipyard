@@ -106,6 +106,15 @@ export function createApp(deps: AppDeps): Express {
   app.set("trust proxy", deps.trustProxy ?? false);
   const limits = deps.rateLimits ?? DEFAULT_RATE_LIMITS;
   app.locals.authConfigured = Boolean(auth);
+  // Versioned API: /api/v1/… is the stable path for clients (the CLI uses it);
+  // /api/… keeps working for existing ones. Both reach the same handlers.
+  app.use((req, res, next) => {
+    if (req.url === "/api/v1" || req.url.startsWith("/api/v1/")) {
+      req.url = `/api${req.url.slice("/api/v1".length)}`;
+      res.setHeader("API-Version", "1");
+    }
+    next();
+  });
   app.use(requestLogger(logger)); // first, so even requests rejected by the body parser are logged
   app.use(originCheck(deps.allowedOrigins ?? []));
   app.use("/api/auth", rateLimit("sign-in", limits.signIn, (req) => req.ip ?? "unknown"));

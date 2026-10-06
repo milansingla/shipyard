@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 
-import { ErrorNote, Mono } from "@/components/ui";
+import { ErrorNote, Label, Mono } from "@/components/ui";
 import { relativeTime, shortId } from "@/lib/format";
 import type { AuditEntry } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
@@ -26,12 +27,41 @@ const DESCRIBE: Record<string, (m: AuditEntry["metadata"]) => string> = {
 
 /** Who did what: the audit log of your projects and your account. */
 export default function ActivityPage() {
-  const log = useApi<AuditEntry[]>("/audit-logs?limit=100");
+  const [text, setText] = useState("");
+  const [action, setAction] = useState("");
+  const query = new URLSearchParams({ limit: "100", ...(text.trim().length >= 2 && { q: text.trim() }), ...(action && { action }) });
+  const log = useApi<AuditEntry[]>(`/audit-logs?${query.toString()}`);
 
   return (
     <div className="pt-12">
       <h1 className="font-display text-5xl font-bold uppercase">Activity</h1>
       <p className="mt-3 text-ink-soft">Everything that changed on your projects and account, newest first.</p>
+
+      <div className="mt-6 flex flex-wrap items-end gap-3" role="search">
+        <label className="flex flex-col gap-2">
+          <Label>Search</Label>
+          <input
+            type="search"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            placeholder="project, variable, domain…"
+            className="h-10 w-64 border border-rivet bg-plate px-3 text-sm focus:border-ink"
+          />
+        </label>
+        <label className="flex flex-col gap-2">
+          <Label>What</Label>
+          <select value={action} onChange={(event) => setAction(event.target.value)} className="h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink">
+            <option value="">Everything</option>
+            <option value="DEPLOYMENT_STARTED,DEPLOYMENT_SUCCEEDED,DEPLOYMENT_FAILED,ROLLBACK">Deploys and rollbacks</option>
+            <option value="DEPLOYMENT_FAILED">Failed deploys</option>
+            <option value="ENV_VAR_SET,ENV_VAR_DELETED">Variables and secrets</option>
+            <option value="DOMAIN_ADDED,DOMAIN_REMOVED">Domains</option>
+            <option value="MEMBER_ADDED,MEMBER_ROLE_CHANGED,MEMBER_REMOVED,TEAM_CREATED,TEAM_CHANGED,TEAM_DELETED,SERVICE_ACCOUNT_CREATED,SERVICE_ACCOUNT_DELETED">People and access</option>
+            <option value="API_KEY_CREATED,API_KEY_REVOKED">API keys</option>
+            <option value="PROJECT_CREATED,PROJECT_SETTINGS_CHANGED,PROJECT_DELETED">Projects</option>
+          </select>
+        </label>
+      </div>
 
       {log.error && (
         <div className="mt-6">

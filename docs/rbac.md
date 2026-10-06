@@ -69,3 +69,18 @@ A key (a person's or a service account's) can be limited further:
 A key never exceeds its owner's role; scopes only take away. For CI, give a
 service account with DEVELOPER a `deploy` key: a leaked key can redeploy,
 not change settings, variables or domains, or delete anything.
+
+## Audit log
+
+`GET /api/audit-logs` (dashboard: **Activity**) lists what changed in your
+organizations and your own actions, newest first, and searches it:
+`action=DEPLOYMENT_FAILED,ROLLBACK`, `actor=<login>` (`shipyard` = Shipyard
+itself), `q=<text>` (project name and details, case-insensitive; `%` and
+`_` are literal), `from`/`to` (ISO dates), `projectId`, `before` (paging).
+Entries record the actor, action, resource (project, kept by name after
+deletion), time and details, never secret values.
+
+## API versions
+
+`/api/v1/…` is the stable path (the CLI uses it, responses carry
+`API-Version: 1`); `/api/…` reaches the same handlers for existing clients.
