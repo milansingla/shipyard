@@ -2551,3 +2551,121 @@ describe("workers", () => {
     expect((await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, { ...info, name: builtIn.name })).status).toBe(403);
   });
 });
+
+describe("the deploy queue", () => {
+  async function project(cookie: string, repo: string) {
+    return (await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` })).body!.data.id as string;
+  }
+
+  it("queues a deploy behind a running one of the same environment and runs it next; jobs record the outcome", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "queued");
+    let release!: () => void;
+    holdRuns = new Promise((resolve) => (release = resolve));
+    const first = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    const second = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    expect(second.status).toBe(202);
+    expect(second.body!.data.status).toBe("QUEUED");
+    // The second can't start: one running job per environment, enforced by the database.
+    await expect(prisma.$executeRaw`UPDATE "deploy_jobs" SET "status" = 'RUNNING' WHERE "status" = 'QUEUED'`).rejects.toThrow();
+
+    holdRuns = null;
+    release();
+    await deployments.waitForIdle();
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: first } })).status).toBe("STOPPED"); // replaced
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: second.body!.data.id } })).status).toBe("RUNNING");
+    const jobs = await prisma.deployJob.findMany({ where: { projectId }, orderBy: { createdAt: "asc" } });
+    expect(jobs.map((job) => [job.status, job.priority, job.attempts])).toEqual([
+      ["SUCCEEDED", 10, 1],
+      ["SUCCEEDED", 10, 1],
+    ]);
+  });
+
+  it("cancels a deployment still waiting; not one that started", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = await project(alice, "cancel-me");
+    let release!: () => void;
+    holdRuns = new Promise((resolve) => (release = resolve));
+    const running = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    const waiting = (await call(alice, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+
+    expect((await call(bob, "POST", `/api/deployments/${waiting}/cancel`)).status).toBe(404);
+    expect((await call(alice, "POST", `/api/deployments/${running}/cancel`)).status).toBe(409);
+    const cancelled = await call(alice, "POST", `/api/deployments/${waiting}/cancel`);
+    expect(cancelled.body!.data).toMatchObject({ status: "FAILED", errorMessage: "Cancelled before it started." });
+    // A restart of the project can't run while its deploy job does.
+    expect((await call(alice, "POST", `/api/deployments/${running}/restart`)).status).toBe(409);
+
+    holdRuns = null;
+    release();
+    await deployments.waitForIdle();
+    expect((await prisma.deployJob.findMany({ where: { projectId }, orderBy: { createdAt: "asc" } })).map((j) => j.status)).toEqual([
+      "SUCCEEDED",
+      "CANCELLED",
+    ]);
+  });
+
+  it("a job whose worker stopped responding: its deployments are WORKER_LOST, and it is retried if nothing had started", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "lost");
+    const remote = await prisma.worker.create({
+      data: { name: "far-away", hostname: "far", cpus: 4, memoryMb: 4096, version: "4.0.0", acceptsJobs: true, status: "OFFLINE" },
+    });
+    // A deploy that a remote worker had claimed and was building when it vanished.
+    const [web] = await prisma.service.findMany({ where: { projectId } });
+    const building = await prisma.deployment.create({
+      data: { projectId, serviceId: web!.id, branch: "main", status: "BUILDING", workerId: remote.id, imageName: "x", containerName: "x" },
+    });
+    const job = await prisma.deployJob.create({
+      data: {
+        projectId,
+        lockKey: projectId,
+        deploymentIds: [building.id],
+        trigger: "PUSH",
+        status: "RUNNING",
+        workerId: remote.id,
+        attempts: 1,
+        leaseExpiresAt: new Date(Date.now() - 1000),
+      },
+    });
+
+    jobs.length = 0;
+    expect(await deployments.recoverLostJobs()).toBe(1);
+    await deployments.waitForIdle();
+    expect(await prisma.deployment.findUniqueOrThrow({ where: { id: building.id } })).toMatchObject({
+      status: "FAILED",
+      failedStage: "BUILDING",
+      errorMessage: "WORKER_LOST: the worker running this deployment stopped responding.",
+    });
+    expect(await prisma.deployJob.findUniqueOrThrow({ where: { id: job.id } })).toMatchObject({ status: "FAILED", error: "WORKER_LOST" });
+    const retry = await prisma.deployJob.findFirstOrThrow({ where: { retryOfId: job.id } });
+    expect(retry.status).toBe("SUCCEEDED");
+    expect(jobs).toHaveLength(1); // ran here, on a worker that answers
+
+    // A job that had started a container is not retried blindly: it might still be running.
+    const started = await prisma.deployment.create({
+      data: { projectId, serviceId: web!.id, branch: "main", status: "HEALTH_CHECKING", workerId: remote.id, containerId: "c1", containerName: "x" },
+    });
+    await prisma.deployJob.create({
+      data: { projectId, lockKey: projectId, deploymentIds: [started.id], trigger: "PUSH", status: "RUNNING", workerId: remote.id, attempts: 1, leaseExpiresAt: new Date(Date.now() - 1000) },
+    });
+    await deployments.recoverLostJobs();
+    expect(await prisma.deployJob.count({ where: { projectId, status: "QUEUED" } })).toBe(0);
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: started.id } })).status).toBe("FAILED");
+  });
+
+  it("at startup, queued jobs survive and run; only this worker's running jobs are marked interrupted", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await project(alice, "restart-queue");
+    const [web] = await prisma.service.findMany({ where: { projectId } });
+    const queued = await prisma.deployment.create({ data: { projectId, serviceId: web!.id, branch: "main", imageName: "x", containerName: "x" } });
+    await prisma.deployJob.create({ data: { projectId, lockKey: projectId, deploymentIds: [queued.id], trigger: "MANUAL" } });
+
+    await deployments.reconcileOnStartup();
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: queued.id } })).status).toBe("QUEUED");
+    deployments.kick();
+    await deployments.waitForIdle();
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: queued.id } })).status).toBe("RUNNING");
+  });
+});

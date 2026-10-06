@@ -297,7 +297,7 @@ ephemeral one) → health check → route → RUNNING. It responds only after th
 health check, unlike deploy (202, background). Stop takes the deployment out
 of the router, then stops the container; it is idempotent.
 
-Only one deploy/restart per project runs at a time (409 `DEPLOYMENT_IN_PROGRESS`).
+Deploys queue (see [workers.md](workers.md#the-deploy-queue)): one runs per project environment at a time, the next waits. A restart or rollback is refused (409 `DEPLOYMENT_IN_PROGRESS`) while a deploy of that environment runs.
 A new deployment retires the previous one only **after** it is RUNNING, so a
 failed deploy leaves the old version serving. Retired containers are stopped,
 not removed: restarting an older STOPPED deployment brings it back and retires

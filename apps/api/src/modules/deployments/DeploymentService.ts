@@ -18,7 +18,13 @@ import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
-import type { Environment, Service } from "../../db/prisma.js";
+import type { DeployJob, Environment, Service } from "../../db/prisma.js";
+import { JOB_SLOTS_PER_WORKER, eligibleWorkers } from "./scheduler.js";
+
+/** A running job's claim; its worker renews it every 20 s. */
+const LEASE_SECONDS = 60;
+/** A job lost with its worker is retried at most this many times in all. */
+const MAX_JOB_ATTEMPTS = 3;
 import { environmentRouteName, variableEnvironment } from "../environments/environmentRules.js";
 import type { AccessService } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
@@ -110,24 +116,60 @@ export interface DeploymentLogs {
  * - after a crash/restart of Shipyard, stored statuses are reconciled with Docker
  *   and the route table is rebuilt from the RUNNING deployments
  *
- * Pushes that arrive while a project is busy are coalesced: the project is
- * marked, and ONE deploy of the branch's latest commit starts when the lock is
- * released — ten quick pushes cost one extra build, not ten, and none is lost.
- * The mark is in memory (lost if Shipyard restarts mid-deploy; push again).
+ * Deploys go through a durable queue (`deploy_jobs`): deploy() records the
+ * deployments and a job in one transaction and returns; a worker claims the
+ * job (FOR UPDATE SKIP LOCKED) and runs it under a lease it keeps renewing.
+ * The database allows one RUNNING job per project environment, so two
+ * workers (or processes) never deploy the same environment at once. Pushes
+ * that arrive while a push deploy is still queued are coalesced into it: it
+ * builds the branch's latest commit anyway.
  *
  * Authorization: every public method takes the acting user's id and only
  * finds deployments of that user's projects; anything else is a 404.
- *
- * Concurrency note: the per-project lock is in memory, so this assumes ONE
- * Shipyard API process. Multiple instances would need a DB-level lock.
  */
 export class DeploymentService {
+  /** Lock keys (project, or project/environment) held by a restart, rollback, close or delete in this process. */
   private readonly busyProjects = new Set<string>();
-  /** Projects that received a push while busy; see deployOnPush. */
-  private readonly pushWhileBusy = new Set<string>();
+  /** Projects held whole (deleting it or one of its services): no environment of theirs may start a job. */
+  private readonly busyWholeProjects = new Set<string>();
   private readonly pending = new Set<Promise<unknown>>();
+  /** Jobs this process is running, by job id. */
+  private readonly activeJobs = new Map<string, Promise<void>>();
+  /** This process's worker (the built-in one); null = not registered (tests, the CLI). */
+  private localWorkerId: string | null = null;
+  private pumping: Promise<void> | null = null;
+  private pumpAgain = false;
+  /** Jobs claimed so far (lets waitForIdle tell progress from a stall). */
+  private claimed = 0;
+  private timer: NodeJS.Timeout | null = null;
 
   constructor(private readonly deps: DeploymentServiceDeps) {}
+
+  /** Makes this process run queued jobs as `workerId` (the built-in worker). */
+  attachWorker(workerId: string): void {
+    this.localWorkerId = workerId;
+  }
+
+  /** Polls the queue and renews leases; deploy() also wakes it immediately. */
+  startQueue(intervalMs = 2_000): void {
+    if (this.timer) return;
+    let ticks = 0;
+    this.timer = setInterval(() => {
+      ticks += 1;
+      this.kick();
+      if (ticks % 10 === 0) {
+        void this.renewLeases()
+          .then(() => this.recoverLostJobs())
+          .catch((error: unknown) => this.deps.logger.error({ err: error }, "Queue maintenance failed"));
+      }
+    }, intervalMs);
+    this.timer.unref();
+  }
+
+  stopQueue(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
 
   // ───────────────────────── queries ─────────────────────────
 
@@ -227,7 +269,7 @@ export class DeploymentService {
     projectId: string,
     actorId: string | null,
     trigger: DeploymentTrigger = DeploymentTrigger.MANUAL,
-    options: { serviceIds?: readonly string[]; environmentId?: string } = {},
+    options: { serviceIds?: readonly string[]; environmentId?: string; retryOf?: string } = {},
   ): Promise<Deployment> {
     const project =
       actorId === null
@@ -260,11 +302,8 @@ export class DeploymentService {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "Nothing to deploy: the database is already running. Deploy it from its service to restart it.");
     }
     const lock = lockKey(projectId, environment?.id ?? null);
-    this.lockProject(lock);
 
-    let deployments: Deployment[];
-    try {
-      deployments = await this.deps.prisma.$transaction(async (tx) => {
+    const deployments: Deployment[] = await this.deps.prisma.$transaction(async (tx) => {
         const created: Deployment[] = [];
         for (const service of selected) {
           const id = randomUUID();
@@ -292,12 +331,21 @@ export class DeploymentService {
             },
           });
         }
+        await tx.deployJob.create({
+          data: {
+            projectId,
+            environmentId: environment?.id ?? null,
+            lockKey: lock,
+            deploymentIds: created.map((deployment) => deployment.id),
+            notes,
+            trigger,
+            // A person waiting beats a push.
+            priority: trigger === DeploymentTrigger.MANUAL ? 10 : 0,
+            retryOfId: options.retryOf ?? null,
+          },
+        });
         return created;
       });
-    } catch (error) {
-      this.unlockProject(lock);
-      throw error;
-    }
 
     for (const deployment of deployments) {
       await this.deps.audit.record({
@@ -313,7 +361,7 @@ export class DeploymentService {
         },
       });
     }
-    this.track(this.executeAll(project, deployments, services, notes, environment).finally(() => this.unlockProject(lock)));
+    this.kick();
     const primaryId = primaryServiceId(services);
     return deployments.find((deployment) => deployment.serviceId === primaryId) ?? deployments[0]!;
   }
@@ -326,14 +374,34 @@ export class DeploymentService {
    */
   async deployOnPush(projectId: string, environmentId: string | null = null): Promise<PushDeployResult> {
     const key = lockKey(projectId, environmentId);
-    if (this.busyProjects.has(key)) {
-      this.pushWhileBusy.add(key);
+    const { prisma } = this.deps;
+    // A push deploy still waiting will build the branch's latest commit: this push rides along.
+    if (await prisma.deployJob.findFirst({ where: { lockKey: key, status: "QUEUED", trigger: DeploymentTrigger.PUSH }, select: { id: true } })) {
       return { outcome: "queued" };
     }
-    return {
-      outcome: "started",
-      deployment: await this.deploy(projectId, null, DeploymentTrigger.PUSH, environmentId ? { environmentId } : {}),
-    };
+    const busy =
+      this.busyProjects.has(key) ||
+      (await prisma.deployJob.count({ where: { lockKey: key, status: { in: ["QUEUED", "RUNNING"] } } })) > 0;
+    const deployment = await this.deploy(projectId, null, DeploymentTrigger.PUSH, environmentId ? { environmentId } : {});
+    return busy ? { outcome: "queued" } : { outcome: "started", deployment };
+  }
+
+  /** Cancels a deployment whose job hasn't started yet: every deployment of that job is marked FAILED. */
+  async cancel(id: string, userId: string): Promise<Deployment> {
+    const { deployment } = await this.deps.access.deployment(id, userId, OrgRole.DEVELOPER);
+    const job = await this.deps.prisma.deployJob.findFirst({ where: { deploymentIds: { has: id } } });
+    if (!job || job.status !== "QUEUED") {
+      throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "Only a deployment still waiting in the queue can be cancelled.");
+    }
+    const { count } = await this.deps.prisma.deployJob.updateMany({
+      where: { id: job.id, status: "QUEUED" },
+      data: { status: "CANCELLED", finishedAt: new Date(), error: "Cancelled" },
+    });
+    if (count !== 1) throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "It has just started; it can't be cancelled any more.");
+    for (const deploymentId of job.deploymentIds) {
+      await this.markFailed(deploymentId, "Cancelled before it started.", DeploymentStatus.QUEUED);
+    }
+    return this.load(deployment.id);
   }
 
   /** Deploys the latest commit of the same project/branch as an existing deployment. */
@@ -362,7 +430,7 @@ export class DeploymentService {
     }
 
     const lock = lockKey(deployment.projectId, deployment.environmentId);
-    this.lockProject(lock);
+    await this.lockProject(lock);
     try {
       const stopped = await this.stopForReplacement(deployment, `Stopped to restart deployment ${displayId(id)}`);
       let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: userId, message: "Restart" });
@@ -414,7 +482,7 @@ export class DeploymentService {
     }
 
     const lock = lockKey(project.id, source.environmentId);
-    this.lockProject(lock);
+    await this.lockProject(lock);
     try {
       const target = await this.findRollbackTarget(source);
       const stopped = await this.stopForReplacement(target, `Stopped to roll back to deployment ${displayId(target.id)}`);
@@ -533,7 +601,7 @@ export class DeploymentService {
 
   /** Like destroyProjectDeployments, for one service (see ServiceService.delete). */
   async destroyServiceDeployments(projectId: string, serviceId: string, finalize: () => Promise<void>): Promise<void> {
-    this.lockWholeProject(projectId);
+    await this.lockWholeProject(projectId);
     try {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { serviceId } });
       for (const deployment of deployments) {
@@ -558,7 +626,7 @@ export class DeploymentService {
    */
   async closeEnvironment(projectId: string, environmentId: string, finalize: () => Promise<void>): Promise<void> {
     const lock = lockKey(projectId, environmentId);
-    this.lockProject(lock);
+    await this.lockProject(lock);
     try {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { environmentId } });
       for (const deployment of deployments) {
@@ -574,7 +642,7 @@ export class DeploymentService {
   }
 
   async destroyProjectDeployments(projectId: string, finalize: () => Promise<void>): Promise<void> {
-    this.lockWholeProject(projectId);
+    await this.lockWholeProject(projectId);
     try {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { projectId } });
       for (const deployment of deployments) {
@@ -599,7 +667,23 @@ export class DeploymentService {
     const summary = { failed: 0, stopped: 0, refreshed: 0 };
     const { prisma, engine, logger } = this.deps;
 
-    const interrupted = await prisma.deployment.findMany({ where: { status: { in: [...IN_PROGRESS_STATUSES] } } });
+    // Jobs this worker was running died with the previous process. Jobs still
+    // queued survive and run; jobs on other workers are theirs (see recoverLostJobs).
+    const died = await prisma.deployJob.findMany({
+      where: { status: "RUNNING", OR: [{ workerId: null }, ...(this.localWorkerId ? [{ workerId: this.localWorkerId }] : [])] },
+    });
+    await prisma.deployJob.updateMany({
+      where: { id: { in: died.map((job) => job.id) } },
+      data: { status: "FAILED", error: "Interrupted: Shipyard restarted", finishedAt: new Date(), leaseExpiresAt: null },
+    });
+    const elsewhere = await prisma.deployJob.findMany({
+      where: { OR: [{ status: "QUEUED" }, { status: "RUNNING", workerId: { not: this.localWorkerId } }] },
+      select: { deploymentIds: true },
+    });
+    const keep = new Set(elsewhere.flatMap((job) => job.deploymentIds));
+    const interrupted = (await prisma.deployment.findMany({ where: { status: { in: [...IN_PROGRESS_STATUSES] } } })).filter(
+      (deployment) => !keep.has(deployment.id),
+    );
     for (const deployment of interrupted) {
       if (deployment.containerId) await engine.stop(deployment.containerId).catch(() => {});
       await this.markFailed(
@@ -644,8 +728,20 @@ export class DeploymentService {
   }
 
   /** Resolves once every background deployment has finished. Used by tests and shutdown. */
+  /** Resolves once nothing is running here and nothing this process could run is queued. */
   async waitForIdle(): Promise<void> {
-    while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
+    for (;;) {
+      while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
+      const queued = await this.deps.prisma.deployJob.count({
+        where: { status: "QUEUED", OR: [{ workerId: null }, ...(this.localWorkerId ? [{ workerId: this.localWorkerId }] : [])] },
+      });
+      if (queued === 0 || this.busyProjects.size > 0 || this.busyWholeProjects.size > 0) return;
+      const claimedBefore = this.claimed;
+      this.kick();
+      while (this.pending.size > 0) await Promise.allSettled([...this.pending]);
+      // Nothing claimable (another worker holds that environment): don't spin.
+      if (this.claimed === claimedBefore) return;
+    }
   }
 
   // ───────────────────────── internals ─────────────────────────
@@ -1109,6 +1205,179 @@ export class DeploymentService {
     if (route) await this.deps.router.deactivate(route.name, deployment.id);
   }
 
+  // ───────────────────────── the queue ─────────────────────────
+
+  /** Wakes the executor: claims and runs queued jobs this process may run. */
+  kick(): void {
+    if (this.pumping) {
+      this.pumpAgain = true;
+      return;
+    }
+    this.pumping = this.pump()
+      .catch((error: unknown) => this.deps.logger.error({ err: error }, "Could not run queued deploys"))
+      .finally(() => {
+        this.pumping = null;
+        if (this.pumpAgain) {
+          this.pumpAgain = false;
+          this.kick();
+        }
+      });
+    this.track(this.pumping);
+  }
+
+  private async pump(): Promise<void> {
+    while (this.activeJobs.size < JOB_SLOTS_PER_WORKER) {
+      if (!(await this.mayRunJobs())) return;
+      const job = await this.claimNext();
+      if (!job) return;
+      this.claimed += 1;
+      const run = this.runJob(job).finally(() => {
+        this.activeJobs.delete(job.id);
+        void this.reportLoad();
+        this.kick();
+      });
+      this.activeJobs.set(job.id, run);
+      this.track(run);
+      void this.reportLoad();
+    }
+  }
+
+  /** The scheduler's verdict for this process: is the local worker one that should get work now? */
+  private async mayRunJobs(): Promise<boolean> {
+    if (!this.localWorkerId) return true; // not registered (tests, the CLI): run everything here
+    const workers = await this.deps.prisma.worker.findMany();
+    const local = workers.find((worker) => worker.id === this.localWorkerId);
+    if (!local) return true;
+    // Its own slots are counted here, not from its last heartbeat.
+    return eligibleWorkers([{ ...local, runningJobs: this.activeJobs.size }], { memoryMb: null }).length > 0;
+  }
+
+  /**
+   * Claims the next job this worker may run: the oldest of its project
+   * environment (FIFO per environment), highest priority across them, none
+   * whose environment is already running a job or is held by a restart here.
+   * SKIP LOCKED lets several workers claim at once without waiting on each
+   * other; the partial unique index is the last word on "one running per key".
+   */
+  private async claimNext(): Promise<DeployJob | null> {
+    const busy = [...this.busyProjects];
+    const whole = [...this.busyWholeProjects];
+    try {
+      const rows = await this.deps.prisma.$queryRaw<DeployJob[]>`
+        UPDATE "deploy_jobs" SET "status" = 'RUNNING', "workerId" = ${this.localWorkerId}::uuid, "attempts" = "attempts" + 1,
+          "startedAt" = now(), "leaseExpiresAt" = now() + make_interval(secs => ${LEASE_SECONDS})
+        WHERE "id" = (
+          SELECT j."id" FROM "deploy_jobs" j
+          WHERE j."status" = 'QUEUED'
+            AND (j."workerId" IS NULL OR j."workerId" = ${this.localWorkerId}::uuid)
+            AND j."lockKey" <> ALL(${busy}::text[])
+            AND split_part(j."lockKey", '/', 1) <> ALL(${whole}::text[])
+            AND NOT EXISTS (SELECT 1 FROM "deploy_jobs" r WHERE r."lockKey" = j."lockKey" AND r."status" = 'RUNNING')
+            AND NOT EXISTS (
+              SELECT 1 FROM "deploy_jobs" e
+              WHERE e."lockKey" = j."lockKey" AND e."status" = 'QUEUED' AND e."createdAt" < j."createdAt"
+            )
+          ORDER BY j."priority" DESC, j."createdAt" ASC
+          LIMIT 1
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *`;
+      return rows[0] ?? null;
+    } catch (error) {
+      // Another worker started a job of the same environment in between: try again later.
+      if ((error as { meta?: { code?: string } }).meta?.code === "23505" || String(error).includes("23505")) return null;
+      throw error;
+    }
+  }
+
+  /** Runs a claimed job's deployments in order, then records how it went. */
+  private async runJob(job: DeployJob): Promise<void> {
+    const { prisma, logger } = this.deps;
+    const finish = (status: "SUCCEEDED" | "FAILED" | "CANCELLED", error: string | null = null) =>
+      prisma.deployJob.updateMany({
+        where: { id: job.id, status: "RUNNING" },
+        data: { status, error, finishedAt: new Date(), leaseExpiresAt: null },
+      });
+    try {
+      const project = await prisma.project.findUnique({ where: { id: job.projectId } });
+      if (!project) return; // deleted: its jobs went with it
+      const environment = job.environmentId ? await prisma.environment.findUnique({ where: { id: job.environmentId } }) : null;
+      const rows = await prisma.deployment.findMany({ where: { id: { in: job.deploymentIds }, status: DeploymentStatus.QUEUED } });
+      const deployments = job.deploymentIds.map((id) => rows.find((row) => row.id === id)).filter((row) => row !== undefined);
+      if (environment && environment.status !== "ACTIVE") {
+        for (const deployment of deployments) await this.markFailed(deployment.id, `The ${environment.name} environment was closed.`, DeploymentStatus.QUEUED);
+        await finish("CANCELLED", "Environment closed");
+        return;
+      }
+      if (deployments.length > 0) {
+        await prisma.deployment.updateMany({ where: { id: { in: deployments.map((d) => d.id) } }, data: { workerId: job.workerId } });
+        await this.executeAll(project, deployments, await this.services(project.id), job.notes, environment);
+      }
+      const outcome = await prisma.deployment.findMany({ where: { id: { in: job.deploymentIds } }, select: { status: true } });
+      const failed = outcome.some((deployment) => deployment.status !== DeploymentStatus.RUNNING);
+      await finish(failed ? "FAILED" : "SUCCEEDED", failed ? "A deployment failed" : null);
+    } catch (error) {
+      logger.error({ err: error, jobId: job.id }, "Deploy job crashed");
+      await finish("FAILED", errorMessage(error)).catch(() => {});
+    }
+  }
+
+  /** Extends the leases of the jobs this process is running. */
+  async renewLeases(): Promise<void> {
+    if (this.activeJobs.size === 0) return;
+    await this.deps.prisma.$executeRaw`
+      UPDATE "deploy_jobs" SET "leaseExpiresAt" = now() + make_interval(secs => ${LEASE_SECONDS})
+      WHERE "id" = ANY(${[...this.activeJobs.keys()]}::uuid[]) AND "status" = 'RUNNING'`;
+  }
+
+  /**
+   * Jobs whose lease ran out: their worker stopped responding (it crashed,
+   * lost its network, or was switched off). Their unfinished deployments are
+   * marked WORKER_LOST. If none had started a container yet, nothing can be
+   * running twice, so the job is retried (a new job, on any worker), up to
+   * 3 times; otherwise a person decides (redeploy or roll back).
+   */
+  async recoverLostJobs(now = new Date()): Promise<number> {
+    const { prisma, logger } = this.deps;
+    const lost = await prisma.deployJob.findMany({ where: { status: "RUNNING", leaseExpiresAt: { lt: now } } });
+    for (const job of lost) {
+      if (this.activeJobs.has(job.id)) continue; // ours and alive: renewLeases will catch up
+      const { count } = await prisma.deployJob.updateMany({
+        where: { id: job.id, status: "RUNNING", leaseExpiresAt: { lt: now } },
+        data: { status: "FAILED", error: "WORKER_LOST", finishedAt: now, leaseExpiresAt: null },
+      });
+      if (count !== 1) continue;
+      const deployments = await prisma.deployment.findMany({ where: { id: { in: job.deploymentIds } } });
+      const unfinished = deployments.filter((d) => IN_PROGRESS_STATUSES.includes(d.status));
+      for (const deployment of unfinished) {
+        await this.markFailed(deployment.id, "WORKER_LOST: the worker running this deployment stopped responding.", deployment.status);
+      }
+      const safe = deployments.every((d) => !d.containerId) && job.attempts < MAX_JOB_ATTEMPTS;
+      logger.warn({ jobId: job.id, workerId: job.workerId, retried: safe }, "Deploy job lost its worker");
+      if (safe && unfinished.length > 0) {
+        await this.deploy(job.projectId, null, job.trigger, {
+          serviceIds: deployments.map((d) => d.serviceId),
+          ...(job.environmentId && { environmentId: job.environmentId }),
+          retryOf: job.id,
+        }).catch((error: unknown) => logger.warn({ err: error, jobId: job.id }, "Could not retry the lost job"));
+      }
+    }
+    return lost.length;
+  }
+
+  /** Keeps the worker's load current for the scheduler between heartbeats. */
+  private async reportLoad(): Promise<void> {
+    if (!this.localWorkerId) return;
+    await this.deps.prisma.worker
+      .update({ where: { id: this.localWorkerId }, data: { runningJobs: this.activeJobs.size } })
+      .catch(() => {});
+  }
+
+  /** Jobs running in this process (for its heartbeat). */
+  get runningJobs(): number {
+    return this.activeJobs.size;
+  }
+
   /** Unscoped: for Shipyard's own work (verified pushes), never on a person's behalf. */
   private async loadProject(id: string): Promise<Project> {
     const project = await this.deps.prisma.project.findUnique({ where: { id } });
@@ -1125,9 +1394,13 @@ export class DeploymentService {
 
 
 
-  /** `key`: the project (production), or project/environment. See lockKey(). */
-  private lockProject(key: string): void {
-    if (this.busyProjects.has(key)) {
+  /**
+   * For a restart, rollback or close: `key` is the project (production) or
+   * project/environment (see lockKey()). Refused while a deploy job of it runs.
+   */
+  private async lockProject(key: string): Promise<void> {
+    const running = await this.deps.prisma.deployJob.count({ where: { lockKey: key, status: "RUNNING" } });
+    if (this.busyProjects.has(key) || running > 0) {
       throw new ConflictError(
         ErrorCode.DEPLOYMENT_IN_PROGRESS,
         "Another deployment or restart of this project is in progress. Wait for it to finish.",
@@ -1138,34 +1411,23 @@ export class DeploymentService {
 
   private unlockProject(key: string): void {
     this.busyProjects.delete(key);
-    if (this.pushWhileBusy.delete(key)) this.track(this.deployQueuedPush(key));
+    this.busyWholeProjects.delete(key);
+    this.kick(); // jobs held back by it may run now
   }
 
   /** Locks every environment of a project (deleting it, or one of its services). */
-  private lockWholeProject(projectId: string): void {
-    if ([...this.busyProjects].some((key) => key === projectId || key.startsWith(`${projectId}/`))) {
+  private async lockWholeProject(projectId: string): Promise<void> {
+    const running = await this.deps.prisma.deployJob.count({ where: { projectId, status: "RUNNING" } });
+    if (running > 0 || this.busyWholeProjects.has(projectId) || [...this.busyProjects].some((key) => key === projectId || key.startsWith(`${projectId}/`))) {
       throw new ConflictError(
         ErrorCode.DEPLOYMENT_IN_PROGRESS,
         "A deployment of this project is in progress (in some environment). Wait for it to finish.",
       );
     }
-    this.busyProjects.add(projectId);
+    this.busyWholeProjects.add(projectId);
   }
 
-  /** Runs the deploy a push asked for while the project was busy. */
-  private async deployQueuedPush(key: string): Promise<void> {
-    const [projectId, environmentId = null] = key.split("/");
-    try {
-      // Unscoped lookup: the push's signature was verified when it arrived; the deploy runs as the project's owner.
-      const project = await this.deps.prisma.project.findUnique({ where: { id: projectId } });
-      if (!project) return; // deleted in the meantime
-      if (environmentId && (await this.deps.prisma.environment.findUnique({ where: { id: environmentId } }))?.status !== "ACTIVE") return;
-      const result = await this.deployOnPush(project.id, environmentId);
-      this.deps.logger.info({ projectId, outcome: result.outcome }, "Deployed a push received during a previous deploy");
-    } catch (error) {
-      this.deps.logger.error({ err: error, projectId }, "Could not deploy a queued push");
-    }
-  }
+
 
   private track(promise: Promise<unknown>): void {
     this.pending.add(promise);

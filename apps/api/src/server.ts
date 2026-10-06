@@ -14,9 +14,6 @@ const services = createApiServices(config, requireDatabaseUrl(config), logger);
 // Fail fast if the database is unreachable, then repair statuses left behind
 // by a previous run (e.g. a deploy that was BUILDING when the process died).
 await services.prisma.$connect();
-await services.deployments.reconcileOnStartup();
-await services.cron.reconcileOnStartup();
-
 // The control plane is also a worker: it runs deployments with this machine's Docker.
 const builtInWorker = await services.workers.registerBuiltIn({
   name: config.workers.name,
@@ -25,9 +22,13 @@ const builtInWorker = await services.workers.registerBuiltIn({
   memoryMb: Math.round(os.totalmem() / 1024 / 1024),
   version: SHIPYARD_VERSION,
 });
+services.deployments.attachWorker(builtInWorker.id);
+await services.deployments.reconcileOnStartup();
+await services.cron.reconcileOnStartup();
+services.deployments.startQueue();
 const workerLoop = setInterval(() => {
   void services.workers
-    .heartbeat(builtInWorker.id, { runningJobs: 0 })
+    .heartbeat(builtInWorker.id, { runningJobs: services.deployments.runningJobs })
     .then(() => services.workers.sweep())
     .catch((error: unknown) => logger.error({ err: error }, "Worker heartbeat failed"));
 }, HEARTBEAT_INTERVAL_MS);
@@ -69,6 +70,7 @@ function shutdown(signal: NodeJS.Signals): void {
   logger.info({ signal }, "Shutting down");
   services.cron.stop();
   clearInterval(workerLoop);
+  services.deployments.stopQueue();
   // In-flight deploys are not awaited (a build can take minutes); they are
   // marked FAILED by reconcileOnStartup() on the next start.
   server.close((error) => {

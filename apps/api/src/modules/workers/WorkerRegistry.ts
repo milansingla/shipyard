@@ -60,7 +60,7 @@ export class WorkerRegistry {
 
   /** The control plane's own worker: registered at startup, no secret, heartbeats in-process. */
   async registerBuiltIn(info: WorkerInfo): Promise<WorkerView> {
-    const data = { ...info, builtIn: true, tokenHash: null, lastHeartbeatAt: new Date() };
+    const data = { ...info, builtIn: true, acceptsJobs: true, tokenHash: null, lastHeartbeatAt: new Date() };
     const existing = await this.deps.prisma.worker.findUnique({ where: { name: info.name } });
     const worker = await this.deps.prisma.worker.upsert({
       where: { name: info.name },

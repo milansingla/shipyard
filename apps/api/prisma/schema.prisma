@@ -111,6 +111,7 @@ model Project {
   previewDeployments Boolean   @default(false)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
+  deployJobs   DeployJob[]
   deployments     Deployment[]
   environmentVariables EnvironmentVariable[]
   domains         ProjectDomain[]
@@ -464,6 +465,9 @@ model Deployment {
   hostPort      Int?
   /// Identical containers this deployment runs (load-balanced). The first is containerName/containerId.
   replicas      Int       @default(1)
+  /// The worker whose Docker runs (or ran) its containers.
+  workerId      String?          @db.Uuid
+  worker        Worker?          @relation(fields: [workerId], references: [id], onDelete: SetNull)
   deploymentUrl String?
   errorMessage  String?
   /// The stage a FAILED deployment was in when it failed.
@@ -521,6 +525,7 @@ model Environment {
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
   closedAt    DateTime?
+  deployJobs  DeployJob[]
   deployments Deployment[]
 
   @@unique([projectId, name])
@@ -598,10 +603,61 @@ model Worker {
   builtIn         Boolean      @default(false)
   /// Deployment batches it is running, as of its last heartbeat.
   runningJobs     Int          @default(0)
+  /// Runs deploy jobs (the built-in worker, and agents that said so when registering).
+  acceptsJobs     Boolean      @default(false)
   lastHeartbeatAt DateTime     @default(now())
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
+  jobs            DeployJob[]
+  deployments     Deployment[]
 
   @@index([status, lastHeartbeatAt])
   @@map("workers")
+}
+
+enum DeployJobStatus {
+  /// Waiting for a worker (and for any running job of the same project environment).
+  QUEUED
+  /// Claimed by a worker, which holds a lease on it.
+  RUNNING
+  SUCCEEDED
+  /// At least one of its deployments failed, or its worker was lost.
+  FAILED
+  /// Cancelled while still queued.
+  CANCELLED
+}
+
+/// One deploy request in the durable queue: its deployments run in order on one worker.
+model DeployJob {
+  id             String          @id @default(uuid()) @db.Uuid
+  projectId      String          @db.Uuid
+  project        Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  environmentId  String?         @db.Uuid
+  environment    Environment?    @relation(fields: [environmentId], references: [id], onDelete: Cascade)
+  /// The project id, or project/environment: at most one RUNNING job per key
+  /// (a partial unique index in the migration).
+  lockKey        String
+  deploymentIds  String[]        @db.Uuid
+  /// shipyard.yaml notes for the build log.
+  notes          String[]        @default([])
+  trigger        DeploymentTrigger
+  /// Higher first: a person waiting beats a push.
+  priority       Int             @default(0)
+  status         DeployJobStatus @default(QUEUED)
+  /// Picked by the scheduler; null until then.
+  workerId       String?         @db.Uuid
+  worker         Worker?         @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  /// While RUNNING: the worker's claim, renewed by its heartbeats. Past it, the worker is lost.
+  leaseExpiresAt DateTime?
+  attempts       Int             @default(0)
+  /// The job this one retries after its worker was lost.
+  retryOfId      String?         @db.Uuid
+  error          String?
+  createdAt      DateTime        @default(now())
+  startedAt      DateTime?
+  finishedAt     DateTime?
+
+  @@index([status, priority(sort: Desc), createdAt])
+  @@index([lockKey, status])
+  @@map("deploy_jobs")
 }

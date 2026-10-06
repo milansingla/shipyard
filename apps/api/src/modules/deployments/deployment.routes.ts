@@ -50,6 +50,13 @@ export function createDeploymentRouter(deployments: DeploymentService, logger?: 
   });
 
   /** Brings back the previous working deployment. Responds once traffic has moved. */
+  /** Only while still waiting in the queue. */
+  router.post("/deployments/:id/cancel", async (req, res) => {
+    const user = requireUser(req);
+    const { id } = parseInput(idParamsSchema, req.params, "deployment id");
+    sendData(res, await deployments.cancel(id, user.id));
+  });
+
   router.post("/deployments/:id/rollback", async (req, res) => {
     const user = requireUser(req);
     const { id } = parseInput(idParamsSchema, req.params, "deployment id");
