@@ -9,7 +9,7 @@ import { History } from "@/components/History";
 import { LogPanel } from "@/components/LogPanel";
 import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { DiagnosePanel } from "@/components/Assistant";
-import { Button, ErrorNote, Glow, HullName, Label, Mono, StatusBadge } from "@/components/ui";
+import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
@@ -76,7 +76,6 @@ export default function DeploymentPage() {
       </Link>
 
       <div className="panel relative mt-4 overflow-hidden">
-      <Glow className="opacity-60" />
       <div className="relative flex flex-wrap items-end justify-between gap-6">
         <div className="min-w-0">
           <p className="mb-3 text-xs font-semibold text-ink-soft">Deployment</p>

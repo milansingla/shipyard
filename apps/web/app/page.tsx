@@ -3,7 +3,7 @@
 import Link from "next/link";
 
 import { ArrowIcon } from "@/components/icons";
-import { ErrorNote, Glow, HullName, Mono, StatusBadge, buttonClass } from "@/components/ui";
+import { ErrorNote, HullName, Mono, StatusBadge, buttonClass } from "@/components/ui";
 import { relativeTime, safeHttpUrl } from "@/lib/format";
 import { isInProgress, statusInfo, type Tone } from "@/lib/status";
 import type { ProjectWithLatestDeployment } from "@/lib/types";
@@ -29,7 +29,6 @@ export default function ProjectsPage() {
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
         {/* Hero: what Shipyard does, and the fleet in four numbers. */}
         <section aria-label="Overview" className="glass relative flex min-h-[22rem] flex-col justify-between overflow-hidden rounded-[1.75rem] p-6 sm:p-8">
-          <Glow />
           <div className="relative max-w-md">
             <p className="text-xs font-semibold text-ink-soft">Your fleet</p>
             <p className="headline mt-3 text-[clamp(2rem,4.4vw,3.25rem)] font-semibold leading-[1.05] tracking-[-0.015em]">
@@ -158,7 +157,8 @@ function Stat({ value, label, swatch }: { value: number | undefined; label: stri
   );
 }
 
-const TONE_BAR: Record<Tone, string> = { live: "bg-sea", working: "bg-signal", failed: "bg-oxide", idle: "bg-zinc-500/60" };
+/** Quiet greys, brightest for running: the legend names each state. */
+const TONE_BAR: Record<Tone, string> = { live: "bg-white/85", working: "bg-white/50", failed: "bg-white/30", idle: "bg-white/[0.14]" };
 const TONE_LABEL: Record<Tone, string> = { live: "Running", working: "Deploying", failed: "Failed", idle: "Stopped or new" };
 
 /** How many projects are up, as a proportion bar with a legend. */

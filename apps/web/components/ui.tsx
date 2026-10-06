@@ -120,19 +120,3 @@ export function Label({ children }: { children: ReactNode }) {
 export function Mono({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <span className={`font-mono text-[0.8125rem] ${className}`}>{children}</span>;
 }
-
-/**
- * A sphere of clear glass behind a hero card's right side, with faint rings
- * around it. Decorative; the card needs `relative overflow-hidden`.
- */
-export function Glow({ className = "" }: { className?: string }) {
-  return (
-    <div aria-hidden className={`pointer-events-none absolute -right-24 top-1/2 size-[30rem] -translate-y-1/2 ${className}`}>
-      <div className="absolute inset-[18%] rounded-full bg-[radial-gradient(circle,rgb(255_255_255/0.16),rgb(255_255_255/0.04)_50%,transparent_72%)] blur-2xl" />
-      <div className="absolute inset-[33%] rounded-full bg-[radial-gradient(circle_at_32%_28%,rgb(255_255_255/0.7),rgb(228_228_231/0.28)_18%,rgb(113_113_122/0.22)_45%,rgb(39_39_42/0.3)_70%,transparent_72%)] shadow-[inset_0_0_40px_rgb(255_255_255/0.08)]" />
-      {[4, 16, 28].map((inset) => (
-        <div key={inset} className="absolute rounded-full border border-white/[0.06]" style={{ inset: `${inset}%` }} />
-      ))}
-    </div>
-  );
-}
