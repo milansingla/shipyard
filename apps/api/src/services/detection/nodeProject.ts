@@ -1,24 +1,14 @@
-import semver from "semver";
 import { z } from "zod";
 
 import { AppError, ErrorCode } from "../../lib/errors.js";
 import { isRegularFile, readRegularFile } from "./files.js";
+import { selectNodeVersion } from "./nodeVersion.js";
+import { detectPackageManager } from "./packageManager.js";
 
 export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
-/** Node majors with official `node:<major>-slim` images, newest first. */
-export const SUPPORTED_NODE_MAJORS = [24, 22, 20] as const;
-export const DEFAULT_NODE_MAJOR = 24;
-
-/** Checked in this order when package.json has no `packageManager` field. */
-const LOCKFILES: ReadonlyArray<{ file: string; manager: PackageManager }> = [
-  { file: "pnpm-lock.yaml", manager: "pnpm" },
-  { file: "yarn.lock", manager: "yarn" },
-  { file: "bun.lock", manager: "bun" },
-  { file: "bun.lockb", manager: "bun" },
-  { file: "package-lock.json", manager: "npm" },
-  { file: "npm-shrinkwrap.json", manager: "npm" },
-];
+export { DEFAULT_NODE_MAJOR, SUPPORTED_NODE_MAJORS } from "./nodeVersion.js";
+export { detectPackageManager } from "./packageManager.js";
 
 /** Entry files tried, in order, when there is neither a start script nor `main`. */
 const FALLBACK_ENTRY_FILES = ["server.js", "index.js", "app.js"];
@@ -37,7 +27,7 @@ const packageJsonSchema = z.looseObject({
   dependencies: z.record(z.string(), z.string()).optional().catch(undefined),
   devDependencies: z.record(z.string(), z.string()).optional().catch(undefined),
   scripts: z.record(z.string(), z.string()).optional(),
-  engines: z.looseObject({ node: z.string().optional() }).optional(),
+  engines: z.looseObject({ node: z.string().optional() }).optional().catch(undefined),
   packageManager: z.string().optional(),
   workspaces: z.unknown().optional(),
 });
@@ -45,14 +35,23 @@ const packageJsonSchema = z.looseObject({
 /** npm/pnpm/yarn run these during install: they may need the whole source. */
 const INSTALL_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
 /** Package-manager config the install reads, copied with the manifests when present. */
-const INSTALL_CONFIG_FILES = [".npmrc", ".yarnrc"];
+const INSTALL_CONFIG_FILES = [".npmrc", ".yarnrc", ".pnpmfile.cjs"];
 
 export type PackageJson = z.infer<typeof packageJsonSchema>;
 
 export interface NodeProject {
   packageManager: PackageManager;
-  /** Major version from package.json `packageManager` (corepack), if declared. */
+  /** Major version of the package manager: pinned in package.json, or inferred from the lockfile. */
   packageManagerMajor: number | null;
+  /**
+   * Version installed in the image: exact ("9.15.0") when package.json pins
+   * one, else a major chosen for the lockfile ("9"). null = the image's own (npm).
+   */
+  packageManagerVersion: string | null;
+  /** Why this package manager and version (for the build log). */
+  packageManagerReason: string;
+  /** What makes the lockfile unusable for a frozen install, if anything: the build is expected to fail on it. */
+  staleLockfile: string[] | null;
   /** Lockfile matching the package manager, or null (non-reproducible install). */
   lockfile: string | null;
   nodeMajor: number;
@@ -89,8 +88,9 @@ export async function detectNodeProject(
   const pkg = parsePackageJson(raw);
   const notes: string[] = [];
 
-  const { manager, major, lockfile } = await detectPackageManager(sourceDir, pkg.packageManager, notes);
-  const nodeMajor = selectNodeMajor(pkg.engines?.node, notes);
+  const choice = await detectPackageManager(sourceDir, pkg, notes);
+  const { manager, major, lockfile } = choice;
+  const { major: nodeMajor } = await selectNodeVersion([{ dir: sourceDir, rel: "." }], pkg.engines?.node, notes);
   const startCommand = options.startCommand
     ? ["sh", "-c", options.startCommand]
     : await resolveStartCommand(sourceDir, pkg, manager);
@@ -99,6 +99,9 @@ export async function detectNodeProject(
   return {
     packageManager: manager,
     packageManagerMajor: major,
+    packageManagerVersion: choice.version,
+    packageManagerReason: choice.reason,
+    staleLockfile: choice.staleLockfile,
     lockfile,
     nodeMajor,
     hasBuildScript: Boolean(pkg.scripts?.build?.trim()),
@@ -122,6 +125,8 @@ export async function selectDependencyFiles(
       ? `install scripts (${hooks.join(", ")}) may need the source`
       : pkg.workspaces !== undefined || (await isRegularFile(sourceDir, "pnpm-workspace.yaml"))
         ? "workspaces need every package's source"
+        : hasPatchedDependencies(pkg)
+          ? "patched dependencies need their patch files"
         : manager === "yarn" && major !== null && major >= 2
           ? "Yarn 2+ installs need the .yarn directory"
           : null;
@@ -132,6 +137,13 @@ export async function selectDependencyFiles(
   const config = [];
   for (const file of INSTALL_CONFIG_FILES) if (await isRegularFile(sourceDir, file)) config.push(file);
   return ["package.json", ...(lockfile ? [lockfile] : []), ...config];
+}
+
+function hasPatchedDependencies(pkg: PackageJson): boolean {
+  const pnpm = (pkg as { pnpm?: { patchedDependencies?: unknown } }).pnpm;
+  if (pnpm && typeof pnpm === "object" && pnpm.patchedDependencies) return true;
+  const specs = Object.values({ ...pkg.dependencies, ...pkg.devDependencies });
+  return specs.some((spec) => spec.startsWith("patch:"));
 }
 
 export function parsePackageJson(raw: string): PackageJson {
@@ -149,67 +161,6 @@ export function parsePackageJson(raw: string): PackageJson {
     throw detectionError(`package.json is invalid${where}: ${issue?.message ?? "unexpected shape"}.`);
   }
   return result.data;
-}
-
-/**
- * Picks the newest supported Node major that satisfies `engines.node`.
- * No constraint → the default. An unsatisfiable constraint is an error rather
- * than a silent fallback: building on the wrong Node version fails in confusing ways.
- */
-export function selectNodeMajor(range: string | undefined, notes: string[] = []): number {
-  if (!range?.trim()) return DEFAULT_NODE_MAJOR;
-
-  if (semver.validRange(range) === null) {
-    notes.push(`engines.node "${truncate(range)}" is not a valid semver range; using Node ${DEFAULT_NODE_MAJOR}.`);
-    return DEFAULT_NODE_MAJOR;
-  }
-
-  const major = SUPPORTED_NODE_MAJORS.find((candidate) => semver.intersects(range, `^${candidate}.0.0`));
-  if (major === undefined) {
-    throw detectionError(
-      `package.json requires Node "${truncate(range)}", but generated Dockerfiles support Node ` +
-        `${SUPPORTED_NODE_MAJORS.join(", ")}. Add a Dockerfile to use a different version.`,
-    );
-  }
-  if (major === 20) notes.push("Node 20 is end-of-life; consider upgrading to Node 22 or 24.");
-  return major;
-}
-
-export async function detectPackageManager(
-  sourceDir: string,
-  field: string | undefined,
-  notes: string[],
-): Promise<{ manager: PackageManager; major: number | null; lockfile: string | null }> {
-  const present: Array<(typeof LOCKFILES)[number]> = [];
-  for (const entry of LOCKFILES) {
-    if (await isRegularFile(sourceDir, entry.file)) present.push(entry);
-  }
-
-  if (field !== undefined) {
-    // Corepack format: name@exact.version, optionally +sha… — e.g. "pnpm@9.12.0".
-    const match = /^(npm|pnpm|yarn|bun)@(\d+)\.\d+\.\d+(?:[-+][\w.+-]*)?$/.exec(field.trim());
-    if (!match?.[1] || !match[2]) {
-      throw detectionError(
-        `Unsupported "packageManager" in package.json: "${truncate(field)}". ` +
-          `Shipyard supports npm, pnpm, yarn and bun (e.g. "pnpm@9.12.0").`,
-      );
-    }
-    const manager = match[1] as PackageManager;
-    const lockfile = present.find((entry) => entry.manager === manager)?.file ?? null;
-    if (lockfile === null) notes.push(`No ${manager} lockfile found; dependency versions are not pinned.`);
-    return { manager, major: Number(match[2]), lockfile };
-  }
-
-  const chosen = present[0];
-  if (!chosen) {
-    notes.push("No lockfile found; installing with npm. Commit a lockfile for reproducible builds.");
-    return { manager: "npm", major: null, lockfile: null };
-  }
-  const managers = new Set(present.map((entry) => entry.manager));
-  if (managers.size > 1) {
-    notes.push(`Found lockfiles for ${[...managers].join(", ")}; using ${chosen.manager} (${chosen.file}).`);
-  }
-  return { manager: chosen.manager, major: null, lockfile: chosen.file };
 }
 
 /**

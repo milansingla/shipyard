@@ -535,6 +535,8 @@ describe("repository detection against real Docker", () => {
     ["php", "PHP", "hello from php", "Language:        PHP"],
     ["static", "HTML", "hello from static", "Language:        HTML"],
     ["vite", "Node.js", '<div id="app"></div>', "Framework:       Vite"],
+    ["pnpm", "Node.js", "hello from pnpm (1m)", "pnpm-lock.yaml (lockfileVersion 9.0) → pnpm 9"],
+    ["pnpm-workspace", "Node.js", "hello from the pnpm workspace, web (built with pnpm/9.15.0, node 22)", "Service:         apps/web"],
   ])("%s: detected as %s, built and serving", async (fixture, language, body, logLine) => {
     let systemLog = "";
     const record = await engine(path.join(DETECT, fixture)).run(job(`detect-${fixture}`), {
@@ -551,5 +553,26 @@ describe("repository detection against real Docker", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toContain(body);
     if (fixture === "static") expect((await fetch(`${base}/.secrets`)).status).toBe(404);
+  });
+});
+
+describe("dependency install failures against real Docker", () => {
+  it("an outdated pnpm lockfile: still a frozen install (never relaxed), and the failure says why", async () => {
+    let log = "";
+    const error = (await engine(path.join(DETECT, "pnpm-stale"))
+      .run(job("detect-pnpm-stale"), { onLog: (_source, text) => void (log += text) })
+      .catch((e: unknown) => e)) as DeploymentFailedError;
+    created.push(error.deployment);
+
+    expect(error).toBeInstanceOf(DeploymentFailedError);
+    expect(error.code).toBe(ErrorCode.DOCKER_BUILD_FAILED);
+    expect(error.deployment.failedStage).toBe(S.BUILDING);
+    // Warned during detection, before Docker ran.
+    expect(log).toContain("note: pnpm-lock.yaml is out of date with package.json");
+    expect(error.message).toContain("Dependency installation failed: the lockfile is out of date with package.json.");
+    expect(error.message).toMatch(/Package manager: pnpm 9\.\d+\.\d+ \(pnpm-lock\.yaml \(lockfileVersion 9\.0\) → pnpm 9\)/);
+    expect(error.message).toContain("Command: pnpm install --frozen-lockfile");
+    expect(error.message).toContain("  - left-pad@1.3.0 is in package.json but not in the lockfile");
+    expect(error.message).toContain("ERR_PNPM_OUTDATED_LOCKFILE");
   });
 });

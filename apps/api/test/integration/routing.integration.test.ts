@@ -33,6 +33,7 @@ const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
 const REPLICA_APP = path.resolve(here, "../fixtures/replica-app");
 const COMPOSE_FILE = path.resolve(here, "../../../../docker-compose.yml");
 const MONOREPO_APP = path.resolve(here, "../fixtures/detect/monorepo-npm");
+const PNPM_WORKSPACE_APP = path.resolve(here, "../fixtures/detect/pnpm-workspace");
 
 const suffix = randomUUID().slice(0, 8);
 const NETWORK = `shipyard-it-edge-${suffix}`;
@@ -349,5 +350,26 @@ describe("a detected repository behind Traefik", () => {
         .on("error", reject);
     });
     expect(body).toEqual({ status: 200, text: "hello from the monorepo\n" });
+  });
+
+  it("a pnpm workspace: the pinned pnpm, its lockfile frozen, the workspace package linked, Node from .nvmrc", async () => {
+    let log = "";
+    const record = await engine(PNPM_WORKSPACE_APP).run({ ...job(), name: "pnpmws" }, { onLog: (_source, text) => void (log += text) });
+    created.push(record);
+
+    expect(record.status).toBe("RUNNING");
+    expect(log).toContain("detected a Node.js project (pnpm 9.15.0, Node 22)");
+    expect(log).toContain("Installing pnpm@9.15.0");
+    expect(record.deploymentUrl).toBe(`http://pnpmws.localhost:${traefikPort}`);
+    const body = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+      http
+        .get({ host: "127.0.0.1", port: traefikPort, path: "/", headers: { host: "pnpmws.localhost" }, agent: false, timeout: 5_000 }, (response) => {
+          let text = "";
+          response.on("data", (chunk: Buffer) => (text += chunk.toString()));
+          response.on("end", () => resolve({ status: response.statusCode ?? 0, text }));
+        })
+        .on("error", reject);
+    });
+    expect(body).toEqual({ status: 200, text: "hello from the pnpm workspace, web (built with pnpm/9.15.0, node 22)" });
   });
 });

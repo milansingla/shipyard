@@ -1,0 +1,17 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .: {}
+
+  apps/web:
+    dependencies:
+      '@fixture/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
+
+  packages/ui: {}

@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { AppError, ErrorCode } from "../../lib/errors.js";
 import { detectRepository } from "../detection/RepositoryDetector.js";
-import type { BuildOverrides, DetectionResult } from "../detection/types.js";
+import type { BuildOverrides, DetectionResult, InstallInfo } from "../detection/types.js";
 
 export type { BuildOverrides } from "../detection/types.js";
 
@@ -24,6 +24,8 @@ export interface BuildPlan {
   contextDir: string;
   /** What was detected, as written to the build log. */
   detection: DetectionResult;
+  /** How a generated Dockerfile installs dependencies: explains the build failing there. */
+  install?: InstallInfo;
 }
 
 /**
@@ -93,7 +95,8 @@ export async function prepareBuild(
   }
 
   if (candidate.language === "Node.js") {
-    log(`No Dockerfile found; detected a Node.js project (${candidate.packageManager}, ${candidate.runtime})\n`);
+    const manager = candidate.install?.version ? `${candidate.packageManager} ${candidate.install.version}` : candidate.packageManager;
+    log(`No Dockerfile found; detected a Node.js project (${manager}, ${candidate.runtime})\n`);
     for (const note of candidate.notes) log(`  note: ${note}\n`);
   } else {
     log(`No Dockerfile found; detected a ${candidate.framework ? `${candidate.framework} (${candidate.language})` : candidate.language} project\n`);
@@ -113,7 +116,14 @@ export async function prepareBuild(
   log(describeDetection(result));
   log(`Generated Dockerfile:\n${contents.replace(/^/gm, "  ")}`);
 
-  return { dockerfile: GENERATED_DOCKERFILE_NAME, containerPort: port, source: "generated", contextDir, detection: result };
+  return {
+    dockerfile: GENERATED_DOCKERFILE_NAME,
+    containerPort: port,
+    source: "generated",
+    contextDir,
+    detection: result,
+    ...(candidate.install && { install: candidate.install }),
+  };
 }
 
 /** The detection summary for the build log. */

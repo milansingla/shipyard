@@ -211,20 +211,81 @@ distroless `nonroot`, nginx `101`); PHP's Apache drops to `www-data`.
 
 ### Node.js details
 
-Every decision that might surprise (no lockfile, several lockfiles, Node 20)
-is written to the build log as a `note:`, followed by the full generated
-Dockerfile. Example for a pnpm app with a build step:
+**Package manager.** Decided by the repository, in this order: package.json
+`"packageManager"` (`pnpm@9.15.0`), then the lockfile — `pnpm-lock.yaml`,
+`yarn.lock`, `package-lock.json` / `npm-shrinkwrap.json`, `bun.lock[b]` —
+else npm without a lockfile. For a workspace member, the workspace root's
+field and lockfile count. An app in a subdirectory that is in no workspace
+and has no lockfile of its own uses the package manager the repository uses
+further up, without a lockfile (that lockfile doesn't cover it).
+
+**Version.** Never "whatever is newest". A pinned `"packageManager"` is
+installed exactly. Otherwise the lockfile's format decides: pnpm
+`lockfileVersion` 5.3 → 6, 5.4 → 7, 6.x → 8, 9.0 → 9 (or the 9–12 major
+`engines.pnpm` asks for; 9 still runs dependencies' install scripts, which
+pnpm 10+ blocks unless allowed); a Yarn 1 lockfile → Yarn 1, a Berry lockfile
+→ the Yarn major its `__metadata` version comes from (8 → 4, 6 → 3, 4–5 → 2).
+pnpm and Yarn come from corepack (`corepack install --global <pm>@<version>`
+as the build user; corepack never rewrites package.json). Bun's image is
+tagged with the pinned version (`oven/bun:<version>-slim`, else `1`). A
+pinned npm replaces the image's own.
+
+**Lockfile.** With a lockfile the install is frozen (`npm ci`,
+`pnpm install --frozen-lockfile`, `yarn install --frozen-lockfile` /
+`--immutable` for Yarn 2+, `bun install --frozen-lockfile`); without one it
+isn't. Detection also checks the lockfile against package.json (and every
+workspace member) the way the frozen install will. With several lockfiles,
+one that still matches package.json wins over a stale one. A stale lockfile
+is reported in the build log before Docker runs. It is **never** installed
+unfrozen to get past it: a deployment installs exactly what was locked, or
+fails and says why.
+
+**Node version.** `.node-version`, `.nvmrc` or asdf's `.tool-versions` (in
+the app's directory or above it, nearest first), and package.json
+`engines.node`. A version file that contradicts `engines.node` loses to it.
+A version with no image (18, 23, …) gets the nearest supported one (24, 22,
+20) with a note; an `engines.node` no supported version satisfies is an
+error. Nothing set → Node 24.
+
+**When the install fails**, the deployment's error says what went wrong
+instead of Docker's "returned a non-zero code: 1": the package manager and
+the version that ran, the lockfile, the command, the cause (outdated or
+missing lockfile, lockfile from another package-manager version,
+`packageManager` mismatch, missing workspace package, engine mismatch, peer
+dependency conflict, private-registry authentication, unknown package,
+registry unreachable, a dependency's install script), the stale entries
+detection found, the fix, and the package manager's own error lines. The
+full output stays in the build log.
+
+```text
+Dependency installation failed: the lockfile is out of date with package.json.
+Package manager: pnpm 9.15.9 (pnpm-lock.yaml (lockfileVersion 9.0) → pnpm 9)
+Lockfile: pnpm-lock.yaml
+Command: pnpm install --frozen-lockfile
+Out of date:
+  - firebase: package.json wants 10.7.1, the lockfile has latest
+Fix: Run `pnpm install` locally and commit the updated pnpm-lock.yaml.
+pnpm said:
+   ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" because pnpm-lock.yaml is not up to date with …
+```
+
+Every decision that might surprise (no lockfile, several lockfiles, a stale
+lockfile, a substituted Node version) is written to the build log as a
+`note:`, followed by the full generated Dockerfile. Example for a pnpm app
+with a build step:
 
 ```dockerfile
 FROM node:24-slim
-ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0
 RUN corepack enable
 WORKDIR /app
 RUN chown node:node /app
 USER node
+# pnpm-lock.yaml (lockfileVersion 9.0) → pnpm 9
+RUN ["corepack","install","--global","pnpm@9"]
 # Dependencies first, so the install is cached until they change
 COPY --chown=node:node package.json pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile
 COPY --chown=node:node . .
 RUN pnpm run build
 ENV NODE_ENV=production
@@ -254,7 +315,7 @@ images. Tested against a real `registry:2`.
 
 Docker reuses a build step's layer when the step and everything it depends
 on are unchanged. A generated Dockerfile therefore copies **only the
-manifests** (`package.json`, the lockfile, `.npmrc` / `.yarnrc` when present)
+manifests** (`package.json`, the lockfile, `.npmrc` / `.yarnrc` / `.pnpmfile.cjs` when present)
 before installing, and the rest of the source after. Changing code but not
 dependencies reuses the install layer, usually the slowest step. Changing
 `package.json` or the lockfile re-installs, because Docker hashes the copied
@@ -264,8 +325,8 @@ re-installs.
 Correctness over speed: when installing may need more than the manifests,
 the whole source is copied first and nothing is cached separately. That is
 the case for install hooks (`preinstall`, `install`, `postinstall`,
-`prepare`), workspaces (`workspaces` in package.json, `pnpm-workspace.yaml`)
-and Yarn 2+. The build log says which reason applied. Lockfile installs
+`prepare`), workspaces (`workspaces` in package.json, `pnpm-workspace.yaml`),
+patched dependencies (`pnpm.patchedDependencies`, `patch:`) and Yarn 2+. The build log says which reason applied. Lockfile installs
 (`npm ci`, `--frozen-lockfile`, `--immutable`) keep the install
 reproducible. Your own Dockerfile is used as-is: order its steps the same way
 to benefit.

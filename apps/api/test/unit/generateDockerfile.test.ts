@@ -7,6 +7,9 @@ function project(overrides: Partial<NodeProject> = {}): NodeProject {
   return {
     packageManager: "npm",
     packageManagerMajor: null,
+    packageManagerVersion: null,
+    packageManagerReason: "package-lock.json → npm",
+    staleLockfile: null,
     lockfile: "package-lock.json",
     nodeMajor: 24,
     hasBuildScript: true,
@@ -64,8 +67,43 @@ describe("generateNodeDockerfile", () => {
     const dockerfile = generateNodeDockerfile(project({ packageManager: "pnpm", lockfile: "pnpm-lock.yaml" }), 3000);
     expect(dockerfile).toContain("RUN corepack enable");
     expect(dockerfile.indexOf("corepack enable")).toBeLessThan(dockerfile.indexOf("USER node"));
-    expect(dockerfile).toContain("RUN pnpm install --frozen-lockfile");
+    expect(dockerfile).toContain('RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile');
     expect(dockerfile).toContain("RUN pnpm run build");
+  });
+
+  it("installs the chosen pnpm/yarn version with corepack, as the build user, before the install", () => {
+    const dockerfile = generateNodeDockerfile(
+      project({ packageManager: "pnpm", packageManagerMajor: 9, packageManagerVersion: "9.15.0", packageManagerReason: 'packageManager "pnpm@9.15.0" in package.json → pnpm 9.15.0', lockfile: "pnpm-lock.yaml" }),
+      3000,
+    );
+    const lines = dockerfile.split("\n");
+    expect(lines).toContain("ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0");
+    const install = lines.indexOf('RUN ["corepack","install","--global","pnpm@9.15.0"]');
+    expect(install).toBeGreaterThan(lines.indexOf("USER node"));
+    expect(install).toBeLessThan(lines.indexOf('RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile'));
+    expect(lines[install - 1]).toBe('# packageManager "pnpm@9.15.0" in package.json → pnpm 9.15.0');
+  });
+
+  it("yarn Berry: its major from corepack, --immutable", () => {
+    const dockerfile = generateNodeDockerfile(project({ packageManager: "yarn", packageManagerMajor: 4, packageManagerVersion: "4", lockfile: "yarn.lock" }), 3000);
+    expect(dockerfile).toContain('RUN ["corepack","install","--global","yarn@4"]');
+    expect(dockerfile).toContain('RUN echo "Using yarn $(yarn --version)" && yarn install --immutable');
+  });
+
+  it("bun: the image tagged with the pinned version; npm: a pinned npm replaces the image's", () => {
+    expect(generateNodeDockerfile(project({ packageManager: "bun", packageManagerVersion: "1.1.38", lockfile: "bun.lock" }), 3000)).toContain("FROM oven/bun:1.1.38-slim");
+    expect(generateNodeDockerfile(project({ packageManager: "bun", lockfile: "bun.lock" }), 3000)).toContain("FROM oven/bun:1-slim");
+    const npm = generateNodeDockerfile(project({ packageManagerVersion: "10.9.2" }), 3000);
+    expect(npm).toContain('RUN ["npm","install","--global","npm@10.9.2"]');
+    expect(npm.indexOf("npm@10.9.2")).toBeLessThan(npm.indexOf("USER node"));
+    expect(npm).not.toContain("corepack");
+  });
+
+  it("refuses a package-manager version that isn't a version, and keeps the reason comment to plain characters", () => {
+    expect(() => generateNodeDockerfile(project({ packageManager: "pnpm", packageManagerVersion: "9\nRUN id" }), 3000)).toThrow(RangeError);
+    const dockerfile = generateNodeDockerfile(project({ packageManager: "pnpm", packageManagerVersion: "9", packageManagerReason: "lockfileVersion 9.0`$(id)\\\nRUN id" }), 3000);
+    expect(dockerfile.split("\n").filter((line) => line.startsWith("RUN id"))).toEqual([]);
+    expect(dockerfile).toContain("# lockfileVersion 9.0(id)RUN id");
   });
 
   it("omits the build step when there is no build script", () => {
@@ -102,6 +140,8 @@ describe("installCommand", () => {
     ["npm", null, null, "npm install"],
     ["pnpm", 9, "pnpm-lock.yaml", "pnpm install --frozen-lockfile"],
     ["pnpm", null, null, "pnpm install"],
+    ["bun", 1, "bun.lock", "bun install --frozen-lockfile"],
+    ["bun", 1, null, "bun install"],
     ["yarn", null, "yarn.lock", "yarn install --frozen-lockfile"],
     ["yarn", 1, "yarn.lock", "yarn install --frozen-lockfile"],
     ["yarn", 4, "yarn.lock", "yarn install --immutable"],

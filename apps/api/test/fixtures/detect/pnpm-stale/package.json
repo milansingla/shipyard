@@ -1,0 +1,11 @@
+{
+  "name": "pnpm-stale-fixture",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ms": "2.1.3",
+    "left-pad": "1.3.0"
+  }
+}

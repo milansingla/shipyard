@@ -3,6 +3,7 @@ import path from "node:path";
 
 import { AppError, ErrorCode, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
+import { diagnoseInstallFailure, INSTALL_OUTPUT_TAIL_BYTES } from "../build/installFailure.js";
 import { prepareBuild } from "../build/prepareBuild.js";
 import {
   type ContainerResources,
@@ -170,14 +171,28 @@ export class DeploymentEngine {
 
         // 3. Build
         await moveTo(DeploymentStatus.BUILDING);
-        await this.deps.docker.buildImage(
-          buildDir,
-          state.imageName,
-          this.labelsFor(job, state.containerPort, healthCheck),
-          (text) => log("build", text),
-          plan.dockerfile,
-          env.build,
-        );
+        let buildOutput = "";
+        try {
+          await this.deps.docker.buildImage(
+            buildDir,
+            state.imageName,
+            this.labelsFor(job, state.containerPort, healthCheck),
+            (text) => {
+              log("build", text);
+              if (plan.install) buildOutput = (buildOutput + text).slice(-INSTALL_OUTPUT_TAIL_BYTES);
+            },
+            plan.dockerfile,
+            env.build,
+          );
+        } catch (error) {
+          // A failed dependency install: say what the package manager reported, not just its exit code.
+          const diagnosis = plan.install && error instanceof AppError && error.code === ErrorCode.DOCKER_BUILD_FAILED
+            ? diagnoseInstallFailure(plan.install, error.message, buildOutput)
+            : null;
+          if (!diagnosis) throw error;
+          log("system", `\n${diagnosis}\n`);
+          throw new AppError(ErrorCode.DOCKER_BUILD_FAILED, diagnosis, { statusCode: 422 });
+        }
         await this.deps.registry.publish(state.imageName, (text) => log("build", text));
         // Source is baked into the image now; the clone is no longer needed.
         await this.deps.workspace.cleanup(workspacePath);

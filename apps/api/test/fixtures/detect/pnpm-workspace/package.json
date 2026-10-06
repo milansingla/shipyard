@@ -1,0 +1,5 @@
+{
+  "name": "pnpm-workspace-fixture",
+  "private": true,
+  "packageManager": "pnpm@9.15.0"
+}

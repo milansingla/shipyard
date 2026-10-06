@@ -62,7 +62,7 @@ describe("Node.js", () => {
     const dir = await repo({ "package.json": json({ scripts: { start: "node index.js" } }), [lockfile]: "" });
     const result = await plan(dir);
     expect(result.detection.packageManager).toBe(manager);
-    expect(result.dockerfileText).toContain(`RUN ${install}`);
+    expect(result.dockerfileText).toContain(`RUN echo "Using ${manager} $(${manager} --version)" && ${install}`);
     expect(result.dockerfileText).toContain("RUN corepack enable");
     expect(result.dockerfileText).not.toContain("npm ci");
   });
@@ -292,7 +292,7 @@ describe("monorepos and service directories", () => {
     const result = await plan(dir);
     expect(result.detection).toMatchObject({ serviceDirectory: "apps/web", contextDirectory: ".", framework: "Next.js", packageManager: "pnpm" });
     expect(result.detection.reasons[0]).toContain("the only service found is in apps/web");
-    expect(result.dockerfileText).toContain("RUN pnpm install --frozen-lockfile");
+    expect(result.dockerfileText).toContain('RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile');
     expect(result.dockerfileText).toContain('RUN ["pnpm","--filter","web...","run","build"]');
     expect(result.dockerfileText).toContain("WORKDIR /app/apps/web");
     // Generated files go into the build context (the clone), nowhere else.
@@ -372,5 +372,71 @@ describe("untrusted repository content", () => {
     const cmdLine = result.dockerfileText.split("\n").find((line) => line.startsWith("CMD "))!;
     expect(JSON.parse(cmdLine.slice(4))).toEqual(["sh", "-c", "gunicorn app:app"]);
     expect(result.dockerfileText).not.toContain('RUN echo "pwned"');
+  });
+});
+
+describe("package managers in monorepos", () => {
+  const workspaceLock = [
+    "lockfileVersion: '9.0'",
+    "importers:",
+    "  .: {}",
+    "  apps/web:",
+    "    dependencies:",
+    "      '@acme/ui':",
+    "        specifier: workspace:*",
+    "        version: link:../../packages/ui",
+    "  packages/ui: {}",
+    "packages: {}",
+    "",
+  ].join("\n");
+
+  it("a pnpm workspace: the root's packageManager version and lockfile, the whole workspace copied, the app built with its dependencies", async () => {
+    const dir = await repo({
+      "package.json": json({ private: true, packageManager: "pnpm@9.15.0" }),
+      "pnpm-workspace.yaml": "packages:\n  - apps/*\n  - packages/*\n",
+      "pnpm-lock.yaml": workspaceLock,
+      ".nvmrc": "22\n",
+      "apps/web/package.json": json({ name: "web", scripts: { build: "node build.js", start: "node server.js" }, dependencies: { "@acme/ui": "workspace:*" } }),
+      "packages/ui/package.json": json({ name: "@acme/ui", main: "index.js" }),
+    });
+    const result = await plan(dir);
+    const lines = result.dockerfileText.split("\n");
+    expect(lines).toContain("FROM node:22-slim");
+    expect(lines).toContain('RUN ["corepack","install","--global","pnpm@9.15.0"]');
+    // Workspace packages are needed by the install: the whole workspace goes in before it.
+    expect(lines.indexOf("COPY --chown=node:node . .")).toBeLessThan(lines.indexOf('RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile'));
+    expect(lines).toContain('RUN ["pnpm","--filter","web...","run","build"]');
+    expect(result.log).toContain("detected a Node.js project (pnpm 9.15.0, Node 22)");
+    expect(result.detection.reasons).toContain('packageManager "pnpm@9.15.0" in package.json → pnpm 9.15.0 (at the workspace root, .)');
+    expect(result.detection.reasons).toContain(".nvmrc → Node 22");
+    expect(result.install).toMatchObject({ manager: "pnpm", version: "9.15.0", lockfile: "pnpm-lock.yaml", command: "pnpm install --frozen-lockfile", staleLockfile: null });
+  });
+
+  it("a stale workspace lockfile is reported in the build log before Docker runs", async () => {
+    const dir = await repo({
+      "package.json": json({ private: true }),
+      "pnpm-workspace.yaml": "packages:\n  - apps/*\n  - packages/*\n",
+      "pnpm-lock.yaml": workspaceLock,
+      "apps/web/package.json": json({ name: "web", scripts: { start: "node server.js" }, dependencies: { "@acme/ui": "workspace:*", express: "^4.21.0" } }),
+      "packages/ui/package.json": json({ name: "@acme/ui", main: "index.js" }),
+    });
+    const result = await plan(dir);
+    expect(result.log).toContain("note: pnpm-lock.yaml is out of date with package.json, so `pnpm install --frozen-lockfile` will refuse it: express@^4.21.0 is in package.json (apps/web) but not in the lockfile.");
+    expect(result.dockerfileText).toContain('RUN echo "Using pnpm $(pnpm --version)" && pnpm install --frozen-lockfile');
+    expect(result.install?.staleLockfile).toEqual(["express@^4.21.0 is in package.json (apps/web) but not in the lockfile"]);
+  });
+
+  it("an app in a subdirectory, no workspace: the repository's package manager, without a lockfile that doesn't cover it", async () => {
+    const dir = await repo({
+      "package.json": json({ private: true, scripts: { lint: "eslint ." } }),
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'\nimporters:\n  .: {}\npackages: {}\n",
+      "backend/package.json": json({ name: "api", scripts: { start: "node index.js" }, dependencies: { express: "^4.21.0" } }),
+    });
+    const result = await plan(dir, {}, path.join(dir, "backend"));
+    expect(result.detection.packageManager).toBe("pnpm");
+    expect(result.detection.contextDirectory).toBe("backend");
+    expect(result.dockerfileText).toContain('RUN ["corepack","install","--global","pnpm@9"]');
+    expect(result.dockerfileText).toContain('RUN echo "Using pnpm $(pnpm --version)" && pnpm install\n');
+    expect(result.log).toContain("backend has no lockfile of its own; the repository root uses pnpm");
   });
 });

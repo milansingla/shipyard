@@ -68,6 +68,20 @@ export interface DetectionResult {
   notes: string[];
 }
 
+/** How a generated Dockerfile installs dependencies: what a failed install is explained with. */
+export interface InstallInfo {
+  manager: ToolName;
+  /** Version installed in the image ("9.15.0", "9"), or null for the image's own. */
+  version: string | null;
+  /** Why this package manager and version. */
+  reason: string;
+  lockfile: string | null;
+  /** The install command, exactly as the Dockerfile runs it. */
+  command: string;
+  /** Why the lockfile is expected to be refused, when detection could tell. */
+  staleLockfile: string[] | null;
+}
+
 /** Inputs a generated Dockerfile depends on beyond detection. */
 export interface RenderInput {
   port: number;
@@ -102,6 +116,8 @@ export interface Candidate {
    * applications are picked when Shipyard looks for the service in subdirectories.
    */
   app: boolean;
+  /** Dependency install of a generated build, when it has one. */
+  install?: InstallInfo;
 }
 
 /** A directory that is recognisably some kind of project, but not one Shipyard can run. */

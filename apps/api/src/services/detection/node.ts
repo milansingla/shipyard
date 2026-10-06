@@ -1,19 +1,19 @@
 import { parse as parseYaml } from "yaml";
 
-import { generateNodeDockerfile, generatePlainSiteDockerfile, generateStaticSiteDockerfile, GENERATED_DOCKERIGNORE } from "./generateDockerfile.js";
+import { generateNodeDockerfile, generatePlainSiteDockerfile, generateStaticSiteDockerfile, GENERATED_DOCKERIGNORE, installCommand } from "./generateDockerfile.js";
 import { isNestedRegularFile, isRegularFile, isSafeRelativePath, readNestedFile, readRegularFile } from "./files.js";
 import {
   detectionError,
-  detectPackageManager,
   parsePackageJson,
   resolveStartCommand,
   selectDependencyFiles,
-  selectNodeMajor,
   truncate,
   type NodeProject,
   type PackageJson,
   type PackageManager,
 } from "./nodeProject.js";
+import { selectNodeVersion } from "./nodeVersion.js";
+import { detectPackageManager, type PackageManagerChoice } from "./packageManager.js";
 import { joinRelative, type Candidate, type DetectContext, type ProjectType } from "./types.js";
 
 const MAX_MANIFEST_BYTES = 1024 * 1024;
@@ -79,14 +79,22 @@ export async function detectNode(context: DetectContext): Promise<Candidate | nu
   const workspace = await findWorkspace(context);
   const managerDir = workspace?.dir ?? context.dir;
   const managerPkg = workspace?.pkg ?? pkg;
-  const { manager, major, lockfile } = await detectPackageManager(managerDir, managerPkg.packageManager, notes);
-  reasons.push(
-    lockfile
-      ? `${lockfile}${workspace ? ` at the workspace root (${workspace.rel})` : ""} → ${manager}`
-      : `no lockfile → ${manager}`,
-  );
+  let choice = await detectPackageManager(managerDir, workspace ? managerPkg : pkg, notes);
+  if (!workspace && context.rel !== "." && choice.lockfile === null && pkg.packageManager === undefined) {
+    choice = (await inheritPackageManager(context, notes)) ?? choice;
+  }
+  const { manager, major, lockfile } = choice;
+  reasons.push(workspace && lockfile ? `${choice.reason} (at the workspace root, ${workspace.rel})` : choice.reason);
   if (workspace) reasons.push(`part of the ${workspace.tool} workspace at ${workspace.rel}: built from there`);
-  const nodeMajor = selectNodeMajor(pkg.engines?.node ?? workspace?.pkg?.engines?.node, notes);
+  if (choice.staleLockfile) {
+    notes.push(
+      `${lockfile} is out of date with package.json, so \`${installCommandFor(choice)}\` will refuse it: ${choice.staleLockfile.join("; ")}. ` +
+        `Run \`${manager} install\` locally and commit ${lockfile}.`,
+    );
+  }
+  const node = await selectNodeVersion(ancestorDirs(context), pkg.engines?.node ?? workspace?.pkg?.engines?.node, notes);
+  const nodeMajor = node.major;
+  if (manager !== "bun") reasons.push(node.reason);
 
   const shape = await analyze(context, pkg, deps);
   reasons.push(...shape.reasons);
@@ -135,6 +143,9 @@ export async function detectNode(context: DetectContext): Promise<Candidate | nu
   const project: NodeProject = {
     packageManager: manager,
     packageManagerMajor: major,
+    packageManagerVersion: choice.version,
+    packageManagerReason: choice.reason,
+    staleLockfile: choice.staleLockfile,
     lockfile,
     nodeMajor,
     // In a workspace the package is built by buildExec, never by the root's own build script.
@@ -171,7 +182,7 @@ export async function detectNode(context: DetectContext): Promise<Candidate | nu
   return {
     projectType,
     language: "Node.js",
-    runtime: manager === "bun" ? "Bun 1" : `Node ${nodeMajor}`,
+    runtime: manager === "bun" ? `Bun ${choice.version ?? "1"}` : `Node ${nodeMajor}`,
     framework: framework ?? ("typescript" in deps ? "TypeScript" : null),
     packageManager: manager,
     entrypoint: start ? start.join(" ") : null,
@@ -184,6 +195,14 @@ export async function detectNode(context: DetectContext): Promise<Candidate | nu
     notes,
     contextDirectory: workspace?.rel ?? context.rel,
     app: !isLibraryLike,
+    install: {
+      manager,
+      version: choice.version,
+      reason: choice.reason,
+      lockfile,
+      command: installCommand(project),
+      staleLockfile: choice.staleLockfile,
+    },
     dockerfile: {
       kind: "generated",
       dockerignore: GENERATED_DOCKERIGNORE,
@@ -445,6 +464,50 @@ async function workspaceBuild(workspace: Workspace, manager: PackageManager, pkg
   if (manager === "pnpm") return ["pnpm", "--filter", `${name}...`, "run", "build"];
   if (manager === "yarn") return ["yarn", "workspace", name, "run", "build"];
   return ["bun", "run", "--filter", name, "build"];
+}
+
+function installCommandFor(choice: PackageManagerChoice): string {
+  return installCommand({ packageManager: choice.manager, packageManagerMajor: choice.major, lockfile: choice.lockfile });
+}
+
+/** The package's directory and each one above it, up to the repository root: where version files may be. */
+function ancestorDirs(context: DetectContext): Array<{ dir: string; rel: string }> {
+  const dirs = [{ dir: context.dir, rel: context.rel }];
+  if (context.rel === ".") return dirs;
+  const segments = context.rel.split("/");
+  for (let depth = segments.length - 1; depth >= 0; depth -= 1) {
+    const rel = depth === 0 ? "." : segments.slice(0, depth).join("/");
+    dirs.push({ dir: rel === "." ? context.root : `${context.root}/${rel}`, rel });
+  }
+  return dirs;
+}
+
+/**
+ * A package in a subdirectory with no lockfile of its own and no workspace:
+ * the repository still says which package manager it uses (a lockfile or
+ * "packageManager" further up). That lockfile doesn't cover this package and
+ * isn't in its build context, so the install isn't frozen.
+ */
+async function inheritPackageManager(context: DetectContext, notes: string[]): Promise<PackageManagerChoice | null> {
+  for (const { dir, rel } of ancestorDirs(context).slice(1)) {
+    const raw = await readRegularFile(dir, "package.json", MAX_MANIFEST_BYTES).catch(() => null);
+    let pkg: PackageJson | null = null;
+    try {
+      pkg = raw ? parsePackageJson(raw) : null;
+    } catch {
+      pkg = null;
+    }
+    const ignored: string[] = [];
+    const found = await detectPackageManager(dir, pkg, ignored).catch(() => null);
+    if (!found || (found.lockfile === null && pkg?.packageManager === undefined)) continue;
+    const where = rel === "." ? "the repository root" : rel;
+    notes.push(
+      `${context.rel} has no lockfile of its own; ${where} uses ${found.manager}, so it is installed with ${found.manager}, without a lockfile. ` +
+        `Make ${context.rel} part of a workspace, or commit a lockfile in it, for reproducible builds.`,
+    );
+    return { ...found, reason: `${found.reason} (at ${where}; it doesn't cover ${context.rel})`, lockfile: null, staleLockfile: null };
+  }
+  return null;
 }
 
 /** `child` relative to `parent` (both relative to the repository root). */

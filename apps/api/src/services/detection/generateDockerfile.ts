@@ -11,21 +11,44 @@ export interface NodeBuildOptions {
   env?: Readonly<Record<string, string>>;
 }
 
-/** Bun has its own image; npm, pnpm and yarn run on Node (pnpm and yarn through corepack). */
+/**
+ * Bun has its own image (tagged with the pinned version); npm, pnpm and yarn
+ * run on Node. pnpm and yarn come from corepack, at the version detection
+ * chose (installed below, as the build user); a pinned npm replaces the
+ * image's own.
+ */
 function base(project: NodeProject, stage = ""): { lines: string[]; user: string } {
-  if (project.packageManager === "bun") return { lines: [`FROM oven/bun:1-slim${stage}`], user: "bun" };
+  if (project.packageManager === "bun") return { lines: [`FROM oven/bun:${assertVersion(project.packageManagerVersion ?? "1")}-slim${stage}`], user: "bun" };
   const lines = [
     // -slim (Debian) rather than -alpine: native modules built for glibc just work.
     `FROM node:${project.nodeMajor}-slim${stage}`,
   ];
-  // Corepack provides pnpm/yarn at the version pinned in package.json "packageManager".
-  if (project.packageManager !== "npm") lines.push("ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0", "RUN corepack enable");
+  if (project.packageManager === "npm") {
+    if (project.packageManagerVersion) lines.push(`RUN ${JSON.stringify(["npm", "install", "--global", `npm@${assertVersion(project.packageManagerVersion)}`])}`);
+  } else {
+    // No prompt before downloading, and never rewrite package.json to pin a version.
+    lines.push("ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_ENABLE_AUTO_PIN=0", "RUN corepack enable");
+  }
   return { lines, user: "node" };
+}
+
+/** The package manager at the chosen version, for the build user (corepack keeps it in their home). */
+function packageManagerLines(project: NodeProject): string[] {
+  if ((project.packageManager !== "pnpm" && project.packageManager !== "yarn") || !project.packageManagerVersion) return [];
+  const spec = `${project.packageManager}@${assertVersion(project.packageManagerVersion)}`;
+  // The reason quotes repository content: only plain characters reach the comment.
+  return [`# ${project.packageManagerReason.replace(/[^\w .,:;()"'@/^~<>=*|+→-]/g, "")}`, `RUN ${JSON.stringify(["corepack", "install", "--global", spec])}`];
 }
 
 /** Install (and build) steps shared by servers and static sites: everything up to the built source. */
 function installAndBuild(project: NodeProject, user: string, buildArgNames: readonly string[], buildCommand: string | null, buildExec: readonly string[] | null): string[] {
-  const lines = ["WORKDIR /app", `RUN chown ${user}:${user} /app`, "# Install scripts, the build and the app all run as an unprivileged user.", `USER ${user}`];
+  const lines = [
+    "WORKDIR /app",
+    `RUN chown ${user}:${user} /app`,
+    "# Install scripts, the build and the app all run as an unprivileged user.",
+    `USER ${user}`,
+    ...packageManagerLines(project),
+  ];
   if (project.dependencyFiles) {
     // Manifests first: Docker reuses the install layer until one of them changes.
     lines.push(
@@ -36,7 +59,9 @@ function installAndBuild(project: NodeProject, user: string, buildArgNames: read
     // Whole source before install: install scripts and workspaces may need it.
     lines.push(`COPY --chown=${user}:${user} . .`);
   }
-  lines.push(...argLines(buildArgNames), `RUN ${installCommand(project)}`);
+  // pnpm and yarn say which version runs (the corepack layer may be cached): a failed install is explained with it.
+  const announce = project.packageManager === "pnpm" || project.packageManager === "yarn" ? `echo "Using ${project.packageManager} $(${project.packageManager} --version)" && ` : "";
+  lines.push(...argLines(buildArgNames), `RUN ${announce}${installCommand(project)}`);
   if (project.dependencyFiles) lines.push(`COPY --chown=${user}:${user} . .`);
   // A configured command runs through a shell, in exec form: the JSON array keeps it one argument.
   if (buildCommand) lines.push(runShell(buildCommand));
@@ -141,6 +166,12 @@ export function generatePlainSiteDockerfile(port: number): string {
     `EXPOSE ${port}`,
     cmd(["nginx", "-g", "daemon off;"]),
   ].join("\n")}\n`;
+}
+
+/** A package-manager version: "9", "9.15.0", "9.15.0-rc.1" or "latest". */
+function assertVersion(version: string): string {
+  if (!/^(?:latest|\d+(?:\.\d+){0,2}(?:-[\w.-]+)?)$/.test(version)) throw new RangeError(`Invalid package manager version: ${version}`);
+  return version;
 }
 
 function assertEnvName(name: string): string {
