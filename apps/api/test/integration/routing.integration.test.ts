@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import dns from "node:dns";
 import http from "node:http";
+import https from "node:https";
 import type { AddressInfo } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +20,7 @@ import { DockerService } from "../../src/services/docker/DockerService.js";
 import type { SourceProvider } from "../../src/services/git/GitService.js";
 import { parseRepositoryUrl } from "../../src/services/git/repositoryUrl.js";
 import { DEPLOYMENT_HEADER, TraefikRouter, createTraefikProbe } from "../../src/services/routing/TraefikRouter.js";
+import { CloudflareTunnel } from "../../src/services/tunnel/CloudflareTunnel.js";
 import { LocalRegistry } from "../../src/services/registry/ImageRegistry.js";
 import { WorkspaceService } from "../../src/services/workspace/WorkspaceService.js";
 import { silentLogger } from "../helpers/silentLogger.js";
@@ -373,3 +376,68 @@ describe("a detected repository behind Traefik", () => {
     expect(body).toEqual({ status: 200, text: "hello from the pnpm workspace, web (built with pnpm/9.15.0, node 22)" });
   });
 });
+
+// The free public link, for real: a deployed app behind Traefik, a Cloudflare
+// quick tunnel to it, and a request from the internet to the random
+// https://<words>.trycloudflare.com address. Needs internet access.
+describe("a public link through a Cloudflare quick tunnel", () => {
+  it("serves the live app at a public https://….trycloudflare.com address, and stops when turned off", async () => {
+    const record = await engine(HELLO_APP).run({ ...job(), name: "public" });
+    created.push(record);
+    expect(record.status).toBe("RUNNING");
+
+    const projectId = randomUUID();
+    const tunnel = new CloudflareTunnel(dockerode, docker, { network: NETWORK, tls: false, traefikHost: `shipyard-it-traefik-${suffix}` }, silentLogger);
+    try {
+      await tunnel.start(projectId, "public.localhost");
+      let status = await tunnel.status(projectId);
+      for (let i = 0; i < 60 && status.state !== "live"; i += 1) {
+        await sleep(1_000);
+        status = await tunnel.status(projectId);
+      }
+      expect(status.state).toBe("live");
+      expect(status.url).toMatch(/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/);
+
+      // A brand-new address takes a few seconds to appear in DNS, and a home router may cache "doesn't exist" if
+      // asked too early: look it up through public resolvers, as the people the link is shared with would.
+      let answer = { status: 0, text: "" };
+      for (let i = 0; i < 30 && answer.status !== 200; i += 1) {
+        answer = await publicGet(status.url!).catch(() => ({ status: 0, text: "" }));
+        if (answer.status !== 200) await sleep(2_000);
+      }
+      expect(answer).toEqual({ status: 200, text: "Hello from Shipyard 🚢\n" });
+    } finally {
+      await tunnel.stop(projectId);
+    }
+    expect((await tunnel.status(projectId)).state).toBe("absent");
+  });
+});
+
+/** GET over HTTPS, resolving the hostname with public DNS (1.1.1.1, 8.8.8.8) instead of this machine's resolver. */
+function publicGet(url: string): Promise<{ status: number; text: string }> {
+  const resolver = new dns.Resolver({ timeout: 3_000, tries: 2 });
+  resolver.setServers(["1.1.1.1", "8.8.8.8"]);
+  return new Promise((resolve, reject) => {
+    const request = https.get(
+      url,
+      {
+        timeout: 10_000,
+        lookup: (hostname, options, callback) =>
+          resolver.resolve4(hostname, (error, addresses) => {
+            if (error || !addresses[0]) return callback(error ?? new Error(`no address for ${hostname}`), "", 4);
+            if ((options as { all?: boolean }).all) return (callback as unknown as (e: null, a: Array<{ address: string; family: number }>) => void)(null, addresses.map((address) => ({ address, family: 4 })));
+            callback(null, addresses[0], 4);
+          }),
+      },
+      (response) => {
+        let text = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => (text += chunk));
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, text }));
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error("timed out")));
+    request.on("error", reject);
+  });
+}
+

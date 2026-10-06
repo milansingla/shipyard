@@ -2,13 +2,14 @@
 
 import { type FormEvent, useState } from "react";
 
+import { PublicLink } from "@/components/PublicLink";
 import { Button, ErrorNote, Label, Mono } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { safeHttpUrl } from "@/lib/format";
 import type { ProjectDomain } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
 
-/** Custom hostnames for a project. They go live on the running deployment right away. */
+/** A free public link, and custom hostnames for a project. Both go live on the running deployment right away. */
 export function DomainsPanel({ projectId, canEdit }: { projectId: string; canEdit: boolean }) {
   const domains = useApi<ProjectDomain[]>(`/projects/${projectId}/domains`);
   const [hostname, setHostname] = useState("");
@@ -49,8 +50,10 @@ export function DomainsPanel({ projectId, canEdit }: { projectId: string; canEdi
         <h2 id="domains-heading" className="section-title">
           Domains
         </h2>
-        <p className="text-sm text-ink-soft">Point each domain&apos;s DNS at this server.</p>
+        <p className="text-sm text-ink-soft">A free public link, or your own domain pointed at this server.</p>
       </div>
+
+      <PublicLink projectId={projectId} canEdit={canEdit} />
 
       {list.length > 0 && (
         <ul className="mt-4 divide-y divide-rivet border-y border-rivet text-sm">

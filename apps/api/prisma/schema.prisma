@@ -118,6 +118,8 @@ model Project {
   restartPolicy   RestartPolicy @default(UNLESS_STOPPED)
   /// Build a preview for each pull request of a branch in this repository.
   previewDeployments Boolean   @default(false)
+  /// A public https://<random>.trycloudflare.com link (Cloudflare quick tunnel) to the live app is on.
+  publicLink      Boolean      @default(false)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   deployJobs   DeployJob[]
@@ -232,6 +234,8 @@ enum AuditAction {
   POLICY_CHANGED
   DEPLOYMENT_APPROVED
   DEPLOYMENT_REJECTED
+  PUBLIC_LINK_ENABLED
+  PUBLIC_LINK_DISABLED
 }
 
 /// Who did what, append-only. Kept when the project is deleted (no foreign

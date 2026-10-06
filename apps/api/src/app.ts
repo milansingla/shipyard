@@ -18,6 +18,8 @@ import { createDeploymentRouter } from "./modules/deployments/deployment.routes.
 import type { DeploymentService } from "./modules/deployments/DeploymentService.js";
 import { createDomainRouter } from "./modules/domains/domain.routes.js";
 import type { DomainService } from "./modules/domains/DomainService.js";
+import { createPublicLinkRouter } from "./modules/publicLinks/publicLink.routes.js";
+import type { PublicLinkService } from "./modules/publicLinks/PublicLinkService.js";
 import { createEnvironmentRouter } from "./modules/environment/environment.routes.js";
 import type { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { createGitHubRouter } from "./modules/github/github.routes.js";
@@ -69,6 +71,7 @@ export interface AppDeps {
   /** Project environment variables; needs SHIPYARD_SECRET_KEY. */
   environment?: EnvironmentService | null;
   domains?: DomainService;
+  publicLinks?: PublicLinkService;
   audit?: AuditService;
   organizations?: OrganizationService;
   services?: ServiceService;
@@ -157,6 +160,7 @@ export function createApp(deps: AppDeps): Express {
     app.use("/api", createDeploymentRouter(deployments, logger));
     if (deps.environment) app.use("/api", createEnvironmentRouter(deps.environment));
     if (deps.domains) app.use("/api", createDomainRouter(deps.domains));
+    if (deps.publicLinks) app.use("/api", createPublicLinkRouter(deps.publicLinks));
     if (deps.audit) app.use("/api", createAuditRouter(deps.audit));
     if (deps.organizations) app.use("/api", createOrganizationRouter(deps.organizations));
     if (deps.services && deps.volumes) app.use("/api", createServiceRouter(deps.services, deps.volumes));

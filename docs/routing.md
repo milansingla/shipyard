@@ -136,6 +136,36 @@ Project page → **Domains**, or `POST /api/projects/:id/domains {"hostname": "a
 - **DNS is yours to set**: point an A/AAAA (or CNAME) record at this server.
   Locally, try it with `curl -H 'Host: app.example.com' http://127.0.0.1/`.
 
+## Public links (free, no domain)
+
+A project's **Domains** section has a **Public link** switch. Turning it on
+gives the live app a free public HTTPS address,
+`https://<random-words>.trycloudflare.com`, through a Cloudflare quick
+tunnel: no domain to buy, no DNS, nothing opened on your router, no
+Cloudflare account.
+
+How it works: Shipyard starts a `cloudflare/cloudflared` container (pinned
+version) on the `shipyard-edge` network that forwards the public address to
+Traefik with the project's own hostname (`<slug>.<SHIPYARD_PUBLIC_DOMAIN>`).
+Traefik routes it like any visitor, so the link always reaches whichever
+deployment is live: redeploys and rollbacks keep it working. The connection
+is outbound only. With HTTPS on (production), the tunnel talks to Traefik's
+HTTPS entry point with the app's name as the TLS server name.
+
+- **API**: `GET|POST|DELETE /api/projects/:id/public-link`. POST starts it
+  (or restarts it with a new address); the state is `starting` (Cloudflare
+  is assigning the address), `live`, or `failed` (with cloudflared's error).
+- **Who**: turning it on or off needs ADMIN, and both are in the audit log
+  (`PUBLIC_LINK_ENABLED` / `PUBLIC_LINK_DISABLED`): anyone with the link can
+  open the app.
+- **Restarts**: the container restarts with Docker (`unless-stopped`), and
+  the API restores missing tunnels at startup. Deleting the project removes
+  its tunnel.
+- **Limits**: quick tunnels are Cloudflare's free service for sharing and
+  testing, without an uptime guarantee. The address is random and changes
+  whenever the tunnel restarts. A new address can take up to a minute to
+  answer everywhere (DNS). For a stable address, add a custom domain.
+
 ## HTTPS in production (Let's Encrypt)
 
 ```bash

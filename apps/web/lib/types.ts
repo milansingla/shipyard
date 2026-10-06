@@ -371,3 +371,14 @@ export interface Approval {
   decidedBy: string | null;
   decidedAt: string | null;
 }
+
+/** A free public https://<random>.trycloudflare.com address for the live app (Cloudflare quick tunnel). */
+export interface PublicLinkInfo {
+  /** Public links work on this server (routing through Traefik is on). */
+  available: boolean;
+  enabled: boolean;
+  /** absent = off; starting = Cloudflare is assigning the address; live = it works; failed = see detail. */
+  state: "absent" | "starting" | "live" | "failed";
+  url: string | null;
+  detail: string | null;
+}

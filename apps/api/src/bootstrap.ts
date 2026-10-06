@@ -15,6 +15,8 @@ import { AuthService } from "./modules/auth/AuthService.js";
 import { BuildLogStore } from "./modules/deployments/BuildLogStore.js";
 import { DeploymentService } from "./modules/deployments/DeploymentService.js";
 import { DomainService } from "./modules/domains/DomainService.js";
+import { PublicLinkService } from "./modules/publicLinks/PublicLinkService.js";
+import { CloudflareTunnel } from "./services/tunnel/CloudflareTunnel.js";
 import { EnvironmentService } from "./modules/environment/EnvironmentService.js";
 import { ProjectService } from "./modules/projects/ProjectService.js";
 import { ConfigSync } from "./modules/services/ConfigSync.js";
@@ -61,6 +63,7 @@ export interface ApiServices extends EngineServices {
   /** null without SHIPYARD_SECRET_KEY (values are always stored encrypted). */
   environment: EnvironmentService | null;
   domains: DomainService;
+  publicLinks: PublicLinkService;
   audit: AuditService;
   organizations: OrganizationService;
   services: ServiceService;
@@ -198,6 +201,8 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     prisma,
     access,
     audit,
+    // Declared below; only called when a project is deleted, long after startup.
+    afterDelete: (projectId) => publicLinks.removeForProject(projectId),
     git: engineServices.git,
     deployments,
     allowedGitHosts: config.allowedGitHosts,
@@ -230,6 +235,17 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     access,
     audit,
     logger: logger.child({ component: "domains" }),
+  });
+
+  const publicLinks = new PublicLinkService({
+    prisma,
+    access,
+    audit,
+    tunnel: config.routing
+      ? new CloudflareTunnel(new Docker(), engineServices.docker, { network: EDGE_NETWORK, tls: Boolean(config.routing.tls) }, logger.child({ component: "public-links" }))
+      : null,
+    publicDomain: config.routing?.domain ?? null,
+    logger: logger.child({ component: "public-links" }),
   });
 
   const services = new ServiceService({ prisma, access, deployments, audit, environment, logger: logger.child({ component: "services" }) });
@@ -301,6 +317,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     deployments,
     environment,
     domains,
+    publicLinks,
     audit,
     organizations,
     services,

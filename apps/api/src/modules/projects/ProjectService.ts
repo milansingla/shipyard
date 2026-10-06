@@ -23,6 +23,8 @@ export interface ProjectServiceDeps {
   deployments: Pick<DeploymentService, "destroyProjectDeployments" | "removeVolumes">;
   allowedGitHosts: readonly string[];
   audit: Pick<AuditService, "record">;
+  /** Removes what lives outside the database and its deployments (the public link's tunnel). */
+  afterDelete?: (projectId: string) => Promise<void>;
   logger: Logger;
 }
 
@@ -136,6 +138,7 @@ export class ProjectService {
         this.deps.prisma.project.delete({ where: { id } }), // cascades to services and deployments
       ]);
     });
+    await this.deps.afterDelete?.(id).catch((error: unknown) => this.deps.logger.warn({ err: error, projectId: id }, "Cleanup after deleting a project failed"));
     this.deps.logger.info({ projectId: id }, "Project deleted");
     await this.deps.audit.record({ action: "PROJECT_DELETED", actorId: userId, project });
   }

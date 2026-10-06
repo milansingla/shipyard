@@ -26,6 +26,8 @@ const builtInWorker = await services.workers.registerBuiltIn({
 services.deployments.attachWorker(builtInWorker.id);
 await services.workerCalls.failOrphans();
 await services.deployments.reconcileOnStartup();
+// Public links come back if their tunnel is gone; failures are logged, never fatal.
+void services.publicLinks.reconcile();
 await services.cron.reconcileOnStartup();
 services.deployments.startQueue();
 services.metrics.start();
@@ -50,6 +52,7 @@ const app = createApp({
   deployments: services.deployments,
   environment: services.environment,
   domains: services.domains,
+  publicLinks: services.publicLinks,
   audit: services.audit,
   organizations: services.organizations,
   services: services.services,
