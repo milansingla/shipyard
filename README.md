@@ -7,14 +7,17 @@ Render/Railway you can read end to end.
 GitHub repo → clone → detect → docker build → container → health check → http://<project>.localhost
 ```
 
-> **Status: V4 — a multi-service developer platform on one server.** Sign in
+> **Status: V5 — a self-hosted platform across machines.** Sign in
 > with GitHub, pick a repository, deploy. A project is a set of services (web,
 > workers, PostgreSQL) on a private network, declared in the dashboard or in
 > `shipyard.yaml`, with persistent volumes, replicas and rolling deploys, cron
 > jobs, a development environment and a preview per pull request. Every project
 > lives at a stable address (or your own domain over HTTPS) and switches
-> traffic with zero downtime. Teams with roles, API keys, an audit log and a
-> CLI. See [the roadmap](#roadmap).
+> traffic with zero downtime. Deploys queue and run on any registered worker
+> machine; metrics, alerts, backups and cleanup keep it running; teams,
+> service accounts, scoped API keys, policies and approvals govern who does
+> what; an AI assistant explains failures without being able to change
+> anything. See [the roadmap](#roadmap).
 
 ## Requirements
 
@@ -230,5 +233,13 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [x] Cron jobs with recorded runs
 - [x] Development environments, per-environment variables, pull request previews
 
-Next: **V5**, the final release: workers and scheduling across machines,
-operations (metrics, alerts, backups), and AI assistance.
+### V5 — full platform (v5.0.0, final)
+
+- [x] Workers: registration with a join token, heartbeats, draining, remote execution (`npm run worker -w @shipyard/api`)
+- [x] Deploy queue in PostgreSQL: priorities, FIFO per project, leases, recovery of lost workers, scheduling by capacity and affinity
+- [x] Metrics (CPU, memory, restarts, uptime) and alerts to webhooks and Slack
+- [x] Backups and tested restores (Shipyard's database, PostgreSQL services, volumes); hourly cleanup
+- [x] Teams with per-project grants, service accounts, API key scopes (read / deploy / write)
+- [x] Searchable audit log, versioned API (`/api/v1`), CLI domains
+- [x] Organization policies (resource caps, health checks, domain suffixes) and production deploy approval
+- [x] AI assistant: deployment diagnosis, incident summaries, repository analysis, Dockerfile help, questions with proposed actions ([docs/ai.md](docs/ai.md))
