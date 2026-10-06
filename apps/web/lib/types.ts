@@ -102,6 +102,8 @@ export interface Project {
   /** null = no limit. */
   memoryLimitMb: number | null;
   restartPolicy: RestartPolicy;
+  /** Build a preview for each pull request into the project's branch. */
+  previewDeployments: boolean;
   createdAt: string;
   updatedAt: string;
 }

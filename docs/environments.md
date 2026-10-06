@@ -35,6 +35,26 @@ environment: rolling back dev never touches production.
 stops it and removes its containers and images; its deployments stay in the
 history. A closed development environment can be opened again with a branch.
 
+## Pull request previews
+
+Project **Settings** → *Preview each pull request* (`PATCH /api/projects/:id {"previewDeployments": true}`),
+and let the repository's webhook send **Pull requests** events as well as pushes
+([github.md](github.md)). Then, for a pull request into the project's branch:
+
+| GitHub | Shipyard |
+| ------ | -------- |
+| opened, reopened, ready for review | creates (or reopens) `pr-<n>` and deploys the PR's branch at `pr-<n>-<slug>` |
+| new commits (synchronize) | redeploys it, zero downtime like production |
+| edited | updates its title |
+| closed or merged | closes it: containers and images removed, history kept |
+
+- **Forks are never built.** A pull request from a fork is someone else's
+  code; building it would run it on this server. Only branches of the same
+  repository (whose authors can already push) get previews.
+- The event is verified like pushes (HMAC signature, one delivery handled once).
+- Branch names are validated like any other; an invalid one is ignored.
+- A preview isn't created if its address would be another project's.
+
 ## Variables per environment
 
 Every variable applies to **All** environments, or to one (**Production**,

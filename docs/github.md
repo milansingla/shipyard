@@ -135,7 +135,7 @@ Code: [`modules/webhooks/`](../apps/api/src/modules/webhooks/)
    - Payload URL: `<dashboard URL>/api/webhooks/github` (the project page shows it)
    - Content type: `application/json`
    - Secret: the same value
-   - Events: **Just the push event**
+   - Events: **Just the push event**; for pull request previews choose **Let me select individual events** → *Pushes* and *Pull requests* (see [environments.md](environments.md#pull-request-previews))
 3. GitHub sends a `ping`; the delivery should show a green tick and `pong`.
 
 GitHub has to reach the URL. On a laptop, forward it with a tunnel:

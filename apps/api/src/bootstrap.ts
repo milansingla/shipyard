@@ -21,6 +21,7 @@ import { ServiceService } from "./modules/services/ServiceService.js";
 import { VolumeService } from "./modules/services/VolumeService.js";
 import { CronService } from "./modules/cron/CronService.js";
 import { ProjectEnvironments } from "./modules/environments/ProjectEnvironments.js";
+import { PreviewService } from "./modules/environments/PreviewService.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
@@ -157,7 +158,17 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
 
   const webhooks = config.githubWebhookSecret
     ? {
-        service: new WebhookService({ prisma, deployments, logger: logger.child({ component: "webhooks" }) }),
+        service: new WebhookService({
+          prisma,
+          deployments,
+          previews: new PreviewService({
+            prisma,
+            deployments,
+            environments: new ProjectEnvironments({ prisma, access, deployments, logger: logger.child({ component: "environments" }) }),
+            logger: logger.child({ component: "previews" }),
+          }),
+          logger: logger.child({ component: "webhooks" }),
+        }),
         secret: config.githubWebhookSecret,
       }
     : null;

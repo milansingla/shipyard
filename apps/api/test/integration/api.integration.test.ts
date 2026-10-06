@@ -22,6 +22,7 @@ import { VolumeService } from "../../src/modules/services/VolumeService.js";
 import { projectNetworkName } from "../../src/modules/services/serviceRules.js";
 import { type CronRunner, CronService } from "../../src/modules/cron/CronService.js";
 import { ProjectEnvironments } from "../../src/modules/environments/ProjectEnvironments.js";
+import { PreviewService } from "../../src/modules/environments/PreviewService.js";
 import type { OneOffContainerOptions, OneOffResult } from "../../src/services/docker/DockerService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
@@ -366,7 +367,17 @@ beforeAll(async () => {
         apiKeys: new ApiKeyService({ prisma, audit, logger: silentLogger }),
       },
       webhooks: {
-        service: new WebhookService({ prisma, deployments, logger: silentLogger }),
+        service: new WebhookService({
+          prisma,
+          deployments,
+          previews: new PreviewService({
+            prisma,
+            deployments,
+            environments: new ProjectEnvironments({ prisma, access, deployments, logger: silentLogger }),
+            logger: silentLogger,
+          }),
+          logger: silentLogger,
+        }),
         secret: WEBHOOK_SECRET,
       },
       allowedOrigins: [api, APP_URL],
@@ -742,7 +753,8 @@ describe("GitHub push webhooks", () => {
     ["a tag push", pushPayload("acme", "shop", "refs/tags/v1.0.0"), "push", "not a branch"],
     ["a deleted branch", pushPayload("acme", "shop", "refs/heads/main", { deleted: true }), "push", "branch deleted"],
     ["an unknown repository", pushPayload("acme", "unknown", "refs/heads/main"), "push", "no project deploys"],
-    ["another event type", { action: "opened" }, "pull_request", "only acts on push"],
+    ["another event type", { action: "opened" }, "issues", "only acts on push and pull_request"],
+    ["a malformed pull request", { action: "opened" }, "pull_request", "not a recognisable pull_request payload"],
   ])("ignores %s", async (_case, payload, event, reason) => {
     const alice = await sessionFor(ALICE);
     await createProject(alice, "https://github.com/acme/shop", "main");
@@ -2385,5 +2397,78 @@ describe("environments", () => {
     for (const name of ["dev", "pr-3", "dev-api", "pr-1-x"]) {
       expect({ name, status: (await call(alice, "POST", `/api/projects/${projectId}/services`, { name })).status }).toEqual({ name, status: 400 });
     }
+  });
+});
+
+describe("pull request previews", () => {
+  const pr = (action: string, number: number, extra: { head?: string; base?: string; fork?: boolean; title?: string } = {}) => ({
+    action,
+    number,
+    pull_request: {
+      title: extra.title ?? "Soil alerts",
+      head: { ref: extra.head ?? "feature/alerts", repo: { full_name: extra.fork ? "mallory/preview-shop" : "acme/preview-shop" } },
+      base: { ref: extra.base ?? "main", repo: { full_name: "acme/preview-shop" } },
+    },
+    repository: { name: "preview-shop", owner: { login: "acme" } },
+  });
+
+  it("opens, updates and closes a preview at pr-<n>-<slug>, without production secrets or the database", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/preview-shop" })).body!.data.id as string;
+    await call(alice, "POST", `/api/projects/${projectId}/services`, { name: "db", type: "POSTGRES" });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/STRIPE_KEY`, { value: "sk_live", secret: true });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/STRIPE_KEY?environment=PREVIEW`, { value: "sk_test", secret: true });
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+
+    // Off by default.
+    expect((await deliverWebhook("pull_request", pr("opened", 7))).body.data.outcome).toContain("ignored: no project previews");
+    expect((await call(alice, "PATCH", `/api/projects/${projectId}`, { previewDeployments: true })).status).toBe(200);
+
+    jobs.length = 0;
+    const opened = await deliverWebhook("pull_request", pr("opened", 7));
+    expect(opened.body.data.outcome).toContain("deploying pr-7-preview-shop");
+    await deployments.waitForIdle();
+    expect(jobs.map((job) => job.routeName)).toEqual(["pr-7-preview-shop"]); // web only: no database
+    const [job] = jobs;
+    expect(job).toMatchObject({ branch: "feature/alerts", volumes: [], domains: [] });
+    expect(job!.env!.runtime.STRIPE_KEY).toBe("sk_test");
+    expect(job!.env!.runtime.DATABASE_URL).toBeUndefined(); // a production secret
+    const preview = await prisma.environment.findFirstOrThrow({ where: { projectId, name: "pr-7" } });
+    expect(preview).toMatchObject({ type: "PREVIEW", pullRequest: 7, title: "Soil alerts", status: "ACTIVE" });
+    const first = liveRoutes.get("pr-7-preview-shop");
+    expect(first).toBeDefined();
+
+    // New commits redeploy it; a new title is recorded.
+    await deliverWebhook("pull_request", pr("synchronize", 7));
+    await deployments.waitForIdle();
+    expect(liveRoutes.get("pr-7-preview-shop")).not.toBe(first);
+    await deliverWebhook("pull_request", pr("edited", 7, { title: "Soil moisture alerts" }));
+    expect((await prisma.environment.findUniqueOrThrow({ where: { id: preview.id } })).title).toBe("Soil moisture alerts");
+
+    // Closing (or merging) takes it down; production is untouched.
+    const closed = await deliverWebhook("pull_request", pr("closed", 7));
+    expect(closed.body.data.outcome).toContain("closed pr-7-preview-shop");
+    expect(liveRoutes.has("pr-7-preview-shop")).toBe(false);
+    expect(liveRoutes.has("preview-shop")).toBe(true);
+    expect((await prisma.environment.findUniqueOrThrow({ where: { id: preview.id } })).status).toBe("CLOSED");
+
+    // Reopened: back, same environment.
+    await deliverWebhook("pull_request", pr("reopened", 7));
+    await deployments.waitForIdle();
+    expect((await prisma.environment.findUniqueOrThrow({ where: { id: preview.id } })).status).toBe("ACTIVE");
+  });
+
+  it("never builds forks, and only previews pull requests into the project's branch", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/preview-shop" })).body!.data.id as string;
+    await call(alice, "PATCH", `/api/projects/${projectId}`, { previewDeployments: true });
+    jobs.length = 0;
+    expect((await deliverWebhook("pull_request", pr("opened", 8, { fork: true }))).body.data.outcome).toBe("ignored: pull requests from forks are never built");
+    expect((await deliverWebhook("pull_request", pr("opened", 9, { base: "release" }))).body.data.outcome).toContain("ignored");
+    expect((await deliverWebhook("pull_request", pr("opened", 10, { head: "--upload-pack=x" }))).body.data.outcome).toContain("isn't one Shipyard builds");
+    await deployments.waitForIdle();
+    expect(jobs).toEqual([]);
+    expect(await prisma.environment.count({ where: { projectId } })).toBe(0);
   });
 });

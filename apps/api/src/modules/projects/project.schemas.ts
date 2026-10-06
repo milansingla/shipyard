@@ -41,6 +41,8 @@ export const updateProjectSchema = z
     /** MB; null = no limit. Below 64 MB most runtimes can't even start. */
     memoryLimitMb: z.int().min(64).max(262_144).nullable().optional(),
     restartPolicy: z.enum(["NO", "ON_FAILURE", "UNLESS_STOPPED"]).optional(),
+    /** Build a preview for each pull request into the project's branch (from branches of the repository, never forks). */
+    previewDeployments: z.boolean().optional(),
   })
   .refine((input) => Object.keys(input).length > 0, "Nothing to update.");
 

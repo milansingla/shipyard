@@ -2,11 +2,15 @@ import { type PrismaClient, isUniqueViolation } from "../../db/prisma.js";
 import { errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
+import type { PreviewService } from "../environments/PreviewService.js";
+import { parsePullRequestEvent } from "./pullRequestEvent.js";
 import { parsePushEvent } from "./pushEvent.js";
 
 export interface WebhookServiceDeps {
   prisma: PrismaClient;
   deployments: Pick<DeploymentService, "deployOnPush">;
+  /** Pull-request previews; without it, pull_request events are ignored. */
+  previews?: Pick<PreviewService, "deploy" | "close" | "retitle">;
   logger: Logger;
 }
 
@@ -54,7 +58,12 @@ export class WebhookService {
 
   private async dispatch(event: string, payload: unknown): Promise<string> {
     if (event === "ping") return "pong";
-    if (event !== "push") return `ignored: Shipyard only acts on push events (got ${event})`;
+    if (event === "pull_request" && this.deps.previews) {
+      const pr = parsePullRequestEvent(payload);
+      if (pr.kind === "ignore") return `ignored: ${pr.reason}`;
+      return this.deps.previews[pr.kind === "retitle" ? "retitle" : pr.kind](pr.target);
+    }
+    if (event !== "push") return `ignored: Shipyard only acts on push and pull_request events (got ${event})`;
 
     const push = parsePushEvent(payload);
     if (push.kind === "ignore") return `ignored: ${push.reason}`;

@@ -2,7 +2,7 @@
 
 import { type FormEvent, useState } from "react";
 
-import { Button, ErrorNote, Label } from "@/components/ui";
+import { Button, ErrorNote, Label, Mono } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import type { Project, RestartPolicy } from "@/lib/types";
 
@@ -27,6 +27,7 @@ export function ProjectSettings({ project, canEdit, onSaved }: { project: Projec
   const [cpu, setCpu] = useState(project.cpuLimit?.toString() ?? "");
   const [memory, setMemory] = useState(project.memoryLimitMb?.toString() ?? "");
   const [restartPolicy, setRestartPolicy] = useState<RestartPolicy>(project.restartPolicy);
+  const [previews, setPreviews] = useState(project.previewDeployments);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<ApiError | null>(null);
@@ -46,6 +47,7 @@ export function ProjectSettings({ project, canEdit, onSaved }: { project: Projec
           cpuLimit: optionalNumber(cpu),
           memoryLimitMb: optionalNumber(memory),
           restartPolicy,
+          previewDeployments: previews,
         },
       });
       setSaved(true);
@@ -165,6 +167,24 @@ export function ProjectSettings({ project, canEdit, onSaved }: { project: Projec
           </label>
         </div>
         <p className="mt-2 text-xs text-ink-soft">CPU: number of cores, e.g. 0.5 for half a core. Leave either empty for no limit.</p>
+
+        <label className="mt-6 flex items-start gap-3 text-sm">
+          <input
+            type="checkbox"
+            checked={previews}
+            onChange={(event) => setPreviews(event.target.checked)}
+            disabled={!canEdit}
+            className="mt-0.5 size-4 accent-ink"
+          />
+          <span>
+            <span className="font-semibold">Preview each pull request</span>
+            <span className="block text-ink-soft">
+              Pull requests into <Mono>{project.branch}</Mono> from this repository&apos;s branches get their own address,
+              pr-&lt;number&gt;-{project.slug}, removed when they close. Forks are never built. Previews get only the secrets set
+              for Previews. Needs the repository&apos;s webhook to send pull request events.
+            </span>
+          </span>
+        </label>
 
         </fieldset>
         <div className="mt-4 flex flex-wrap items-center gap-4">

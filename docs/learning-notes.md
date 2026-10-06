@@ -674,3 +674,12 @@ UTC has neither; converting a local time is the user's explicit choice.
 - **Bind ciphertexts to their context**: the environment is part of what a
   secret is encrypted against, so moving a production value into a preview
   row (a bug, or a malicious write) fails to decrypt instead of leaking.
+
+## Pull request previews
+
+- **Who wrote the code decides whether it runs**: a branch in the repository
+  was pushed by someone with write access; a fork's pull request was not.
+  Previews build only the former, without needing a maintainer to approve.
+- **Event-driven lifecycle**: GitHub tells Shipyard when a pull request opens,
+  changes and closes, so previews appear and disappear without polling; the
+  same signature check and delivery dedupe as pushes protect it.
