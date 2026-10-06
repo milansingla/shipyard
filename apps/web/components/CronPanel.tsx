@@ -87,9 +87,9 @@ export function CronPanel({
   const list = jobs.data ?? [];
 
   return (
-    <section className="mt-12" aria-labelledby="cron-heading">
+    <section className="panel mt-6" aria-labelledby="cron-heading">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h2 id="cron-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+        <h2 id="cron-heading" className="section-title">
           Cron jobs
         </h2>
         <p className="text-sm text-ink-soft">Schedules are in UTC.</p>
@@ -116,7 +116,7 @@ export function CronPanel({
                   <span className="font-semibold">{job.name}</span>
                   <Mono className="ml-2 text-xs text-ink-soft">{job.schedule}</Mono>
                   {job.managedBy === "CONFIG_FILE" && (
-                    <span className="ml-2 rounded-sm border border-rivet px-1.5 py-0.5 text-xs text-ink-soft">shipyard.yaml</span>
+                    <span className="ml-2 rounded-full border border-rivet px-2 py-0.5 text-xs text-ink-soft">shipyard.yaml</span>
                   )}
                   <p className="mt-1 truncate text-xs text-ink-soft">
                     in {job.serviceName}: <Mono>{job.command}</Mono>
@@ -315,7 +315,7 @@ function CronRuns({ jobId }: { jobId: string }) {
         ))}
       </ul>
       {shown && output.data?.id === shown && (
-        <pre className="mt-3 max-h-72 overflow-auto bg-ink p-3 font-mono text-xs text-plate">
+        <pre className="mt-3 max-h-72 overflow-auto rounded-2xl border border-white/[0.06] bg-console p-4 font-mono text-xs text-ink/90">
           {output.data.output || (output.data.status === "RUNNING" ? "Running… output appears when it finishes." : "No output.")}
         </pre>
       )}

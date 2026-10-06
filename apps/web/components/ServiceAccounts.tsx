@@ -48,13 +48,13 @@ export function ServiceAccounts({ organization }: { organization: Organization }
     });
 
   return (
-    <section className="mt-12" aria-labelledby="service-accounts-heading">
-      <h2 id="service-accounts-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+    <section className="panel mt-6" aria-labelledby="service-accounts-heading">
+      <h2 id="service-accounts-heading" className="section-title">
         Service accounts
       </h2>
       <p className="mt-1 text-sm text-ink-soft">For CI and scripts: a member with a fixed role that only uses API keys, never a sign-in.</p>
       {token && (
-        <div className="mt-4 border-l-4 border-ink bg-primer px-4 py-3 text-sm" role="status">
+        <div className="mt-4 rounded-2xl border border-rivet bg-primer/70 px-4 py-3 text-sm" role="status">
           <p className="font-semibold">Key for {token.account}: copy it now, it won&apos;t be shown again.</p>
           <Mono className="mt-1 block break-all">{token.value}</Mono>
         </div>

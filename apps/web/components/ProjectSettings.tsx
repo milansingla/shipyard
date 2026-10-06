@@ -60,9 +60,9 @@ export function ProjectSettings({ project, canEdit, onSaved }: { project: Projec
   };
 
   return (
-    <section className="mt-12" aria-labelledby="settings-heading">
+    <section className="panel mt-6" aria-labelledby="settings-heading">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h2 id="settings-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+        <h2 id="settings-heading" className="section-title">
           Settings
         </h2>
         <p className="text-sm text-ink-soft">Changes apply on the next deploy.</p>

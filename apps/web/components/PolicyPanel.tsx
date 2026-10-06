@@ -61,8 +61,8 @@ export function PolicyPanel({ organization }: { organization: Organization }) {
   };
 
   return (
-    <section className="mt-12" aria-labelledby="policy-heading">
-      <h2 id="policy-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+    <section className="panel mt-6" aria-labelledby="policy-heading">
+      <h2 id="policy-heading" className="section-title">
         Policy
       </h2>
       <p className="mt-1 text-sm text-ink-soft">Checked before every deploy of this organization&apos;s projects. Empty = no rule.</p>

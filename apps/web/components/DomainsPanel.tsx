@@ -44,9 +44,9 @@ export function DomainsPanel({ projectId, canEdit }: { projectId: string; canEdi
   const list = domains.data ?? [];
 
   return (
-    <section className="mt-12" aria-labelledby="domains-heading">
+    <section className="panel mt-6" aria-labelledby="domains-heading">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h2 id="domains-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+        <h2 id="domains-heading" className="section-title">
           Domains
         </h2>
         <p className="text-sm text-ink-soft">Point each domain&apos;s DNS at this server.</p>

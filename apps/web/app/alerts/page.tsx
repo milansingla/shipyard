@@ -30,15 +30,15 @@ export default function AlertsPage() {
   const managed = (organizations.data ?? []).filter((org) => can(org.role, "ADMIN"));
 
   return (
-    <div className="pt-12">
-      <h1 className="font-display text-5xl font-bold uppercase">Alerts</h1>
+    <div className="pt-2">
+      <h1 className="page-title">Alerts</h1>
       <p className="mt-3 text-ink-soft">
         Failed deploys, apps that stopped, CPU or memory near their limit, and workers in trouble. Each problem is one alert; it
         resolves itself when the problem clears.
       </p>
 
       <div className="mt-8 flex items-center justify-between gap-4">
-        <h2 className="font-display text-2xl font-bold uppercase tracking-wide">{showResolved ? "All alerts" : "Open"}</h2>
+        <h2 className="section-title">{showResolved ? "All alerts" : "Open"}</h2>
         <button
           type="button"
           onClick={() => setShowResolved(!showResolved)}
@@ -54,11 +54,11 @@ export default function AlertsPage() {
       )}
       {alerts.data?.length === 0 && <p className="mt-4 text-ink-soft">{showResolved ? "No alerts yet." : "Nothing is wrong right now."}</p>}
       {alerts.data && alerts.data.length > 0 && (
-        <ul className="mt-4 divide-y divide-rivet border-y border-rivet text-sm">
+        <ul className="panel mt-4 divide-y divide-rivet text-sm">
           {alerts.data.map((alert) => (
             <li key={alert.id} className="grid gap-x-6 gap-y-1 py-3 sm:grid-cols-[8rem_minmax(0,1fr)_9rem]">
               <span
-                className={`self-start justify-self-start rounded-sm px-1.5 py-0.5 text-xs font-semibold uppercase tracking-wider ${
+                className={`self-start justify-self-start rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wider ${
                   alert.status === "RESOLVED" ? "bg-primer text-ink-soft" : alert.severity === "CRITICAL" ? "bg-oxide text-plate" : "bg-oxide-wash text-oxide"
                 }`}
               >
@@ -123,8 +123,8 @@ function Channels({ organization }: { organization: Organization }) {
   };
 
   return (
-    <section className="mt-12" aria-labelledby={`channels-${organization.id}`}>
-      <h2 id={`channels-${organization.id}`} className="font-display text-2xl font-bold uppercase tracking-wide">
+    <section className="panel mt-6" aria-labelledby={`channels-${organization.id}`}>
+      <h2 id={`channels-${organization.id}`} className="section-title">
         Where {organization.personal ? "your" : `${organization.name}'s`} alerts go
       </h2>
       {channels.data?.length === 0 && !draft && <p className="mt-3 text-ink-soft">Nowhere yet: alerts only show here.</p>}

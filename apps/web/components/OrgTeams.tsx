@@ -45,8 +45,8 @@ export function OrgTeams({ organization }: { organization: Organization }) {
   };
 
   return (
-    <section className="mt-12" aria-labelledby="org-teams-heading">
-      <h2 id="org-teams-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+    <section className="panel mt-6" aria-labelledby="org-teams-heading">
+      <h2 id="org-teams-heading" className="section-title">
         Teams
       </h2>
       <p className="mt-1 text-sm text-ink-soft">Give a group of members more access to some projects than their role gives them.</p>

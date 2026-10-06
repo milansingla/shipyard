@@ -9,7 +9,7 @@ import { History } from "@/components/History";
 import { LogPanel } from "@/components/LogPanel";
 import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { DiagnosePanel } from "@/components/Assistant";
-import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
+import { Button, ErrorNote, Glow, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
@@ -49,7 +49,7 @@ export default function DeploymentPage() {
 
   if (deployment.error && !d) {
     return (
-      <div className="pt-12">
+      <div className="pt-2">
         <ErrorNote title={deployment.error.status === 404 ? "Deployment not found" : "Couldn't load this deployment"}>
           {deployment.error.status === 404 ? "It may belong to a deleted project." : deployment.error.message}
         </ErrorNote>
@@ -70,14 +70,17 @@ export default function DeploymentPage() {
   };
 
   return (
-    <div className="pt-12">
+    <div className="pt-2">
       <Link href={`/projects/${d.projectId}`} className="text-sm text-ink-soft hover:text-ink">
         ← {project.data?.name ?? "Project"}
       </Link>
 
-      <div className="mt-4 flex flex-wrap items-end justify-between gap-6 border-b-2 border-ink pb-6">
-        <div>
-          <h1 className="flex flex-wrap items-baseline gap-x-4 text-[clamp(2.5rem,7vw,4.5rem)]">
+      <div className="panel relative mt-4 overflow-hidden">
+      <Glow className="opacity-60" />
+      <div className="relative flex flex-wrap items-end justify-between gap-6">
+        <div className="min-w-0">
+          <p className="mb-3 text-xs font-semibold text-ink-soft">Deployment</p>
+          <h1 className="flex flex-wrap items-baseline gap-x-4 text-[clamp(2rem,5vw,3.5rem)]">
             <HullName>{project.data?.name ?? "…"}</HullName>
             <span className="font-mono text-xl text-ink-soft">#{shortId(d.id)}</span>
           </h1>
@@ -120,6 +123,7 @@ export default function DeploymentPage() {
           )}
         </div>
       </div>
+      </div>
 
       {actionError && (
         <div className="mt-6">
@@ -127,8 +131,10 @@ export default function DeploymentPage() {
         </div>
       )}
 
-      <div className="mt-10 grid gap-12 lg:grid-cols-[16rem_minmax(0,1fr)]">
-        <DraftScale deployment={d} />
+      <div className="mt-6 grid gap-6 lg:grid-cols-[16rem_minmax(0,1fr)]">
+        <div className="panel h-fit">
+          <DraftScale deployment={d} />
+        </div>
 
         <div className="flex min-w-0 flex-col gap-8">
           {d.status === "FAILED" && d.errorMessage && (
@@ -138,7 +144,7 @@ export default function DeploymentPage() {
             </ErrorNote>
           )}
 
-          <dl className="grid grid-cols-2 gap-x-8 gap-y-5 sm:grid-cols-3">
+          <dl className="panel grid grid-cols-2 gap-x-8 gap-y-5 sm:grid-cols-3">
             <Fact label="URL">
               {url ? (
                 <a href={url} target="_blank" rel="noreferrer" className="break-all font-mono text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">

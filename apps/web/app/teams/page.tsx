@@ -48,15 +48,15 @@ export default function TeamsPage() {
   };
 
   return (
-    <div className="pt-12">
-      <h1 className="font-display text-5xl font-bold uppercase">Organizations</h1>
+    <div className="pt-2">
+      <h1 className="page-title">Organizations</h1>
       <p className="mt-3 max-w-2xl text-ink-soft">
         An organization shares projects. Your personal projects stay yours; create an organization to work with others, then
         pick it when you create a project. Inside one, teams give groups more access to chosen projects.
       </p>
 
-      <div className="mt-8 grid gap-10 lg:grid-cols-[16rem_minmax(0,1fr)]">
-        <div>
+      <div className="mt-8 grid gap-6 lg:grid-cols-[16rem_minmax(0,1fr)]">
+        <div className="panel h-fit">
           <ul className="flex flex-col gap-1" aria-label="Your organizations">
             {teams.map((team) => (
               <li key={team.id}>
@@ -64,8 +64,8 @@ export default function TeamsPage() {
                   type="button"
                   onClick={() => setSelectedId(team.id)}
                   aria-current={team.id === selected?.id ? "true" : undefined}
-                  className={`w-full border-l-2 px-3 py-2 text-left text-sm ${
-                    team.id === selected?.id ? "border-ink font-semibold" : "border-transparent text-ink-soft hover:text-ink"
+                  className={`w-full rounded-xl px-3 py-2 text-left text-sm transition-colors ${
+                    team.id === selected?.id ? "bg-white/[0.1] font-semibold" : "text-ink-soft hover:bg-white/[0.05] hover:text-ink"
                   }`}
                 >
                   {team.name}
@@ -134,8 +134,8 @@ function Members({ team, onChanged }: { team: Organization; onChanged: () => voi
   }
 
   return (
-    <section aria-labelledby="members-heading">
-      <h2 id="members-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+    <section aria-labelledby="members-heading" className="panel">
+      <h2 id="members-heading" className="section-title">
         {team.name}
       </h2>
       <ul className="mt-4 divide-y divide-rivet border-y border-rivet text-sm">

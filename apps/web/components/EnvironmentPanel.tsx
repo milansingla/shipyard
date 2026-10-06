@@ -112,9 +112,9 @@ export function EnvironmentPanel({
   const list = variables.data ?? [];
 
   return (
-    <section className="mt-12" aria-labelledby="environment-heading">
+    <section className="panel mt-6" aria-labelledby="environment-heading">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h2 id="environment-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+        <h2 id="environment-heading" className="section-title">
           Environment
         </h2>
         <p className="text-sm text-ink-soft">Changes apply on the next deploy.</p>

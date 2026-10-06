@@ -90,9 +90,9 @@ export function MetricsPanel({ projectId }: { projectId: string }) {
   const metrics = useApi<ProjectMetrics>(`/projects/${projectId}/metrics`, { pollMs: () => 30_000 });
   const history = metrics.data?.deployments;
   return (
-    <section className="mt-12" aria-labelledby="metrics-heading">
+    <section className="panel mt-6" aria-labelledby="metrics-heading">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h2 id="metrics-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+        <h2 id="metrics-heading" className="section-title">
           Metrics
         </h2>
         <p className="text-sm text-ink-soft">Production, refreshed every 30 seconds.</p>

@@ -85,7 +85,7 @@ function Quotes({ items }: { items: ReactNode[] }) {
   return (
     <ul className="space-y-1">
       {items.map((item, index) => (
-        <li key={index} className="overflow-x-auto bg-ink px-3 py-1.5 font-mono text-xs text-plate">
+        <li key={index} className="overflow-x-auto rounded-xl border border-white/[0.06] bg-console px-3 py-1.5 font-mono text-xs text-ink/90">
           {item}
         </li>
       ))}
@@ -146,8 +146,8 @@ export function RepositoryAdvisor({ projectId, canSuggestDockerfile }: { project
   const dockerfile = useAssistant<DockerfileSuggestion>();
   const s = analysis.result?.suggestion;
   return (
-    <section className="mt-12" aria-labelledby="assistant-heading">
-      <h2 id="assistant-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+    <section className="panel mt-6" aria-labelledby="assistant-heading">
+      <h2 id="assistant-heading" className="section-title">
         Assistant
       </h2>
       <p className="mt-2 text-sm text-ink-soft">
@@ -212,7 +212,7 @@ export function RepositoryAdvisor({ projectId, canSuggestDockerfile }: { project
               Warning: {w}
             </p>
           ))}
-          <pre className="max-h-96 overflow-auto bg-ink p-3 font-mono text-xs text-plate">{dockerfile.result.dockerfile}</pre>
+          <pre className="max-h-96 overflow-auto rounded-2xl border border-white/[0.06] bg-console p-4 font-mono text-xs text-ink/90">{dockerfile.result.dockerfile}</pre>
           <p>{dockerfile.result.explanation}</p>
           <p className="text-xs text-ink-soft">{dockerfile.result.note}</p>
         </AssistantBox>

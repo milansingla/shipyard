@@ -15,18 +15,18 @@ export default function NewProjectPage() {
   const [repo, setRepo] = useState<GitHubRepository | null>(null);
 
   return (
-    <div className="pt-12">
+    <div className="pt-2">
       <Link href="/" className="text-sm text-ink-soft hover:text-ink">
         ← Projects
       </Link>
-      <h1 className="mt-4 font-display text-5xl font-bold uppercase tracking-wide">New project</h1>
+      <h1 className="mt-4 page-title">New project</h1>
 
-      <div className="mt-10 grid gap-12 lg:grid-cols-[minmax(0,1fr)_24rem]">
+      <div className="mt-6 grid gap-6 lg:grid-cols-[minmax(0,1fr)_24rem]">
         <RepositoryPicker selected={repo} onSelect={setRepo} />
         {repo ? (
           <CreateForm key={repo.fullName} repo={repo} />
         ) : (
-          <p className="text-ink-soft lg:pt-9">Choose a repository to deploy.</p>
+          <p className="panel h-fit text-ink-soft">Choose a repository to deploy.</p>
         )}
       </div>
     </div>
@@ -70,7 +70,7 @@ function RepositoryPicker({
   const hasMore = pages.at(-1)?.hasNextPage ?? false;
 
   return (
-    <section aria-labelledby="repo-heading">
+    <section aria-labelledby="repo-heading" className="panel">
       <div className="flex items-baseline justify-between gap-4">
         <h2 id="repo-heading">
           <Label>Repository</Label>
@@ -81,7 +81,7 @@ function RepositoryPicker({
           onChange={(event) => setFilter(event.target.value)}
           placeholder="Filter repositories"
           aria-label="Filter repositories"
-          className="h-9 w-56 border-b border-rivet bg-transparent px-1 text-sm outline-none focus:border-ink"
+          className="h-9 w-56 min-w-0 border border-rivet bg-white/[0.04] px-3 text-sm outline-none focus:border-white/30"
         />
       </div>
 
@@ -91,7 +91,7 @@ function RepositoryPicker({
         </div>
       )}
 
-      <ul className="mt-3 divide-y divide-rivet border-y border-rivet">
+      <ul className="mt-4 flex flex-col gap-1">
         {visible.map((repo) => {
           const isSelected = selected?.fullName === repo.fullName;
           return (
@@ -101,12 +101,12 @@ function RepositoryPicker({
                 disabled={!repo.deployable}
                 aria-pressed={isSelected}
                 onClick={() => onSelect(repo)}
-                className={`flex w-full items-center justify-between gap-4 px-3 py-3 text-left transition-colors disabled:cursor-not-allowed ${
-                  isSelected ? "bg-ink text-plate" : "hover:bg-plate disabled:text-ink-soft disabled:hover:bg-transparent"
+                className={`flex w-full items-center justify-between gap-4 rounded-xl px-3 py-3 text-left transition-colors disabled:cursor-not-allowed ${
+                  isSelected ? "bg-white/[0.12] text-ink" : "hover:bg-white/[0.05] disabled:text-ink-soft disabled:hover:bg-transparent"
                 }`}
               >
                 <Mono className="truncate">{repo.fullName}</Mono>
-                <span className={`shrink-0 text-xs ${isSelected ? "text-plate/70" : "text-ink-soft"}`}>
+                <span className={`shrink-0 text-xs ${isSelected ? "text-ink" : "text-ink-soft"}`}>
                   {repo.deployable ? `updated ${relativeTime(repo.updatedAt)}` : "Private: not supported yet"}
                 </span>
               </button>
@@ -175,7 +175,7 @@ function CreateForm({ repo }: { repo: GitHubRepository }) {
         event.preventDefault();
         void createAndDeploy();
       }}
-      className="flex flex-col gap-6 lg:sticky lg:top-8 lg:self-start"
+      className="panel flex flex-col gap-6 lg:sticky lg:top-8 lg:self-start"
     >
       <div>
         <Label>Deploying</Label>

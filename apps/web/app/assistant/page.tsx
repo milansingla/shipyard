@@ -65,14 +65,14 @@ export default function AssistantPage() {
   };
 
   return (
-    <div className="pt-12">
-      <h1 className="font-display text-5xl font-bold uppercase">Assistant</h1>
+    <div className="pt-2">
+      <h1 className="page-title">Assistant</h1>
       <p className="mt-3 max-w-2xl text-ink-soft">
         Ask about your projects: why a deploy failed, what is unhealthy, what changed. It reads only what you can see, and never changes
         anything itself; if it suggests an action, you decide whether to run it.
       </p>
 
-      <form onSubmit={ask} className="mt-8 flex flex-col gap-3">
+      <form onSubmit={ask} className="panel mt-6 flex flex-col gap-3">
         <label className="flex flex-col gap-2">
           <Label>Question</Label>
           <textarea
@@ -99,7 +99,7 @@ export default function AssistantPage() {
 
       <ol className="mt-10 space-y-8">
         {history.map((exchange, index) => (
-          <li key={history.length - index} className="border-t border-rivet pt-6">
+          <li key={history.length - index} className="panel">
             <p className="font-semibold">{exchange.question}</p>
             <p className="mt-3 whitespace-pre-wrap text-sm">{exchange.answer}</p>
             {exchange.proposals.length > 0 && (

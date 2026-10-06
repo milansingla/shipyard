@@ -146,9 +146,9 @@ export function ServicesPanel({
   const list = services.data ?? [];
 
   return (
-    <section className="mt-12" aria-labelledby="services-heading">
+    <section className="panel mt-6" aria-labelledby="services-heading">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h2 id="services-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+        <h2 id="services-heading" className="section-title">
           Services
         </h2>
         <p className="text-sm text-ink-soft">Services reach each other by name, like http://api:4000.</p>
@@ -161,7 +161,7 @@ export function ServicesPanel({
             <li key={service.id} className="grid gap-3 py-4 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_auto] sm:items-center">
               <div className="min-w-0">
                 <span className="font-semibold">{service.name}</span>
-                <span className="ml-2 rounded-sm border border-rivet px-1.5 py-0.5 text-xs text-ink-soft">
+                <span className="ml-2 rounded-full border border-rivet px-2 py-0.5 text-xs text-ink-soft">
                   {service.type === "POSTGRES"
                     ? service.image?.replace(/^postgres:(\d+).*/, "PostgreSQL $1")
                     : service.type === "WORKER"
@@ -172,7 +172,7 @@ export function ServicesPanel({
                 </span>
                 {service.managedBy === "CONFIG_FILE" && (
                   <span
-                    className="ml-1 rounded-sm border border-rivet px-1.5 py-0.5 text-xs text-ink-soft"
+                    className="ml-1 rounded-full border border-rivet px-2 py-0.5 text-xs text-ink-soft"
                     title={
                       service.overrides.length
                         ? `Changed here, so the file no longer sets: ${service.overrides.join(", ")}`
@@ -457,7 +457,7 @@ export function ServicesPanel({
       )}
 
       {notice && (
-        <p role="status" className="mt-4 border-l-4 border-ink bg-primer px-4 py-3 text-sm">
+        <p role="status" className="mt-4 rounded-2xl border border-rivet bg-primer/70 px-4 py-3 text-sm">
           {notice}
         </p>
       )}

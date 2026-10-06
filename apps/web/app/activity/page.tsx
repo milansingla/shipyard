@@ -33,8 +33,8 @@ export default function ActivityPage() {
   const log = useApi<AuditEntry[]>(`/audit-logs?${query.toString()}`);
 
   return (
-    <div className="pt-12">
-      <h1 className="font-display text-5xl font-bold uppercase">Activity</h1>
+    <div className="pt-2">
+      <h1 className="page-title">Activity</h1>
       <p className="mt-3 text-ink-soft">Everything that changed on your projects and account, newest first.</p>
 
       <div className="mt-6 flex flex-wrap items-end gap-3" role="search">
@@ -71,7 +71,7 @@ export default function ActivityPage() {
       {log.data?.length === 0 && <p className="mt-8 text-ink-soft">Nothing yet.</p>}
 
       {log.data && log.data.length > 0 && (
-        <ol className="mt-8 divide-y divide-rivet border-y border-rivet text-sm">
+        <ol className="panel mt-6 divide-y divide-rivet text-sm">
           {log.data.map((entry) => {
             const deploymentId = (entry.metadata.deploymentId ?? entry.metadata.toDeploymentId) as string | undefined;
             return (

@@ -12,7 +12,7 @@ import { MetricsPanel } from "@/components/MetricsPanel";
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
 import { ServicesPanel, confirmDeletion } from "@/components/ServicesPanel";
 import { ProjectSettings } from "@/components/ProjectSettings";
-import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
+import { Button, ErrorNote, Glow, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
@@ -69,7 +69,7 @@ export default function ProjectPage() {
 
   if (project.error) {
     return (
-      <div className="pt-12">
+      <div className="pt-2">
         <ErrorNote title={project.error.status === 404 ? "Project not found" : "Couldn't load this project"}>
           {project.error.status === 404 ? "It may have been deleted." : project.error.message}
         </ErrorNote>
@@ -85,14 +85,17 @@ export default function ProjectPage() {
   const runningUrl = safeHttpUrl(running?.deploymentUrl ?? null);
 
   return (
-    <div className="pt-12">
+    <div className="pt-2">
       <Link href="/" className="text-sm text-ink-soft hover:text-ink">
         ← Projects
       </Link>
 
-      <div className="mt-4 flex flex-wrap items-end justify-between gap-6 border-b-2 border-ink pb-6">
+      <div className="panel relative mt-4 overflow-hidden">
+      <Glow className="opacity-70" />
+      <div className="relative flex flex-wrap items-end justify-between gap-6">
         <div className="min-w-0">
-          <h1 className="text-[clamp(2.75rem,8vw,5.5rem)]">
+          <p className="mb-3 text-xs font-semibold text-ink-soft">Project</p>
+          <h1 className="text-[clamp(2rem,5.5vw,3.75rem)]">
             <HullName>{p.name}</HullName>
           </h1>
           <p className="mt-3 text-ink-soft">
@@ -112,7 +115,7 @@ export default function ProjectPage() {
             )}
           </p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3">
           {can(p.role, "ADMIN") && (
             <Button variant="danger" busy={busy === "delete"} disabled={busy !== null} onClick={remove}>
               Delete project
@@ -126,6 +129,18 @@ export default function ProjectPage() {
         </div>
       </div>
 
+      <div className="relative mt-6 flex w-fit max-w-full flex-wrap items-center gap-3 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm backdrop-blur-md">
+        <Label>Live at</Label>
+        {runningUrl ? (
+          <a href={runningUrl} target="_blank" rel="noreferrer" className="break-all font-mono text-sea underline decoration-sea/40 underline-offset-4 hover:decoration-sea">
+            {runningUrl}
+          </a>
+        ) : (
+          <span className="text-ink-soft">Nothing running</span>
+        )}
+      </div>
+      </div>
+
       {actionError && (
         <div className="mt-6">
           <ErrorNote title={busy === "delete" ? "Couldn't delete the project" : "Couldn't start a deployment"}>
@@ -133,17 +148,6 @@ export default function ProjectPage() {
           </ErrorNote>
         </div>
       )}
-
-      <div className="mt-6 flex items-center gap-3 text-sm">
-        <Label>Live at</Label>
-        {runningUrl ? (
-          <a href={runningUrl} target="_blank" rel="noreferrer" className="font-mono underline decoration-rivet underline-offset-4 hover:decoration-ink">
-            {runningUrl}
-          </a>
-        ) : (
-          <span className="text-ink-soft">Nothing running</span>
-        )}
-      </div>
 
       <PushDeploySetup branch={p.branch} />
 
@@ -182,7 +186,8 @@ export default function ProjectPage() {
 
       <ProjectSettings project={p} canEdit={can(p.role, "ADMIN")} onSaved={() => void project.reload()} />
 
-      <h2 className="mt-12 font-display text-2xl font-bold uppercase tracking-wide">Deployments</h2>
+      <section className="panel mt-6" aria-labelledby="deployments-heading">
+      <h2 id="deployments-heading" className="section-title">Deployments</h2>
       {history.data?.length === 0 && <p className="mt-4 text-ink-soft">No deployments yet. Deploy the latest commit to start.</p>}
       {history.data && history.data.length > 0 && (
         <div className="mt-4 overflow-x-auto">
@@ -207,12 +212,12 @@ export default function ProjectPage() {
                       {shortId(d.id)}
                     </Link>
                     {d.environmentId && (
-                      <span className="ml-2 rounded-sm bg-sea-wash px-1.5 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-sea">
+                      <span className="ml-2 rounded-full bg-sea-wash px-2 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-sea">
                         {environments.data?.find((environment) => environment.id === d.environmentId)?.name ?? "env"}
                       </span>
                     )}
                     {d.trigger === "PUSH" && (
-                      <span className="ml-2 rounded-sm border border-rivet px-1.5 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-ink-soft">
+                      <span className="ml-2 rounded-full border border-rivet px-2 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-ink-soft">
                         push
                       </span>
                     )}
@@ -229,6 +234,7 @@ export default function ProjectPage() {
           </table>
         </div>
       )}
+      </section>
     </div>
   );
 }
@@ -241,7 +247,7 @@ function PushDeploySetup({ branch }: { branch: string }) {
   const payloadUrl = `${origin}/api/webhooks/github`;
 
   return (
-    <details className="mt-8 border-y border-rivet py-4 [&_summary::-webkit-details-marker]:hidden">
+    <details className="panel mt-6 [&_summary::-webkit-details-marker]:hidden">
       <summary className="flex cursor-pointer items-center justify-between gap-4 text-sm">
         <span>
           <span className="font-semibold">Deploy on push</span>

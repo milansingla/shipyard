@@ -34,11 +34,11 @@ export function History({ deploymentId, status }: { deploymentId: string; status
   if (list.length === 0) return null;
 
   return (
-    <section aria-labelledby="history-heading">
-      <h2 id="history-heading" className="font-display text-xl font-bold uppercase tracking-wide">
+    <section aria-labelledby="history-heading" className="panel">
+      <h2 id="history-heading" className="section-title">
         History
       </h2>
-      <ol className="mt-3 divide-y divide-rivet border-y border-rivet text-sm">
+      <ol className="mt-3 divide-y divide-rivet border-t border-rivet text-sm">
         {list.map((event, index) => {
           // How long it stayed in this status: until the next status change (other events don't end it).
           const next = list.slice(index + 1).find((later) => later.type === "STATUS_CHANGED");

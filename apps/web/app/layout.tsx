@@ -1,14 +1,15 @@
 import type { Metadata } from "next";
-import { Big_Shoulders, Big_Shoulders_Stencil, IBM_Plex_Mono, Public_Sans } from "next/font/google";
+import { Archivo, Big_Shoulders_Stencil, IBM_Plex_Mono, Manrope } from "next/font/google";
 import type { ReactNode } from "react";
 
 import { SessionGate } from "@/components/SessionGate";
 
 import "./globals.css";
 
-const display = Big_Shoulders({ subsets: ["latin"], variable: "--font-big-shoulders", axes: ["opsz"], adjustFontFallback: false });
+// Archivo's width axis gives the wide geometric headings (font-stretch: 125%).
+const display = Archivo({ subsets: ["latin"], variable: "--font-archivo", axes: ["wdth"] });
 const stencil = Big_Shoulders_Stencil({ subsets: ["latin"], variable: "--font-big-shoulders-stencil", axes: ["opsz"], adjustFontFallback: false });
-const sans = Public_Sans({ subsets: ["latin"], variable: "--font-public-sans" });
+const sans = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
 const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-plex-mono" });
 
 export const metadata: Metadata = {

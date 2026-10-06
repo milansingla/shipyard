@@ -58,8 +58,8 @@ export default function AccountPage() {
   };
 
   return (
-    <div className="pt-12">
-      <h1 className="font-display text-5xl font-bold uppercase">API keys</h1>
+    <div className="pt-2">
+      <h1 className="page-title">API keys</h1>
       <p className="mt-3 max-w-2xl text-ink-soft">
         For the Shipyard CLI and your scripts: <Mono>shipyard login</Mono>, or send{" "}
         <Mono>Authorization: Bearer &lt;key&gt;</Mono>. A key can do everything you can, so keep it secret.
@@ -80,7 +80,7 @@ export default function AccountPage() {
         </div>
       )}
 
-      <form onSubmit={create} className="mt-8 flex flex-wrap items-end gap-3 border-t border-rivet pt-6">
+      <form onSubmit={create} className="panel mt-6 flex flex-wrap items-end gap-3">
         <label className="flex min-w-0 flex-1 flex-col gap-2">
           <Label>Name</Label>
           <input
@@ -126,7 +126,7 @@ export default function AccountPage() {
       )}
 
       {keys.data && keys.data.length > 0 && (
-        <div className="relative mt-8 overflow-x-auto">
+        <div className="panel relative mt-4 overflow-x-auto">
           <table className="w-full min-w-[36rem] text-left text-sm">
             <thead className="border-b border-rivet">
               <tr>

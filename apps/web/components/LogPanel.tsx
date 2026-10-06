@@ -77,8 +77,8 @@ export function LogPanel({ deploymentId, status }: { deploymentId: string; statu
   }, [type]);
 
   return (
-    <section aria-label="Logs" className="overflow-hidden rounded-sm bg-ink text-plate">
-      <div role="tablist" className="flex items-center gap-1 border-b border-white/10 px-2">
+    <section aria-label="Logs" className="overflow-hidden rounded-3xl border border-white/[0.07] bg-console text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]">
+      <div role="tablist" className="flex items-center gap-1 border-b border-white/[0.07] px-3">
         {TABS.map((tab) => (
           <button
             key={tab.type}
@@ -87,14 +87,14 @@ export function LogPanel({ deploymentId, status }: { deploymentId: string; statu
             aria-selected={type === tab.type}
             onClick={() => setType(tab.type)}
             className={`-mb-px border-b-2 px-3 py-3 text-sm font-semibold transition-colors ${
-              type === tab.type ? "border-signal text-plate" : "border-transparent text-plate/60 hover:text-plate"
+              type === tab.type ? "border-signal text-ink" : "border-transparent text-ink-soft hover:text-ink"
             }`}
           >
             {tab.label}
           </button>
         ))}
         {live && (
-          <span className="ml-auto flex items-center gap-2 pr-2 text-xs text-plate/70">
+          <span className="ml-auto flex items-center gap-2 pr-2 text-xs text-ink-soft">
             <span aria-hidden className="signal-pulse size-2 rounded-full bg-signal" /> Live
           </span>
         )}
@@ -107,7 +107,7 @@ export function LogPanel({ deploymentId, status }: { deploymentId: string; statu
           const el = event.currentTarget;
           stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         }}
-        className="h-[28rem] overflow-auto whitespace-pre-wrap break-words p-4 font-mono text-[0.78rem] leading-relaxed"
+        className="h-[28rem] overflow-auto whitespace-pre-wrap break-words p-5 font-mono text-[0.78rem] leading-relaxed text-ink/90"
       >
         {error
           ? error.message

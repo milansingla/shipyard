@@ -68,9 +68,9 @@ export function EnvironmentsPanel({
   const hasDevelopment = active.some((environment) => environment.type === "DEVELOPMENT");
 
   return (
-    <section className="mt-12" aria-labelledby="environments-heading">
+    <section className="panel mt-6" aria-labelledby="environments-heading">
       <div className="flex flex-wrap items-end justify-between gap-2">
-        <h2 id="environments-heading" className="font-display text-2xl font-bold uppercase tracking-wide">
+        <h2 id="environments-heading" className="section-title">
           Environments
         </h2>
         <p className="text-sm text-ink-soft">
