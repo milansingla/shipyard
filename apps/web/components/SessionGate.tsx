@@ -161,7 +161,12 @@ function isActive(href: string, pathname: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-/** The icon rail: down the left on large screens, across the top on small ones. */
+/**
+ * The icon rail: down the left on large screens, across the top on small ones.
+ * On large screens it sticks exactly where it starts (page padding + frame
+ * border + frame padding = 2rem + 1px) and is that much shorter at the
+ * bottom, so it never slides while the page scrolls.
+ */
 function Sidebar() {
   const pathname = usePathname();
   const item = ({ href, label, icon: ItemIcon }: (typeof NAV)[number] | (typeof NAV_BOTTOM)[number]) => {
@@ -194,7 +199,7 @@ function Sidebar() {
   return (
     <nav
       aria-label="Main"
-      className="sticky top-0 z-10 flex items-center gap-2 border-b border-white/[0.08] bg-black/60 px-3 py-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-2xl backdrop-saturate-150 lg:top-4 lg:h-[calc(100dvh-4rem)] lg:w-[4.5rem] lg:flex-col lg:rounded-[1.5rem] lg:border lg:border-white/[0.09] lg:bg-white/[0.05] lg:px-0 lg:py-5 lg:shadow-[inset_0_1px_0_rgb(255_255_255/0.12),0_24px_48px_-24px_rgb(0_0_0/0.6)]"
+      className="sticky top-0 z-10 flex items-center gap-2 border-b border-white/[0.08] bg-black/60 px-3 py-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-2xl backdrop-saturate-150 lg:top-[calc(2rem+1px)] lg:h-[calc(100dvh-4rem-2px)] lg:w-[4.5rem] lg:flex-col lg:rounded-[1.5rem] lg:border lg:border-white/[0.09] lg:bg-white/[0.05] lg:px-0 lg:py-5 lg:shadow-[inset_0_1px_0_rgb(255_255_255/0.12),0_24px_48px_-24px_rgb(0_0_0/0.6)]"
     >
       <Link href="/" aria-label="Shipyard: all projects" className="shrink-0 hover:scale-[1.04] active:scale-95 lg:mb-6">
         <LogoTile className="size-10 rounded-xl lg:size-12 lg:rounded-2xl" />
