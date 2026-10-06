@@ -78,7 +78,8 @@ const BUTTON: Record<ButtonVariant, string> = {
     "bg-gradient-to-b from-white to-[#e4e4e7] text-black shadow-[inset_0_1px_0_rgb(255_255_255),0_8px_22px_-10px_rgb(255_255_255/0.45)] hover:to-white hover:shadow-[inset_0_1px_0_rgb(255_255_255),0_10px_28px_-10px_rgb(255_255_255/0.6)]",
   secondary:
     "border border-white/[0.12] bg-white/[0.06] text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.08)] hover:border-white/25 hover:bg-white/[0.1]",
-  danger: "border border-oxide/25 bg-oxide-wash text-oxide hover:border-oxide/60 hover:bg-oxide/15",
+  danger:
+    "border border-white/[0.14] bg-white/[0.06] text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.08)] hover:border-white/30 hover:bg-white/[0.12]",
 };
 
 export function buttonClass(variant: ButtonVariant = "primary"): string {
@@ -101,9 +102,12 @@ export function Button({
 /** An error the user can act on: what happened, in the API's own words. */
 export function ErrorNote({ title, children }: { title: string; children?: ReactNode }) {
   return (
-    <div role="alert" className="rounded-2xl border border-oxide/25 bg-oxide-wash px-4 py-3 text-sm">
-      <p className="font-semibold text-oxide">{title}</p>
-      {children && <div className="mt-1 text-ink">{children}</div>}
+    <div role="alert" className="rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm">
+      <p className="flex items-center gap-2 font-semibold text-white">
+        <span aria-hidden className="size-2 shrink-0 rounded-full bg-oxide" />
+        {title}
+      </p>
+      {children && <div className="mt-1 text-ink/80">{children}</div>}
     </div>
   );
 }

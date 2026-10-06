@@ -179,7 +179,7 @@ function Members({ team, onChanged }: { team: Organization; onChanged: () => voi
                       void act(() => api(`/organizations/${team.id}/members/${member.userId}`, { method: "DELETE" }));
                     }
                   }}
-                  className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                  className="text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                 >
                   Remove<span className="sr-only"> {member.login}</span>
                 </button>

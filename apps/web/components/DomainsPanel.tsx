@@ -70,7 +70,7 @@ export function DomainsPanel({ projectId, canEdit }: { projectId: string; canEdi
                     type="button"
                     onClick={() => remove(domain.hostname)}
                     disabled={busy}
-                    className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                    className="text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                   >
                     Remove<span className="sr-only"> {domain.hostname}</span>
                   </button>

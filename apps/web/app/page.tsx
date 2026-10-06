@@ -229,7 +229,7 @@ function LatestCard({ project }: { project: ProjectWithLatestDeployment | undefi
 const TONE_TILE: Record<Tone, string> = {
   live: "from-[#5eead4] to-[#059669]",
   working: "from-[#fcd34d] to-[#d97706]",
-  failed: "from-[#fca5a5] to-[#dc2626]",
+  failed: "from-[#ef4444] to-[#991b1b]",
   idle: "from-[#a1a1aa] to-[#52525b]",
 };
 

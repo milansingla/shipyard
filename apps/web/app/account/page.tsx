@@ -153,7 +153,7 @@ export default function AccountPage() {
                       <button
                         type="button"
                         onClick={() => revoke(key)}
-                        className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                        className="text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                       >
                         Revoke<span className="sr-only"> {key.name}</span>
                       </button>

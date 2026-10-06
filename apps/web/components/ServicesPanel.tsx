@@ -264,7 +264,7 @@ export function ServicesPanel({
                         void act(`delete:${service.id}`, () => api(`/services/${service.id}${query}`, { method: "DELETE" }));
                       }
                     }}
-                    className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                    className="text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                   >
                     Delete<span className="sr-only"> {service.name}</span>
                   </button>
@@ -285,7 +285,7 @@ export function ServicesPanel({
                               type="button"
                               disabled={busy !== null}
                               onClick={() => detach(service, volume)}
-                              className="text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                              className="text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                             >
                               Detach<span className="sr-only"> {volume.name}</span>
                             </button>

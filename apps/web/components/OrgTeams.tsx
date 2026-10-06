@@ -61,7 +61,7 @@ export function OrgTeams({ organization }: { organization: Organization }) {
                   type="button"
                   disabled={busy}
                   onClick={() => window.confirm(`Delete the team ${team.name}? Its members keep their organization role.`) && void act(() => api(`/teams/${team.id}`, { method: "DELETE" }))}
-                  className="text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                  className="text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                 >
                   Delete<span className="sr-only"> {team.name}</span>
                 </button>

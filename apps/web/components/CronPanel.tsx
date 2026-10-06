@@ -179,7 +179,7 @@ export function CronPanel({
                             void act(`delete:${job.id}`, () => api(`/cron-jobs/${job.id}`, { method: "DELETE" }));
                           }
                         }}
-                        className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                        className="text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                       >
                         Delete<span className="sr-only"> {job.name}</span>
                       </button>

@@ -151,7 +151,7 @@ function Channels({ organization }: { organization: Organization }) {
                       void act(`delete:${channel.id}`, () => api(`/notification-channels/${channel.id}`, { method: "DELETE" }));
                     }
                   }}
-                  className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                  className="text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                 >
                   Remove<span className="sr-only"> {channel.name}</span>
                 </button>

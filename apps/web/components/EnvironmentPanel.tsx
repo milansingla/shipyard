@@ -190,7 +190,7 @@ export function EnvironmentPanel({
                           type="button"
                           onClick={() => remove(variable)}
                           disabled={busy}
-                          className="ml-4 text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                          className="ml-4 text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                         >
                           Delete<span className="sr-only"> {variable.key}</span>
                         </button>

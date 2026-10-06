@@ -19,8 +19,8 @@
   --color-sea: #34d399;
   --color-sea-wash: rgb(52 211 153 / 0.12);
   --color-signal: #fbbf24;
-  --color-oxide: #f87171;
-  --color-oxide-wash: rgb(248 113 113 / 0.12);
+  --color-oxide: #ef4444;
+  --color-oxide-wash: rgb(255 255 255 / 0.05);
   --color-console: rgb(0 0 0 / 0.6);
 
   --font-display: var(--font-geist), system-ui, sans-serif;

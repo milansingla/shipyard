@@ -146,7 +146,7 @@ export function EnvironmentsPanel({
                           void act(`close:${environment.id}`, () => api(`/environments/${environment.id}/close`, { method: "POST" }));
                         }
                       }}
-                      className="text-sm text-oxide underline decoration-rivet underline-offset-4 hover:decoration-oxide"
+                      className="text-sm text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                     >
                       Close<span className="sr-only"> {environment.name}</span>
                     </button>

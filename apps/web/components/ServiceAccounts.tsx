@@ -78,7 +78,7 @@ export function ServiceAccounts({ organization }: { organization: Organization }
                   type="button"
                   disabled={busy}
                   onClick={() => window.confirm(`Delete ${account.login}? Its keys stop working at once.`) && void act(() => api(`/service-accounts/${account.id}`, { method: "DELETE" }))}
-                  className="text-oxide underline decoration-rivet underline-offset-4"
+                  className="text-ink underline decoration-rivet underline-offset-4 hover:decoration-ink"
                 >
                   Delete<span className="sr-only"> {account.login}</span>
                 </button>
