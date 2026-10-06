@@ -30,6 +30,7 @@ await services.cron.reconcileOnStartup();
 services.deployments.startQueue();
 services.metrics.start();
 services.alerts.start();
+services.cleanup.start();
 const workerLoop = setInterval(() => {
   void services.workers
     .heartbeat(builtInWorker.id, { runningJobs: services.deployments.runningJobs, diskFreePercent: diskFreePercent(config.dataDir) })
@@ -81,6 +82,7 @@ function shutdown(signal: NodeJS.Signals): void {
   services.deployments.stopQueue();
   services.metrics.stop();
   services.alerts.stop();
+  services.cleanup.stop();
   // In-flight deploys are not awaited (a build can take minutes); they are
   // marked FAILED by reconcileOnStartup() on the next start.
   server.close((error) => {

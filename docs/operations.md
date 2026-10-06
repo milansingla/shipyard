@@ -103,3 +103,21 @@ Strategy: nightly `npm run backup`, copied off site, kept 14 days;
 database monthly (or let the integration test do it on every CI run).
 Workers are disposable except for pinned projects' volumes, which their own
 backups cover.
+
+## Cleanup
+
+Code: [`modules/cleanup/CleanupService.ts`](../apps/api/src/modules/cleanup/CleanupService.ts). Runs every hour.
+
+| Removed | When |
+| ------- | ---- |
+| Containers and image of a FAILED deployment | a day after it failed (logs and history stay) |
+| Containers and image of a STOPPED deployment | when it isn't one of the newest 3 per service and environment (those stay as rollback targets) |
+| A pull request preview | 14 days without a deploy (its pull request is probably abandoned) |
+| Clone directories in the workspace | over 2 hours old (left by a crash) |
+| Finished worker calls / deploy jobs / resolved alerts | after 7 / 30 / 90 days |
+
+Never removed automatically: a live or in-progress deployment, a kept
+rollback target, a volume (only `deleteData=true` deletes data). A
+deployment whose environment is busy (deploying, restarting) is skipped and
+retried next hour. Unused base images: `docker image prune` (Shipyard only
+removes images it built).

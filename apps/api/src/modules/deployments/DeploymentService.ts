@@ -627,6 +627,28 @@ export class DeploymentService {
     return { servers: deployment.hostPorts.map((port) => `http://${worker.address}:${port}`) };
   }
 
+  /**
+   * Removes a finished deployment's containers and image, keeping its record
+   * (history). For cleanup; refused (false) while its environment is busy or
+   * if it is live, in progress, or not finished.
+   */
+  async pruneArtifacts(deployment: Deployment): Promise<boolean> {
+    if (deployment.status !== DeploymentStatus.FAILED && deployment.status !== DeploymentStatus.STOPPED) return false;
+    const key = lockKey(deployment.projectId, deployment.environmentId);
+    try {
+      await this.lockProject(key);
+    } catch {
+      return false;
+    }
+    try {
+      await this.engineFor(deployment.workerId).destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
+      await this.deps.prisma.deployment.update({ where: { id: deployment.id }, data: { containerId: null, hostPort: null, hostPorts: [] } });
+      return true;
+    } finally {
+      this.unlockProject(key);
+    }
+  }
+
   /** Resource use of a deployment's replicas, from the worker running it. */
   async statsFor(deployment: Pick<Deployment, "workerId" | "containerId">) {
     if (!deployment.containerId) return [];

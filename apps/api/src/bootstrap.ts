@@ -28,6 +28,7 @@ import { RemoteEngine } from "./modules/workers/RemoteEngine.js";
 import { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import { MetricsService } from "./modules/metrics/MetricsService.js";
 import { AlertService } from "./modules/alerts/AlertService.js";
+import { CleanupService } from "./modules/cleanup/CleanupService.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "./services/notify/NotificationProvider.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
@@ -45,6 +46,7 @@ export interface EngineServices {
   git: GitService;
   engine: DeploymentEngine;
   router: Router;
+  workspace: WorkspaceService;
 }
 
 export interface ApiServices extends EngineServices {
@@ -63,6 +65,7 @@ export interface ApiServices extends EngineServices {
   workers: WorkerRegistry;
   workerCalls: WorkerCalls;
   metrics: MetricsService;
+  cleanup: CleanupService;
   alerts: AlertService;
   workerRouting: unknown;
   /** null when GitHub sign-in is not configured. */
@@ -88,18 +91,19 @@ export function createEngineServices(
     logger.child({ component: "docker" }),
   );
   const git = new GitService({ cloneTimeoutMs: config.gitCloneTimeoutMs }, logger.child({ component: "git" }));
+  const workspace = new WorkspaceService(config.workspaceDir);
 
   const engine = new DeploymentEngine({
     source: git,
     docker,
     healthCheck: new HealthCheckService(config.healthCheck),
-    workspace: new WorkspaceService(config.workspaceDir),
+    workspace,
     router,
     registry: createRegistry(config, docker),
     logger: logger.child({ component: "engine" }),
   });
 
-  return { docker, git, engine, router };
+  return { docker, git, engine, router, workspace };
 }
 
 /** A remote registry when SHIPYARD_REGISTRY is set; otherwise images stay in local Docker. */
@@ -255,6 +259,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
   const metrics = new MetricsService({ prisma, access, deployments, logger: logger.child({ component: "metrics" }) });
   return {
     workers,
+    cleanup: new CleanupService({ prisma, deployments, environments, workspace: engineServices.workspace, logger: logger.child({ component: "cleanup" }) }),
     metrics,
     alerts,
     workerCalls,

@@ -26,6 +26,7 @@ import { PreviewService } from "../../src/modules/environments/PreviewService.js
 import { WorkerRegistry } from "../../src/modules/workers/WorkerRegistry.js";
 import { MetricsService } from "../../src/modules/metrics/MetricsService.js";
 import { AlertService } from "../../src/modules/alerts/AlertService.js";
+import { CleanupService } from "../../src/modules/cleanup/CleanupService.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "../../src/services/notify/NotificationProvider.js";
 import { WorkerCalls } from "../../src/modules/workers/WorkerCalls.js";
 import { RemoteEngine } from "../../src/modules/workers/RemoteEngine.js";
@@ -2965,5 +2966,38 @@ describe("alerts", () => {
     await workers.heartbeat(worker.id, { runningJobs: 0, diskFreePercent: 3 });
     await alerts.evaluate();
     expect(((await call(alice, "GET", "/api/alerts?status=OPEN")).body!.data as Array<Record<string, any>>).map((a) => a.kind)).toEqual(["DISK_PRESSURE"]);
+  });
+});
+
+describe("cleanup", () => {
+  it("removes what is safe: old failed containers, rollback targets beyond 3, idle previews, old records; never what runs", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/tidy" })).body!.data.id as string;
+    const [web] = await prisma.service.findMany({ where: { projectId } });
+    const now = Date.now();
+    const at = (hoursAgo: number) => new Date(now - hoursAgo * 3_600_000);
+    const make = (status: "RUNNING" | "STOPPED" | "FAILED", hoursAgo: number) =>
+      prisma.deployment.create({
+        data: { projectId, serviceId: web!.id, branch: "main", status, containerId: `c-${randomUUID()}`, containerName: "x", imageName: "img", createdAt: at(hoursAgo), finishedAt: at(hoursAgo) },
+      });
+    const live = await make("RUNNING", 1);
+    const stopped = [];
+    for (let i = 2; i <= 6; i += 1) stopped.push(await make("STOPPED", i)); // newest first: 2h … 6h
+    const oldFailure = await make("FAILED", 30);
+    const freshFailure = await make("FAILED", 2);
+    const preview = await prisma.environment.create({ data: { projectId, type: "PREVIEW", name: "pr-9", branch: "f", pullRequest: 9, createdAt: at(24 * 20) } });
+    await prisma.workerCall.create({ data: { workerId: (await prisma.worker.create({ data: { name: "w", hostname: "w", cpus: 1, memoryMb: 512, version: "x" } })).id, method: "run", args: {}, status: "DONE", finishedAt: at(24 * 8) } });
+
+    const cleanup = new CleanupService({ prisma, deployments, environments: new ProjectEnvironments({ prisma, access: new AccessService(prisma), deployments, logger: silentLogger }), workspace: { removeStale: async () => 0 }, logger: silentLogger });
+    const report = await cleanup.run(new Date(now));
+    expect(report).toMatchObject({ failedContainers: 1, oldRollbackTargets: 2, expiredPreviews: 1, records: 1 });
+
+    expect(destroyedDeployments.sort()).toEqual([oldFailure.id, stopped[3]!.id, stopped[4]!.id].sort());
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: oldFailure.id } })).containerId).toBeNull(); // record kept
+    for (const kept of [live, freshFailure, ...stopped.slice(0, 3)]) {
+      expect((await prisma.deployment.findUniqueOrThrow({ where: { id: kept.id } })).containerId).not.toBeNull();
+    }
+    expect((await prisma.environment.findUniqueOrThrow({ where: { id: preview.id } })).status).toBe("CLOSED");
+    expect(await prisma.workerCall.count()).toBe(0);
   });
 });
