@@ -435,6 +435,20 @@ describe("deployment engine against real Docker", () => {
     }
   });
 
+  it("samples a running container's CPU, memory and restarts", async () => {
+    const record = await engine(HELLO_APP).run(job("hello-node"));
+    created.push(record);
+    try {
+      const [sample] = await engine(HELLO_APP).stats(record.containerId!);
+      expect(sample).toMatchObject({ running: true, restartCount: 0, memoryLimitMb: null });
+      expect(sample!.memoryMb).toBeGreaterThan(1);
+      expect(sample!.cpuPercent).toBeGreaterThanOrEqual(0);
+      expect(Date.parse(sample!.startedAt!)).toBeLessThanOrEqual(Date.now());
+    } finally {
+      await docker.removeContainer(record.containerId!);
+    }
+  });
+
   it("runs a one-off command to completion (a cron run): exit code, output, timeout, nothing left behind", async () => {
     const network = `shipyard-p-it${randomUUID().replace(/-/g, "").slice(0, 8)}`;
     await docker.ensureNetwork(network, {});

@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { CronPanel } from "@/components/CronPanel";
 import { DomainsPanel } from "@/components/DomainsPanel";
 import { EnvironmentsPanel } from "@/components/EnvironmentsPanel";
+import { MetricsPanel } from "@/components/MetricsPanel";
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
 import { ServicesPanel, confirmDeletion } from "@/components/ServicesPanel";
 import { ProjectSettings } from "@/components/ProjectSettings";
@@ -152,6 +153,8 @@ export default function ProjectPage() {
         canEdit={can(p.role, "ADMIN")}
         onDeployed={(deployment) => router.push(`/deployments/${deployment.id}`)}
       />
+
+      <MetricsPanel projectId={p.id} />
 
       <EnvironmentsPanel
         projectId={p.id}

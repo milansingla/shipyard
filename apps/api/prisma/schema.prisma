@@ -695,3 +695,26 @@ model WorkerCall {
   @@index([workerId, status, createdAt])
   @@map("worker_calls")
 }
+
+/// A running deployment's resource use, sampled every 30 s and kept 24 h
+/// (the dashboard's charts and the CPU/memory alerts read them).
+model MetricSample {
+  id            BigInt   @id @default(autoincrement())
+  deploymentId  String   @db.Uuid
+  projectId     String   @db.Uuid
+  serviceId     String   @db.Uuid
+  /// Sum over its replicas; 100 = one full CPU.
+  cpuPercent    Float
+  memoryMb      Float
+  /// null = no limit.
+  memoryLimitMb Float?
+  restartCount  Int
+  /// Replicas running when sampled.
+  running       Int
+  at            DateTime @default(now())
+
+  @@index([projectId, at])
+  @@index([deploymentId, at])
+  @@index([at])
+  @@map("metric_samples")
+}

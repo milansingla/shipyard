@@ -133,6 +133,23 @@ export interface OneOffResult {
 
 const ONE_OFF_OUTPUT_BYTES = 64 * 1024;
 
+export interface ContainerStats {
+  running: boolean;
+  cpuPercent: number;
+  memoryMb: number;
+  memoryLimitMb: number | null;
+  restartCount: number;
+  /** ISO time it (re)started; null when not running. */
+  startedAt: string | null;
+}
+
+/** The parts of Docker's stats response used here. */
+interface DockerStats {
+  cpu_stats: { cpu_usage: { total_usage: number; percpu_usage?: number[] }; system_cpu_usage?: number; online_cpus?: number };
+  precpu_stats: { cpu_usage?: { total_usage: number }; system_cpu_usage?: number };
+  memory_stats: { usage?: number; stats?: { inactive_file?: number; cache?: number } };
+}
+
 export interface StartedContainer {
   id: string;
   /** null for workers (nothing published). */
@@ -641,6 +658,40 @@ export class DockerService {
     } finally {
       await this.removeContainer(container.id);
     }
+  }
+
+  /**
+   * A one-off resource sample of a container: CPU (100 = one full CPU, from
+   * Docker's own previous sample), memory in use (cache excluded), its limit
+   * (null when unlimited), restarts and start time.
+   */
+  async containerStats(containerId: string): Promise<ContainerStats> {
+    const container = this.docker.getContainer(containerId);
+    let info: Docker.ContainerInspectInfo;
+    try {
+      info = await container.inspect();
+    } catch (error) {
+      if (isDockerNotFound(error)) throw new NotFoundError(`Container not found: ${containerId}`);
+      throw this.dockerError(ErrorCode.DOCKER_UNAVAILABLE, "Could not inspect container", error);
+    }
+    const running = info.State.Running && !info.State.Restarting;
+    const base = {
+      running,
+      restartCount: info.RestartCount ?? 0,
+      startedAt: running ? info.State.StartedAt : null,
+      memoryLimitMb: info.HostConfig.Memory ? info.HostConfig.Memory / 1024 / 1024 : null,
+    };
+    if (!running) return { ...base, cpuPercent: 0, memoryMb: 0 };
+    const stats = (await container.stats({ stream: false })) as unknown as DockerStats;
+    const cpuDelta = stats.cpu_stats.cpu_usage.total_usage - (stats.precpu_stats.cpu_usage?.total_usage ?? 0);
+    const systemDelta = (stats.cpu_stats.system_cpu_usage ?? 0) - (stats.precpu_stats.system_cpu_usage ?? 0);
+    const cpus = stats.cpu_stats.online_cpus ?? stats.cpu_stats.cpu_usage.percpu_usage?.length ?? 1;
+    const cache = stats.memory_stats.stats?.inactive_file ?? stats.memory_stats.stats?.cache ?? 0;
+    return {
+      ...base,
+      cpuPercent: systemDelta > 0 && cpuDelta > 0 ? (cpuDelta / systemDelta) * cpus * 100 : 0,
+      memoryMb: Math.max(0, (stats.memory_stats.usage ?? 0) - cache) / 1024 / 1024,
+    };
   }
 
   /** Ids of every container of a deployment (its replicas), in replica order. */

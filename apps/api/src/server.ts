@@ -27,6 +27,7 @@ await services.workerCalls.failOrphans();
 await services.deployments.reconcileOnStartup();
 await services.cron.reconcileOnStartup();
 services.deployments.startQueue();
+services.metrics.start();
 const workerLoop = setInterval(() => {
   void services.workers
     .heartbeat(builtInWorker.id, { runningJobs: services.deployments.runningJobs })
@@ -53,6 +54,7 @@ const app = createApp({
   cron: services.cron,
   workers: services.workers,
   workerCalls: services.workerCalls,
+  metrics: services.metrics,
   workerRouting: services.workerRouting,
   environments: services.environments,
   auth: services.auth,
@@ -74,6 +76,7 @@ function shutdown(signal: NodeJS.Signals): void {
   services.cron.stop();
   clearInterval(workerLoop);
   services.deployments.stopQueue();
+  services.metrics.stop();
   // In-flight deploys are not awaited (a build can take minutes); they are
   // marked FAILED by reconcileOnStartup() on the next start.
   server.close((error) => {

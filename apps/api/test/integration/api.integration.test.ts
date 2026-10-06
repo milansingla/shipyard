@@ -24,6 +24,7 @@ import { type CronRunner, CronService } from "../../src/modules/cron/CronService
 import { ProjectEnvironments } from "../../src/modules/environments/ProjectEnvironments.js";
 import { PreviewService } from "../../src/modules/environments/PreviewService.js";
 import { WorkerRegistry } from "../../src/modules/workers/WorkerRegistry.js";
+import { MetricsService } from "../../src/modules/metrics/MetricsService.js";
 import { WorkerCalls } from "../../src/modules/workers/WorkerCalls.js";
 import { RemoteEngine } from "../../src/modules/workers/RemoteEngine.js";
 import { runWorkerAgent } from "../../src/worker/agent.js";
@@ -241,6 +242,10 @@ const fakeEngine: EngineLike = {
   },
   async ensureRoutable() {},
   async removeNetwork() {},
+  async stats(containerId) {
+    if (removedContainers.has(containerId)) throw new NotFoundError(`Container not found: ${containerId}`);
+    return [{ running: true, cpuPercent: 12.5, memoryMb: 96, memoryLimitMb: 512, restartCount: 1, startedAt: new Date(Date.now() - 3_600_000).toISOString() }];
+  },
   async removeVolumes(names) {
     for (const name of names) removedVolumes.push(name);
   },
@@ -272,6 +277,7 @@ let deployments: DeploymentService;
 let environment: EnvironmentService;
 let cron: CronService;
 let workers: WorkerRegistry;
+let metrics: MetricsService;
 let workerCalls: WorkerCalls;
 /** Every route the control plane's router was asked to apply. */
 const routeTargets: RouteTarget[] = [];
@@ -383,6 +389,7 @@ beforeAll(async () => {
         },
       })),
       workerCalls: (workerCalls = new WorkerCalls({ prisma, logger: silentLogger })),
+      metrics: (metrics = new MetricsService({ prisma, access, deployments, logger: silentLogger })),
       workerRouting: { mode: "traefik", domain: "localhost", httpPort: 80, httpsPort: null },
       cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
@@ -2801,5 +2808,31 @@ describe("remote workers", () => {
       errorMessage: "WORKER_LOST: the worker stopped responding.",
     });
     void agent.stop();
+  });
+});
+
+describe("metrics", () => {
+  it("samples running deployments, keeps a day, and shows each service's numbers and deploy stats", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/metered" })).body!.data.id as string;
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+
+    expect(await metrics.sample()).toBe(1);
+    const res = await call(alice, "GET", `/api/projects/${projectId}/metrics`);
+    expect(res.status).toBe(200);
+    const [web] = res.body!.data.services as Array<Record<string, any>>;
+    expect(web).toMatchObject({ name: "web", status: "RUNNING", replicas: 1, running: 1, cpuPercent: 12.5, memoryMb: 96, memoryLimitMb: 512, restartCount: 1 });
+    expect(web!.uptimeSeconds).toBeGreaterThanOrEqual(3599);
+    expect(web!.series).toHaveLength(1);
+    expect(res.body!.data.deployments).toMatchObject({ total: 1, succeeded: 1, failed: 0, successRate: 1 });
+    expect(res.body!.data.deployments.averageDeployMs).toBeGreaterThanOrEqual(0);
+
+    expect((await call(bob, "GET", `/api/projects/${projectId}/metrics`)).status).toBe(404);
+
+    // Samples older than a day are dropped at the next sampling.
+    await metrics.sample(new Date(Date.now() + 25 * 60 * 60 * 1000));
+    expect(await prisma.metricSample.count({ where: { projectId } })).toBe(1); // just the new one
   });
 });

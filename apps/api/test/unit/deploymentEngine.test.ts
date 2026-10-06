@@ -128,6 +128,7 @@ function harness(
       return { running: true, exitCode: null, oomKilled: false, health: options.dockerHealth ?? "healthy" };
     },
     deploymentContainers: unused,
+    containerStats: unused,
     async ensureImage(name: string) {
       calls.push(`pull:${name}`);
     },

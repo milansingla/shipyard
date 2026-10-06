@@ -140,6 +140,8 @@ export async function runWorkerAgent(options: AgentOptions): Promise<void> {
         return engine.getLogs(String(args.containerReference), args.tail === undefined ? undefined : Number(args.tail));
       case "inspect":
         return engine.inspect(String(args.containerReference));
+      case "stats":
+        return engine.stats(String(args.containerReference));
       case "destroy":
         return engine.destroy(args.artifacts as Parameters<EngineApi["destroy"]>[0]);
       case "ensureRoutable":

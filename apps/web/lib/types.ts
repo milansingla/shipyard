@@ -284,3 +284,31 @@ export interface ProjectEnvironment {
   /** The newest deployment of each of its services. */
   deployments: Deployment[];
 }
+
+export interface ServiceMetrics {
+  serviceId: string;
+  name: string;
+  deploymentId: string | null;
+  status: DeploymentStatus | null;
+  replicas: number;
+  running: number;
+  cpuPercent: number | null;
+  memoryMb: number | null;
+  memoryLimitMb: number | null;
+  restartCount: number | null;
+  uptimeSeconds: number | null;
+  /** The last hour. */
+  series: Array<{ at: string; cpuPercent: number; memoryMb: number }>;
+}
+
+export interface ProjectMetrics {
+  services: ServiceMetrics[];
+  deployments: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    successRate: number | null;
+    averageDeployMs: number | null;
+    averageBuildMs: number | null;
+  };
+}

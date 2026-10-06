@@ -26,6 +26,7 @@ import { PreviewService } from "./modules/environments/PreviewService.js";
 import { WorkerRegistry } from "./modules/workers/WorkerRegistry.js";
 import { RemoteEngine } from "./modules/workers/RemoteEngine.js";
 import { WorkerCalls } from "./modules/workers/WorkerCalls.js";
+import { MetricsService } from "./modules/metrics/MetricsService.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
@@ -59,6 +60,7 @@ export interface ApiServices extends EngineServices {
   environments: ProjectEnvironments;
   workers: WorkerRegistry;
   workerCalls: WorkerCalls;
+  metrics: MetricsService;
   workerRouting: unknown;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
@@ -233,8 +235,10 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     },
   });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
+  const metrics = new MetricsService({ prisma, access, deployments, logger: logger.child({ component: "metrics" }) });
   return {
     workers,
+    metrics,
     workerCalls,
     workerRouting: config.routing
       ? { mode: "traefik", domain: config.routing.domain, httpPort: config.routing.httpPort, httpsPort: config.routing.tls?.httpsPort ?? null }

@@ -11,7 +11,7 @@ import { RemoteCallError, type WorkerCalls } from "./WorkerCalls.js";
 /** What a deploy needs from an engine; the local DeploymentEngine and RemoteEngine both provide it. */
 export type EngineApi = Pick<
   DeploymentEngine,
-  "run" | "stop" | "restart" | "getLogs" | "followLogs" | "destroy" | "inspect" | "ensureRoutable" | "artifactNames" | "removeNetwork" | "removeVolumes"
+  "run" | "stop" | "restart" | "getLogs" | "followLogs" | "destroy" | "inspect" | "ensureRoutable" | "artifactNames" | "removeNetwork" | "removeVolumes" | "stats"
 > & { runToCompletion(options: OneOffContainerOptions): Promise<OneOffResult> };
 
 /** Events a worker streams back while it runs a call. */
@@ -116,6 +116,10 @@ export class RemoteEngine implements EngineApi {
 
   removeNetwork(name: string) {
     return this.invoke<void>("removeNetwork", { name });
+  }
+
+  stats(containerReference: string) {
+    return this.invoke<Awaited<ReturnType<DeploymentEngine["stats"]>>>("stats", { containerReference });
   }
 
   removeVolumes(names: readonly string[]) {

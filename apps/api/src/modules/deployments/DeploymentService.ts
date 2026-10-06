@@ -54,6 +54,7 @@ export type EngineLike = Pick<
   | "artifactNames"
   | "removeNetwork"
   | "removeVolumes"
+  | "stats"
 >;
 
 export interface DeploymentServiceDeps {
@@ -622,6 +623,12 @@ export class DeploymentService {
     const worker = await this.deps.prisma.worker.findUnique({ where: { id: deployment.workerId }, select: { address: true } });
     if (!worker?.address) return {};
     return { servers: deployment.hostPorts.map((port) => `http://${worker.address}:${port}`) };
+  }
+
+  /** Resource use of a deployment's replicas, from the worker running it. */
+  async statsFor(deployment: Pick<Deployment, "workerId" | "containerId">) {
+    if (!deployment.containerId) return [];
+    return this.engineFor(deployment.workerId).stats(deployment.containerId);
   }
 
   /** This machine's worker (or unregistered: then everything is local). */

@@ -11,6 +11,7 @@ import {
   type ManagedContainer,
   ShipyardLabel,
   type StartedContainer,
+  type ContainerStats,
 } from "../docker/DockerService.js";
 import type { LogChunk } from "../docker/logs.js";
 import { buildContainerName, replicaContainerName } from "../docker/naming.js";
@@ -43,6 +44,7 @@ export type EngineDocker = Pick<
   | "ensureNetwork"
   | "ensureVolume"
   | "deploymentContainers"
+  | "containerStats"
   | "ensureImage"
   | "prepareVolumeOwnership"
   | "removeVolume"
@@ -438,6 +440,15 @@ export class DeploymentEngine {
     for (const id of ids.length > 0 ? ids : [container.id]) {
       await this.joinRouterNetwork(id === container.id ? container : await this.deps.docker.inspectManagedContainer(id));
     }
+  }
+
+  /** Resource use of a deployment: one sample per replica. */
+  async stats(containerReference: string): Promise<ContainerStats[]> {
+    const container = await this.deps.docker.inspectManagedContainer(containerReference);
+    const ids = container.deploymentId ? await this.deps.docker.deploymentContainers(container.deploymentId) : [];
+    const samples: ContainerStats[] = [];
+    for (const id of ids.length > 0 ? ids : [container.id]) samples.push(await this.deps.docker.containerStats(id));
+    return samples;
   }
 
   /** Current container state, for reconciling stored status with reality. */
