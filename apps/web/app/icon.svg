@@ -1,7 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <!-- A hull at the waterline: ink above, oxide below, like the wordmark. -->
-  <rect width="32" height="32" rx="6" fill="#13212b"/>
-  <path d="M6 13h20l-3 11H9z" fill="#f5f6f5"/>
-  <path d="M7.6 19h16.8L23 24H9z" fill="#9f2f28"/>
-  <path d="M15 6h2v7h-2z" fill="#f5f6f5"/>
+  <!-- The Shipyard mark: a sailboat on a white tile, the jib a shade lighter. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#d4d4d8"/>
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="8" fill="url(#tile)"/>
+  <g transform="translate(5.12 5.12) scale(0.68)">
+    <path d="M15.2 2.8C11.4 7.6 8 12.8 4.8 19.2h10.4z" fill="#000"/>
+    <path d="M17.6 6.6c3.2 3.6 5.8 7.8 7.8 12.6h-7.8z" fill="#000" fill-opacity="0.62"/>
+    <path d="M2.6 21.4h26.8c-1.1 4.2-4.1 7.4-8.6 7.4H11.2c-4.5 0-7.5-3.2-8.6-7.4z" fill="#000"/>
+  </g>
 </svg>

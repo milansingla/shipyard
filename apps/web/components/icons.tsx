@@ -75,13 +75,16 @@ export const ArrowIcon = (p: IconProps) => (
   </Icon>
 );
 
-/** The hull mark: a hull at the waterline, the part below it a shade lighter. */
-export function HullMark({ className = "size-7" }: IconProps) {
+/**
+ * The Shipyard mark: a sailboat — mainsail, jib and hull — in the current
+ * text colour, the jib a shade lighter. Reads at 16px and at 160px.
+ */
+export function LogoMark({ className = "size-7" }: IconProps) {
   return (
     <svg aria-hidden viewBox="0 0 32 32" className={className}>
-      <path d="M5 13h22l-1.8 6.5H6.8z" fill="currentColor" />
-      <path d="M6.9 19.5h18.2L23.6 25H8.4z" fill="currentColor" fillOpacity={0.55} />
-      <path d="M15 5h2.2v8H15z" fill="currentColor" />
+      <path d="M15.2 2.8C11.4 7.6 8 12.8 4.8 19.2h10.4z" fill="currentColor" />
+      <path d="M17.6 6.6c3.2 3.6 5.8 7.8 7.8 12.6h-7.8z" fill="currentColor" fillOpacity={0.62} />
+      <path d="M2.6 21.4h26.8c-1.1 4.2-4.1 7.4-8.6 7.4H11.2c-4.5 0-7.5-3.2-8.6-7.4z" fill="currentColor" />
     </svg>
   );
 }

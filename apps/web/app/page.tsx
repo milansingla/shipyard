@@ -43,7 +43,7 @@ export default function ProjectsPage() {
           </div>
           <div className="glass-inset relative mt-8 flex items-center gap-2 rounded-2xl p-2 pl-4 sm:gap-4">
             <dl className="grid flex-1 grid-cols-2 gap-x-6 gap-y-3 py-2 sm:grid-cols-4">
-              <Stat value={projects?.length} label="Projects" swatch="bg-accent" />
+              <Stat value={projects?.length} label="Projects" swatch="bg-white" />
               <Stat value={projects ? counts.live : undefined} label="Running" swatch="bg-sea" />
               <Stat value={projects ? counts.working : undefined} label="Deploying" swatch="bg-signal" />
               <Stat value={projects ? counts.failed : undefined} label="Failed" swatch="bg-oxide" />
@@ -52,7 +52,7 @@ export default function ProjectsPage() {
               href="/activity"
               aria-label="Activity"
               title="Activity"
-              className="flex size-11 shrink-0 items-center justify-center self-center rounded-full bg-gradient-to-b from-[#5d95ff] to-accent-strong text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.28),0_8px_20px_-8px_rgb(79_139_255/0.7)] hover:translate-x-0.5"
+              className="flex size-11 shrink-0 items-center justify-center self-center rounded-full bg-gradient-to-b from-white to-[#e4e4e7] text-black shadow-[inset_0_1px_0_rgb(255_255_255),0_8px_22px_-10px_rgb(255_255_255/0.5)] hover:translate-x-0.5"
             >
               <ArrowIcon />
             </Link>
@@ -158,7 +158,7 @@ function Stat({ value, label, swatch }: { value: number | undefined; label: stri
   );
 }
 
-const TONE_BAR: Record<Tone, string> = { live: "bg-sea", working: "bg-signal", failed: "bg-oxide", idle: "bg-slate-500/60" };
+const TONE_BAR: Record<Tone, string> = { live: "bg-sea", working: "bg-signal", failed: "bg-oxide", idle: "bg-zinc-500/60" };
 const TONE_LABEL: Record<Tone, string> = { live: "Running", working: "Deploying", failed: "Failed", idle: "Stopped or new" };
 
 /** How many projects are up, as a proportion bar with a legend. */
@@ -230,7 +230,7 @@ const TONE_TILE: Record<Tone, string> = {
   live: "from-[#5eead4] to-[#059669]",
   working: "from-[#fcd34d] to-[#d97706]",
   failed: "from-[#fca5a5] to-[#dc2626]",
-  idle: "from-[#94a3b8] to-[#475569]",
+  idle: "from-[#a1a1aa] to-[#52525b]",
 };
 
 /** A project's initial on a tile coloured by its state, standing in for a thumbnail. */

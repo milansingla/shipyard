@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 /*
- * Shipyard palette — calm neutrals, one accent, and the status colours people
- * already know from every dashboard.
+ * Shipyard palette — black and greys, white for what matters most, and the
+ * status colours people already know from every dashboard.
  *   primer  inset wells (code, quiet chips)   plate   field fill
  *   rivet   hairlines                          ink     text
  *   accent  links, focus, primary actions
@@ -10,19 +10,18 @@
  * Every colour that carries meaning maps to exactly one deployment state.
  */
 @theme {
-  --color-primer: rgb(2 6 23 / 0.45);
+  --color-primer: rgb(0 0 0 / 0.45);
   --color-plate: rgb(255 255 255 / 0.05);
   --color-rivet: rgb(255 255 255 / 0.1);
-  --color-ink: #f4f6fb;
-  --color-ink-soft: #98a2b3;
-  --color-accent: #4f8bff;
-  --color-accent-strong: #3a74f0;
+  --color-ink: #fafafa;
+  --color-ink-soft: #a1a1aa;
+  --color-accent: #ffffff;
   --color-sea: #34d399;
   --color-sea-wash: rgb(52 211 153 / 0.12);
   --color-signal: #fbbf24;
   --color-oxide: #f87171;
   --color-oxide-wash: rgb(248 113 113 / 0.12);
-  --color-console: rgb(3 6 15 / 0.72);
+  --color-console: rgb(0 0 0 / 0.6);
 
   --font-display: var(--font-geist), system-ui, sans-serif;
   --font-sans: var(--font-geist), system-ui, sans-serif;
@@ -37,7 +36,7 @@
 }
 
 html {
-  background: #070a12;
+  background: #000;
 }
 
 /* No background on body: the fixed light layer below must show through it. */
@@ -51,7 +50,7 @@ body {
 }
 
 /*
- * The light the glass bends: soft colour fields on one fixed layer. It never
+ * The light the glass bends: soft white light on black, on one fixed layer. It never
  * moves, so the blur behind each panel is computed once per scroll position
  * and nothing shimmers or repaints in a loop.
  */
@@ -62,11 +61,10 @@ body::before {
   z-index: -1;
   pointer-events: none;
   background:
-    radial-gradient(42rem 32rem at 12% -6%, rgb(79 139 255 / 0.32), transparent 65%),
-    radial-gradient(38rem 30rem at 92% 8%, rgb(139 92 246 / 0.22), transparent 65%),
-    radial-gradient(44rem 34rem at 78% 96%, rgb(14 165 233 / 0.16), transparent 65%),
-    radial-gradient(36rem 30rem at 4% 88%, rgb(99 102 241 / 0.14), transparent 65%),
-    linear-gradient(180deg, #0a0f1d 0%, #070a12 100%);
+    radial-gradient(46rem 30rem at 50% -12%, rgb(255 255 255 / 0.13), transparent 70%),
+    radial-gradient(34rem 28rem at 100% 30%, rgb(255 255 255 / 0.06), transparent 70%),
+    radial-gradient(38rem 30rem at 0% 85%, rgb(255 255 255 / 0.05), transparent 70%),
+    linear-gradient(180deg, #0b0b0c 0%, #000 100%);
 }
 
 @layer base {
@@ -83,15 +81,15 @@ body::before {
   select:focus,
   textarea:focus {
     outline: none;
-    border-color: rgb(79 139 255 / 0.7);
-    box-shadow: 0 0 0 4px rgb(79 139 255 / 0.18);
+    border-color: rgb(255 255 255 / 0.45);
+    box-shadow: 0 0 0 4px rgb(255 255 255 / 0.08);
   }
   input::placeholder,
   textarea::placeholder {
     color: rgb(152 162 179 / 0.6);
   }
   select option {
-    background: #111827;
+    background: #111;
   }
   input[type="checkbox"],
   input[type="radio"] {
@@ -110,7 +108,7 @@ body::before {
       transform 200ms var(--ease-out-soft);
   }
   ::selection {
-    background: rgb(79 139 255 / 0.35);
+    background: rgb(255 255 255 / 0.22);
   }
 }
 
@@ -211,7 +209,7 @@ body::before {
 
 /* Headline text lit from above: white fading to a cool grey. */
 @utility text-sheen {
-  background: linear-gradient(180deg, #ffffff 30%, #a9b6cf);
+  background: linear-gradient(180deg, #ffffff 35%, #a1a1aa);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;

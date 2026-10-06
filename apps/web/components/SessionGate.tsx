@@ -8,8 +8,8 @@ import { ApiError, api } from "@/lib/api";
 import { SessionContext } from "@/lib/session";
 import type { User } from "@/lib/types";
 
-import { ActivityIcon, AssistantIcon, BellIcon, HullMark, KeyIcon, PlusIcon, ProjectsIcon, SignOutIcon, TeamsIcon } from "./icons";
-import { Button, ErrorNote, Wordmark, buttonClass } from "./ui";
+import { ActivityIcon, AssistantIcon, BellIcon, KeyIcon, PlusIcon, ProjectsIcon, SignOutIcon, TeamsIcon } from "./icons";
+import { Button, ErrorNote, LogoTile, Wordmark, buttonClass } from "./ui";
 
 type GateState =
   | { kind: "loading" }
@@ -83,7 +83,7 @@ function SignIn() {
     <main className="relative flex min-h-dvh flex-col justify-center overflow-hidden px-4 sm:px-12">
       <Rings />
       <div className="relative mx-auto w-full max-w-6xl">
-        <h1 className="-ml-1 text-[clamp(4rem,14vw,11rem)]">
+        <h1 className="text-[clamp(3rem,11vw,8.5rem)]">
           <Wordmark waterline />
         </h1>
         <div className="mt-10 grid gap-8 sm:grid-cols-[1fr_auto] sm:items-end">
@@ -134,7 +134,7 @@ function Problem({ error, retry }: { error: ApiError; retry: () => void }) {
 function Rings() {
   return (
     <div aria-hidden className="pointer-events-none absolute right-[-12rem] top-1/2 size-[46rem] -translate-y-1/2 opacity-80">
-      <div className="absolute inset-[26%] rounded-full bg-[radial-gradient(circle,rgb(79_139_255/0.5),rgb(139_92_246/0.2)_55%,transparent_72%)] blur-2xl" />
+      <div className="absolute inset-[26%] rounded-full bg-[radial-gradient(circle,rgb(255_255_255/0.16),rgb(255_255_255/0.05)_55%,transparent_72%)] blur-2xl" />
       {[0, 12, 24, 36].map((inset) => (
         <div key={inset} className="absolute rounded-full border border-white/[0.06]" style={{ inset: `${inset}%` }} />
       ))}
@@ -174,7 +174,7 @@ function Sidebar() {
           aria-current={active ? "page" : undefined}
           className={`group relative flex size-10 items-center justify-center rounded-xl transition-colors ${
             active
-              ? "bg-accent/20 text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.18),0_0_0_1px_rgb(79_139_255/0.35),0_6px_16px_-6px_rgb(79_139_255/0.6)]"
+              ? "bg-white/[0.14] text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.22),0_0_0_1px_rgb(255_255_255/0.12),0_6px_16px_-8px_rgb(0_0_0/0.8)]"
               : "text-ink-soft hover:bg-white/[0.07] hover:text-ink"
           }`}
         >
@@ -182,7 +182,7 @@ function Sidebar() {
           {/* The label, beside the rail on hover or keyboard focus (large screens). */}
           <span
             aria-hidden
-            className="pointer-events-none absolute left-full z-20 ml-3 hidden -translate-x-1 whitespace-nowrap rounded-lg border border-white/10 bg-[#141a2a] px-2.5 py-1 text-xs font-medium text-ink opacity-0 shadow-[0_8px_24px_-8px_rgb(0_0_0/0.6)] transition-[opacity,transform] duration-200 ease-out group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:opacity-100 lg:block"
+            className="pointer-events-none absolute left-full z-20 ml-3 hidden -translate-x-1 whitespace-nowrap rounded-lg border border-white/10 bg-[#18181b] px-2.5 py-1 text-xs font-medium text-ink opacity-0 shadow-[0_8px_24px_-8px_rgb(0_0_0/0.6)] transition-[opacity,transform] duration-200 ease-out group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:opacity-100 lg:block"
           >
             {label}
           </span>
@@ -194,10 +194,10 @@ function Sidebar() {
   return (
     <nav
       aria-label="Main"
-      className="sticky top-0 z-10 flex items-center gap-2 border-b border-white/[0.08] bg-[#0b1020]/60 px-3 py-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-2xl backdrop-saturate-150 lg:top-4 lg:h-[calc(100dvh-4rem)] lg:w-[4.5rem] lg:flex-col lg:rounded-[1.5rem] lg:border lg:border-white/[0.09] lg:bg-white/[0.05] lg:px-0 lg:py-5 lg:shadow-[inset_0_1px_0_rgb(255_255_255/0.12),0_24px_48px_-24px_rgb(0_0_0/0.6)]"
+      className="sticky top-0 z-10 flex items-center gap-2 border-b border-white/[0.08] bg-black/60 px-3 py-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-2xl backdrop-saturate-150 lg:top-4 lg:h-[calc(100dvh-4rem)] lg:w-[4.5rem] lg:flex-col lg:rounded-[1.5rem] lg:border lg:border-white/[0.09] lg:bg-white/[0.05] lg:px-0 lg:py-5 lg:shadow-[inset_0_1px_0_rgb(255_255_255/0.12),0_24px_48px_-24px_rgb(0_0_0/0.6)]"
     >
-      <Link href="/" aria-label="Shipyard: all projects" className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#6ea1ff] to-[#6d4aff] text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.35),0_8px_18px_-6px_rgb(99_102_241/0.7)] lg:mb-6">
-        <HullMark className="size-6" />
+      <Link href="/" aria-label="Shipyard: all projects" className="shrink-0 hover:scale-[1.04] active:scale-95 lg:mb-6">
+        <LogoTile className="size-10 rounded-xl lg:size-12 lg:rounded-2xl" />
       </Link>
       <ul className="flex flex-1 flex-wrap items-center gap-1 lg:flex-none lg:flex-col lg:gap-2">{NAV.map(item)}</ul>
       <ul className="flex items-center gap-1 lg:mt-auto lg:flex-col lg:gap-2">{NAV_BOTTOM.map(item)}</ul>
@@ -219,16 +219,16 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
 
   return (
     <header className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 py-5 lg:pt-3">
-      <Link href="/" aria-label="Shipyard: all projects" className="text-[1.375rem]">
+      <Link href="/" aria-label="Shipyard: all projects" className="text-[1.625rem] transition-opacity hover:opacity-85 sm:text-[1.875rem]">
         <Wordmark />
       </Link>
       <div className="flex items-center gap-2 whitespace-nowrap">
         <span className="flex items-center gap-2.5 rounded-full border border-white/[0.09] bg-white/[0.05] py-1 pl-1 pr-3.5 text-sm shadow-[inset_0_1px_0_rgb(255_255_255/0.08)] backdrop-blur-xl">
           {user.avatarUrl ? (
             // eslint-disable-next-line @next/next/no-img-element -- remote avatar, no optimisation needed
-            <img src={user.avatarUrl} alt="" width={32} height={32} className="size-8 rounded-full ring-2 ring-accent/50" />
+            <img src={user.avatarUrl} alt="" width={32} height={32} className="size-8 rounded-full ring-2 ring-white/25" />
           ) : (
-            <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-gradient-to-br from-[#6ea1ff] to-[#8b5cf6] text-sm font-semibold text-white">
+            <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-gradient-to-b from-[#52525b] to-[#27272a] text-sm font-semibold text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.2)]">
               {user.login.slice(0, 1).toUpperCase()}
             </span>
           )}
