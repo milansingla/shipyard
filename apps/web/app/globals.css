@@ -1,140 +1,236 @@
 @import "tailwindcss";
 
 /*
- * Shipyard palette — a hull at night, under the yard's sodium lights.
- *   primer  inset wells (page, code)      plate   raised surfaces (fields, chips)
- *   rivet   seams and rules                ink     text; inverted, the primary button
- *   sea     afloat: RUNNING                signal  code-flag yellow: work in progress
- *   oxide   anti-fouling red: FAILED       ember   the yard lights: decoration only
+ * Shipyard palette — calm neutrals, one accent, and the status colours people
+ * already know from every dashboard.
+ *   primer  inset wells (code, quiet chips)   plate   field fill
+ *   rivet   hairlines                          ink     text
+ *   accent  links, focus, primary actions
+ *   sea     RUNNING   signal  in progress   oxide  FAILED
  * Every colour that carries meaning maps to exactly one deployment state.
  */
 @theme {
-  --color-primer: #141416;
-  --color-plate: #202024;
-  --color-rivet: rgb(255 255 255 / 0.11);
-  --color-ink: #f4f3ef;
-  --color-ink-soft: #a6a5aa;
-  --color-sea: #b6e36b;
-  --color-sea-wash: rgb(182 227 107 / 0.12);
-  --color-signal: #f7d046;
-  --color-oxide: #ff6b4f;
-  --color-oxide-wash: rgb(255 107 79 / 0.12);
-  --color-ember: #ff7a2f;
-  --color-console: #0c0c0e;
+  --color-primer: rgb(2 6 23 / 0.45);
+  --color-plate: rgb(255 255 255 / 0.05);
+  --color-rivet: rgb(255 255 255 / 0.1);
+  --color-ink: #f4f6fb;
+  --color-ink-soft: #98a2b3;
+  --color-accent: #4f8bff;
+  --color-accent-strong: #3a74f0;
+  --color-sea: #34d399;
+  --color-sea-wash: rgb(52 211 153 / 0.12);
+  --color-signal: #fbbf24;
+  --color-oxide: #f87171;
+  --color-oxide-wash: rgb(248 113 113 / 0.12);
+  --color-console: rgb(3 6 15 / 0.72);
 
-  --font-display: var(--font-archivo), "Helvetica Neue", Arial, sans-serif;
-  --font-stencil: var(--font-big-shoulders-stencil), var(--font-archivo), sans-serif;
-  --font-sans: var(--font-manrope), system-ui, sans-serif;
-  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+  --font-display: var(--font-geist), system-ui, sans-serif;
+  --font-sans: var(--font-geist), system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 :root {
   color-scheme: dark;
+  -webkit-tap-highlight-color: transparent;
 }
 
+html {
+  background: #070a12;
+}
+
+/* No background on body: the fixed light layer below must show through it. */
 body {
-  background-color: #0b0b0d;
-  background-image:
-    radial-gradient(60rem 40rem at 70% -10%, rgb(255 122 47 / 0.16), transparent 70%),
-    radial-gradient(50rem 40rem at 0% 100%, rgb(255 255 255 / 0.04), transparent 70%);
   color: var(--color-ink);
   font-family: var(--font-sans);
+  font-feature-settings: "ss01", "cv11";
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/*
+ * The light the glass bends: soft colour fields on one fixed layer. It never
+ * moves, so the blur behind each panel is computed once per scroll position
+ * and nothing shimmers or repaints in a loop.
+ */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(42rem 32rem at 12% -6%, rgb(79 139 255 / 0.32), transparent 65%),
+    radial-gradient(38rem 30rem at 92% 8%, rgb(139 92 246 / 0.22), transparent 65%),
+    radial-gradient(44rem 34rem at 78% 96%, rgb(14 165 233 / 0.16), transparent 65%),
+    radial-gradient(36rem 30rem at 4% 88%, rgb(99 102 241 / 0.14), transparent 65%),
+    linear-gradient(180deg, #0a0f1d 0%, #070a12 100%);
 }
 
 @layer base {
   input:not([type="checkbox"]):not([type="radio"]),
   select,
   textarea {
-    border-radius: 0.875rem;
-    transition: border-color 150ms, box-shadow 150ms;
+    border-radius: 0.75rem;
+    transition:
+      border-color 200ms var(--ease-out-soft),
+      box-shadow 200ms var(--ease-out-soft),
+      background-color 200ms var(--ease-out-soft);
   }
   input:not([type="checkbox"]):not([type="radio"]):focus,
   select:focus,
   textarea:focus {
     outline: none;
-    box-shadow: 0 0 0 3px rgb(255 255 255 / 0.08);
+    border-color: rgb(79 139 255 / 0.7);
+    box-shadow: 0 0 0 4px rgb(79 139 255 / 0.18);
   }
   input::placeholder,
   textarea::placeholder {
-    color: rgb(166 165 170 / 0.6);
+    color: rgb(152 162 179 / 0.6);
+  }
+  select option {
+    background: #111827;
   }
   input[type="checkbox"],
   input[type="radio"] {
-    accent-color: var(--color-sea);
+    accent-color: var(--color-accent);
+  }
+  a,
+  button,
+  summary {
+    transition:
+      color 200ms var(--ease-out-soft),
+      background-color 200ms var(--ease-out-soft),
+      border-color 200ms var(--ease-out-soft),
+      text-decoration-color 200ms var(--ease-out-soft),
+      box-shadow 200ms var(--ease-out-soft),
+      opacity 200ms var(--ease-out-soft),
+      transform 200ms var(--ease-out-soft);
   }
   ::selection {
-    background: rgb(255 122 47 / 0.35);
+    background: rgb(79 139 255 / 0.35);
   }
 }
 
 :focus-visible {
-  outline: 2px solid var(--color-ink);
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
-/* The app's outer frame: warm in the middle, dark at the edges, like the yard at night. */
+/* The app's frame: a faint tint and hairline. No blur of its own, so panels never blur twice. */
 @utility app-frame {
-  background:
-    radial-gradient(48rem 32rem at 58% 0%, rgb(255 122 47 / 0.2), transparent 70%),
-    radial-gradient(36rem 28rem at 100% 60%, rgb(247 208 70 / 0.05), transparent 70%),
-    linear-gradient(160deg, #2a2725 0%, #1a1a1c 45%, #121214 100%);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.035), rgb(255 255 255 / 0.012));
 }
 
-/* Frosted glass: the surface every panel sits on. */
+/*
+ * Liquid glass: see-through, blurred and slightly saturated, with a bright
+ * rim where light catches the top-left edge. The rim is a masked
+ * pseudo-element, so it follows the rounded corners exactly.
+ */
 @utility glass {
-  background: linear-gradient(180deg, rgb(255 255 255 / 0.075), rgb(255 255 255 / 0.035));
-  border: 1px solid rgb(255 255 255 / 0.09);
+  position: relative;
+  background: linear-gradient(145deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.035) 45%, rgb(255 255 255 / 0.02));
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  backdrop-filter: blur(24px) saturate(170%);
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.06),
-    0 20px 40px -24px rgb(0 0 0 / 0.6);
-  -webkit-backdrop-filter: blur(22px);
-  backdrop-filter: blur(22px);
+    inset 0 1px 0 rgb(255 255 255 / 0.14),
+    0 1px 2px rgb(0 0 0 / 0.2),
+    0 24px 48px -24px rgb(0 0 0 / 0.55);
+  animation: glass-in 480ms var(--ease-out-soft) both;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(140deg, rgb(255 255 255 / 0.38), rgb(255 255 255 / 0.08) 30%, rgb(255 255 255 / 0.03) 60%, rgb(255 255 255 / 0.16));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+    pointer-events: none;
+  }
 }
 
-/* A section of a page: a glass card. */
+/* A section of a page: a liquid-glass card. */
 @utility panel {
-  background: linear-gradient(180deg, rgb(255 255 255 / 0.075), rgb(255 255 255 / 0.035));
-  border: 1px solid rgb(255 255 255 / 0.09);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.06),
-    0 20px 40px -24px rgb(0 0 0 / 0.6);
-  -webkit-backdrop-filter: blur(22px);
-  backdrop-filter: blur(22px);
-  border-radius: 1.75rem;
+  position: relative;
+  border-radius: 1.5rem;
   padding: clamp(1.125rem, 3vw, 1.75rem);
+  background: linear-gradient(145deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.035) 45%, rgb(255 255 255 / 0.02));
+  -webkit-backdrop-filter: blur(24px) saturate(170%);
+  backdrop-filter: blur(24px) saturate(170%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.14),
+    0 1px 2px rgb(0 0 0 / 0.2),
+    0 24px 48px -24px rgb(0 0 0 / 0.55);
+  animation: glass-in 480ms var(--ease-out-soft) both;
+
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(140deg, rgb(255 255 255 / 0.38), rgb(255 255 255 / 0.08) 30%, rgb(255 255 255 / 0.03) 60%, rgb(255 255 255 / 0.16));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+    pointer-events: none;
+  }
 }
 
-/* Wide geometric headings. */
+/* Clear glass for things inside a panel: a tint and a hairline, no second blur. */
+@utility glass-inset {
+  background: rgb(255 255 255 / 0.04);
+  border: 1px solid rgb(255 255 255 / 0.07);
+}
+
 @utility page-title {
   font-family: var(--font-display);
-  font-stretch: 125%;
   font-weight: 600;
-  font-size: clamp(1.875rem, 4.2vw, 2.625rem);
-  line-height: 1.08;
-  letter-spacing: -0.01em;
+  font-size: clamp(1.875rem, 4vw, 2.5rem);
+  line-height: 1.1;
+  letter-spacing: -0.035em;
 }
 
 @utility section-title {
   font-family: var(--font-display);
-  font-stretch: 125%;
   font-weight: 600;
-  font-size: 1.1875rem;
-  line-height: 1.2;
-  letter-spacing: -0.005em;
+  font-size: 1.125rem;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
 }
 
-@utility display-wide {
+@utility headline {
   font-family: var(--font-display);
-  font-stretch: 125%;
+  letter-spacing: -0.035em;
 }
 
-/* The waterline: hull paint above, anti-fouling red below. Used by the wordmark. */
-.waterline-text {
-  background: linear-gradient(to bottom, var(--color-ink) 0 58%, var(--color-ember) 58% 100%);
+/* Headline text lit from above: white fading to a cool grey. */
+@utility text-sheen {
+  background: linear-gradient(180deg, #ffffff 30%, #a9b6cf);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+}
+
+/*
+ * Panels rise into place when they first appear. Opacity and transform are
+ * on the glass itself, never on an ancestor: an ancestor fading would cut
+ * the panel off from what is behind it and the blur would pop in at the end.
+ */
+@keyframes glass-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 @keyframes signal-pulse {

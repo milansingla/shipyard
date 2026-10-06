@@ -129,7 +129,7 @@ export default function ProjectPage() {
         </div>
       </div>
 
-      <div className="relative mt-6 flex w-fit max-w-full flex-wrap items-center gap-3 rounded-2xl border border-white/[0.08] bg-black/20 px-4 py-3 text-sm backdrop-blur-md">
+      <div className="relative mt-6 flex w-fit max-w-full flex-wrap items-center gap-3 glass-inset rounded-2xl px-4 py-3 text-sm">
         <Label>Live at</Label>
         {runningUrl ? (
           <a href={runningUrl} target="_blank" rel="noreferrer" className="break-all font-mono text-sea underline decoration-sea/40 underline-offset-4 hover:decoration-sea">

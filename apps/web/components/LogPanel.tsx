@@ -77,7 +77,7 @@ export function LogPanel({ deploymentId, status }: { deploymentId: string; statu
   }, [type]);
 
   return (
-    <section aria-label="Logs" className="overflow-hidden rounded-3xl border border-white/[0.07] bg-console text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.04)]">
+    <section aria-label="Logs" className="overflow-hidden rounded-3xl border border-white/[0.08] bg-console text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-xl">
       <div role="tablist" className="flex items-center gap-1 border-b border-white/[0.07] px-3">
         {TABS.map((tab) => (
           <button

@@ -59,7 +59,7 @@ export default function AlertsPage() {
             <li key={alert.id} className="grid gap-x-6 gap-y-1 py-3 sm:grid-cols-[8rem_minmax(0,1fr)_9rem]">
               <span
                 className={`self-start justify-self-start rounded-full px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wider ${
-                  alert.status === "RESOLVED" ? "bg-primer text-ink-soft" : alert.severity === "CRITICAL" ? "bg-oxide text-plate" : "bg-oxide-wash text-oxide"
+                  alert.status === "RESOLVED" ? "bg-primer text-ink-soft" : alert.severity === "CRITICAL" ? "bg-oxide text-white" : "bg-oxide-wash text-oxide"
                 }`}
               >
                 {alert.status === "RESOLVED" ? "Resolved" : KIND_LABEL[alert.kind]}

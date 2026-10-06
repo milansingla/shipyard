@@ -54,7 +54,7 @@ export function SessionGate({ children }: { children: ReactNode }) {
   return (
     <SessionContext.Provider value={session}>
       <div className="min-h-dvh lg:p-4">
-        <div className="app-frame relative mx-auto flex min-h-dvh max-w-[1520px] flex-col overflow-clip lg:min-h-[calc(100dvh-2rem)] lg:flex-row lg:gap-2 lg:rounded-[2.25rem] lg:border lg:border-white/[0.08] lg:p-4 lg:shadow-[0_40px_120px_-40px_rgb(0_0_0/0.9)]">
+        <div className="relative mx-auto flex min-h-dvh max-w-[1520px] flex-col lg:min-h-[calc(100dvh-2rem)] lg:flex-row lg:gap-2 lg:rounded-[2.25rem] lg:border lg:border-white/[0.07] lg:p-4 lg:app-frame">
           <Sidebar />
           <div className="min-w-0 flex-1 px-4 pb-20 sm:px-6 lg:px-6">
             <Header user={state.user} onSignedOut={signedOut} />
@@ -80,10 +80,10 @@ function SignIn() {
   }, []);
 
   return (
-    <main className="app-frame relative flex min-h-dvh flex-col justify-center overflow-hidden px-4 sm:px-12">
+    <main className="relative flex min-h-dvh flex-col justify-center overflow-hidden px-4 sm:px-12">
       <Rings />
       <div className="relative mx-auto w-full max-w-6xl">
-        <h1 className="-ml-1 text-[clamp(4.5rem,17vw,15rem)]">
+        <h1 className="-ml-1 text-[clamp(4rem,14vw,11rem)]">
           <Wordmark waterline />
         </h1>
         <div className="mt-10 grid gap-8 sm:grid-cols-[1fr_auto] sm:items-end">
@@ -108,7 +108,7 @@ function SignIn() {
 function Problem({ error, retry }: { error: ApiError; retry: () => void }) {
   const title = error.code === "AUTH_NOT_CONFIGURED" ? "GitHub sign-in isn't set up yet" : "Shipyard isn't reachable";
   return (
-    <main className="app-frame flex min-h-dvh flex-col justify-center px-4">
+    <main className="flex min-h-dvh flex-col justify-center px-4">
       <div className="panel mx-auto flex w-full max-w-2xl flex-col gap-8">
       <Wordmark className="text-6xl" />
       <ErrorNote title={title}>
@@ -134,9 +134,9 @@ function Problem({ error, retry }: { error: ApiError; retry: () => void }) {
 function Rings() {
   return (
     <div aria-hidden className="pointer-events-none absolute right-[-12rem] top-1/2 size-[46rem] -translate-y-1/2 opacity-80">
-      <div className="absolute inset-[30%] rounded-full bg-[radial-gradient(circle,rgb(255_122_47/0.55),rgb(255_122_47/0)_70%)] blur-2xl" />
+      <div className="absolute inset-[26%] rounded-full bg-[radial-gradient(circle,rgb(79_139_255/0.5),rgb(139_92_246/0.2)_55%,transparent_72%)] blur-2xl" />
       {[0, 12, 24, 36].map((inset) => (
-        <div key={inset} className="absolute rounded-full border border-white/[0.07]" style={{ inset: `${inset}%` }} />
+        <div key={inset} className="absolute rounded-full border border-white/[0.06]" style={{ inset: `${inset}%` }} />
       ))}
     </div>
   );
@@ -173,14 +173,16 @@ function Sidebar() {
           aria-label={label}
           aria-current={active ? "page" : undefined}
           className={`group relative flex size-10 items-center justify-center rounded-xl transition-colors ${
-            active ? "bg-white/[0.12] text-ink shadow-[inset_0_1px_0_rgb(255_255_255/0.08)]" : "text-ink-soft hover:bg-white/[0.06] hover:text-ink"
+            active
+              ? "bg-accent/20 text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.18),0_0_0_1px_rgb(79_139_255/0.35),0_6px_16px_-6px_rgb(79_139_255/0.6)]"
+              : "text-ink-soft hover:bg-white/[0.07] hover:text-ink"
           }`}
         >
           <ItemIcon />
           {/* The label, beside the rail on hover or keyboard focus (large screens). */}
           <span
             aria-hidden
-            className="pointer-events-none absolute left-full z-20 ml-3 hidden whitespace-nowrap rounded-lg border border-white/10 bg-[#232326] px-2.5 py-1 text-xs font-semibold text-ink opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100 lg:block"
+            className="pointer-events-none absolute left-full z-20 ml-3 hidden -translate-x-1 whitespace-nowrap rounded-lg border border-white/10 bg-[#141a2a] px-2.5 py-1 text-xs font-medium text-ink opacity-0 shadow-[0_8px_24px_-8px_rgb(0_0_0/0.6)] transition-[opacity,transform] duration-200 ease-out group-hover:translate-x-0 group-hover:opacity-100 group-focus-visible:translate-x-0 group-focus-visible:opacity-100 lg:block"
           >
             {label}
           </span>
@@ -192,9 +194,9 @@ function Sidebar() {
   return (
     <nav
       aria-label="Main"
-      className="sticky top-0 z-10 flex items-center gap-2 border-b border-white/[0.06] bg-[#121214]/90 px-3 py-2 backdrop-blur-xl lg:top-4 lg:h-[calc(100dvh-4rem)] lg:w-[4.5rem] lg:flex-col lg:rounded-[1.75rem] lg:border lg:border-white/[0.06] lg:bg-[#0f0f11]/85 lg:px-0 lg:py-5"
+      className="sticky top-0 z-10 flex items-center gap-2 border-b border-white/[0.08] bg-[#0b1020]/60 px-3 py-2 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-2xl backdrop-saturate-150 lg:top-4 lg:h-[calc(100dvh-4rem)] lg:w-[4.5rem] lg:flex-col lg:rounded-[1.5rem] lg:border lg:border-white/[0.09] lg:bg-white/[0.05] lg:px-0 lg:py-5 lg:shadow-[inset_0_1px_0_rgb(255_255_255/0.12),0_24px_48px_-24px_rgb(0_0_0/0.6)]"
     >
-      <Link href="/" aria-label="Shipyard: all projects" className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-ink text-[#121214] lg:mb-6">
+      <Link href="/" aria-label="Shipyard: all projects" className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-[#6ea1ff] to-[#6d4aff] text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.35),0_8px_18px_-6px_rgb(99_102_241/0.7)] lg:mb-6">
         <HullMark className="size-6" />
       </Link>
       <ul className="flex flex-1 flex-wrap items-center gap-1 lg:flex-none lg:flex-col lg:gap-2">{NAV.map(item)}</ul>
@@ -217,20 +219,20 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
 
   return (
     <header className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 py-5 lg:pt-3">
-      <Link href="/" aria-label="Shipyard: all projects" className="text-2xl">
+      <Link href="/" aria-label="Shipyard: all projects" className="text-[1.375rem]">
         <Wordmark />
       </Link>
       <div className="flex items-center gap-2 whitespace-nowrap">
-        <span className="flex items-center gap-2.5 rounded-full border border-white/[0.08] bg-white/[0.04] py-1 pl-1 pr-3.5 text-sm">
+        <span className="flex items-center gap-2.5 rounded-full border border-white/[0.09] bg-white/[0.05] py-1 pl-1 pr-3.5 text-sm shadow-[inset_0_1px_0_rgb(255_255_255/0.08)] backdrop-blur-xl">
           {user.avatarUrl ? (
             // eslint-disable-next-line @next/next/no-img-element -- remote avatar, no optimisation needed
-            <img src={user.avatarUrl} alt="" width={32} height={32} className="size-8 rounded-full ring-2 ring-ember/60" />
+            <img src={user.avatarUrl} alt="" width={32} height={32} className="size-8 rounded-full ring-2 ring-accent/50" />
           ) : (
-            <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-gradient-to-br from-ember to-signal text-sm font-bold text-[#121214]">
+            <span aria-hidden className="flex size-8 items-center justify-center rounded-full bg-gradient-to-br from-[#6ea1ff] to-[#8b5cf6] text-sm font-semibold text-white">
               {user.login.slice(0, 1).toUpperCase()}
             </span>
           )}
-          <span className="font-semibold">{user.login}</span>
+          <span className="font-medium">{user.login}</span>
         </span>
         <button
           type="button"
@@ -239,7 +241,7 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
           aria-busy={busy}
           aria-label="Sign out"
           title="Sign out"
-          className="flex size-10 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.04] text-ink-soft transition-colors hover:text-ink disabled:opacity-50"
+          className="flex size-10 items-center justify-center rounded-full border border-white/[0.09] bg-white/[0.05] text-ink-soft shadow-[inset_0_1px_0_rgb(255_255_255/0.08)] backdrop-blur-xl hover:bg-white/[0.1] hover:text-ink active:scale-95 disabled:opacity-50"
         >
           <SignOutIcon />
         </button>
