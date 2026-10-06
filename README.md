@@ -183,6 +183,7 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [Databases](docs/databases.md) — self-hosted PostgreSQL services, `DATABASE_URL`, backups
 - [Cron jobs](docs/cron.md) — scheduled commands in a service's image, with every run recorded
 - [Access control](docs/rbac.md) — roles, teams, service accounts, API key scopes
+- [AI assistant](docs/ai.md) — diagnosis, incident summaries, repository analysis, questions; what it can and can't do
 - [Workers](docs/workers.md) — worker machines, the deploy queue, scheduler and leases
 - [Observability](docs/observability.md) — metrics · [Operations](docs/operations.md) — alerts, backups, restore, cleanup, disaster recovery
 - [Environments](docs/environments.md) — production, development, pull-request previews; variables per environment

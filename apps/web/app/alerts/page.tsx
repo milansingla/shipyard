@@ -5,6 +5,7 @@ import { type FormEvent, useState } from "react";
 
 import { Button, ErrorNote, Label, Mono } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
+import { IncidentSummaryButton } from "@/components/Assistant";
 import { relativeTime } from "@/lib/format";
 import { can } from "@/lib/roles";
 import type { AlertItem, NotificationChannel, Organization } from "@/lib/types";
@@ -74,6 +75,7 @@ export default function AlertsPage() {
                   )}
                 </p>
                 <p className="mt-0.5 text-ink-soft">{alert.message}</p>
+                {alert.projectId && <IncidentSummaryButton alertId={alert.id} />}
               </div>
               <time dateTime={alert.openedAt} className="text-ink-soft sm:text-right" title={new Date(alert.openedAt).toLocaleString()}>
                 {relativeTime(alert.openedAt)}

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { RepositoryAdvisor } from "@/components/Assistant";
 import { CronPanel } from "@/components/CronPanel";
 import { DomainsPanel } from "@/components/DomainsPanel";
 import { EnvironmentsPanel } from "@/components/EnvironmentsPanel";
@@ -168,6 +169,8 @@ export default function ProjectPage() {
       <DomainsPanel projectId={p.id} canEdit={can(p.role, "ADMIN")} />
 
       <CronPanel projectId={p.id} services={services.data ?? []} canEdit={can(p.role, "ADMIN")} canRun={can(p.role, "DEVELOPER")} />
+
+      <RepositoryAdvisor projectId={p.id} canSuggestDockerfile={can(p.role, "DEVELOPER")} />
 
       {/* Remounted when services change: adding a database adds its variables. */}
       <EnvironmentPanel

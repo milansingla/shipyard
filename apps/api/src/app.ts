@@ -31,6 +31,8 @@ import { createWorkerAdminRouter, createWorkerAgentRouter } from "./modules/work
 import type { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import { apiKeyScopes } from "./middleware/apiKeyScopes.js";
 import { createTeamRouter } from "./modules/access/team.routes.js";
+import { createAiRouter } from "./modules/ai/ai.routes.js";
+import type { AiService } from "./modules/ai/AiService.js";
 import { createPolicyRouter } from "./modules/policies/policy.routes.js";
 import type { PolicyService } from "./modules/policies/PolicyService.js";
 import type { TeamService } from "./modules/access/TeamService.js";
@@ -77,6 +79,7 @@ export interface AppDeps {
   alerts?: AlertService;
   teams?: TeamService;
   policies?: PolicyService;
+  ai?: AiService;
   serviceAccounts?: ServiceAccountService;
   /** Engine calls to remote workers; null = remote workers can't run deploys. */
   workerCalls?: WorkerCalls | null;
@@ -140,6 +143,7 @@ export function createApp(deps: AppDeps): Express {
     app.use("/api", rateLimit("deploys", limits.deploys, (req) => (isDeploy(req) ? user(req) : null)));
     app.use("/api", rateLimit("writes", limits.writes, (req) => (isWrite(req) && !isDeploy(req) ? user(req) : null)));
     app.use("/api", rateLimit("reads", limits.reads, (req) => (isWrite(req) ? null : user(req))));
+    app.use("/api/ai", rateLimit("ai", limits.ai, user));
     app.use("/api", createAuthRouter(auth.service, auth));
     app.use("/api", createGitHubRouter(auth.service, auth.github));
     app.use("/api", createApiKeyRouter(auth.apiKeys));
@@ -163,6 +167,7 @@ export function createApp(deps: AppDeps): Express {
     if (deps.alerts) app.use("/api", createAlertRouter(deps.alerts));
     if (deps.teams && deps.serviceAccounts) app.use("/api", createTeamRouter(deps.teams, deps.serviceAccounts));
     if (deps.policies) app.use("/api", createPolicyRouter(deps.policies));
+    if (deps.ai) app.use("/api", createAiRouter(deps.ai));
   }
 
   app.use(notFoundHandler);

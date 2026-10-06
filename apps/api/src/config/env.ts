@@ -63,6 +63,11 @@ const envSchema = z.object({
   SHIPYARD_ADMINS: z.string().optional(),
   /** Lets alert webhooks point at private addresses and plain http (local development only). */
   SHIPYARD_ALLOW_PRIVATE_WEBHOOKS: z.enum(["true", "false"]).default("false"),
+  /** The AI assistant: on when ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) is set; off otherwise (503). */
+  ANTHROPIC_API_KEY: z.string().min(1).optional(),
+  ANTHROPIC_AUTH_TOKEN: z.string().min(1).optional(),
+  /** Claude model for the AI assistant. */
+  SHIPYARD_AI_MODEL: z.string().trim().min(1).default("claude-opus-5-5"),
   /** This process's worker name (default: the hostname). */
   SHIPYARD_WORKER_NAME: z
     .string()
@@ -116,6 +121,8 @@ export interface AppConfig {
     intervalMs: number;
     requestTimeoutMs: number;
   };
+  /** null = AI assistant off (no Anthropic credentials). */
+  ai: { model: string } | null;
   /** Origin + path where browsers reach the API, no trailing slash. */
   publicUrl: string;
   /** Where to send the browser after sign-in, no trailing slash. */
@@ -218,6 +225,7 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     trustProxy: parsed.SHIPYARD_TRUST_PROXY ?? false,
     registry: parseRegistry(parsed),
     allowPrivateWebhooks: parsed.SHIPYARD_ALLOW_PRIVATE_WEBHOOKS === "true",
+    ai: parsed.ANTHROPIC_API_KEY || parsed.ANTHROPIC_AUTH_TOKEN ? { model: parsed.SHIPYARD_AI_MODEL } : null,
     workers: {
       joinToken: parsed.SHIPYARD_WORKER_JOIN_TOKEN ?? null,
       admins: (parsed.SHIPYARD_ADMINS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean),

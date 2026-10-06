@@ -30,6 +30,8 @@ import { MetricsService } from "./modules/metrics/MetricsService.js";
 import { AlertService } from "./modules/alerts/AlertService.js";
 import { CleanupService } from "./modules/cleanup/CleanupService.js";
 import { TeamService } from "./modules/access/TeamService.js";
+import { AiService } from "./modules/ai/AiService.js";
+import { AnthropicModel } from "./modules/ai/model.js";
 import { PolicyService } from "./modules/policies/PolicyService.js";
 import { ServiceAccountService } from "./modules/access/ServiceAccountService.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "./services/notify/NotificationProvider.js";
@@ -72,6 +74,7 @@ export interface ApiServices extends EngineServices {
   alerts: AlertService;
   teams: TeamService;
   policies: PolicyService;
+  ai: AiService;
   serviceAccounts: ServiceAccountService | null;
   workerRouting: unknown;
   /** null when GitHub sign-in is not configured. */
@@ -268,7 +271,19 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     logger: logger.child({ component: "alerts" }),
   });
   const metrics = new MetricsService({ prisma, access, deployments, logger: logger.child({ component: "metrics" }) });
+  const ai = new AiService({
+    prisma,
+    access,
+    deployments,
+    source: engineServices.git,
+    workspaceDir: config.workspaceDir,
+    allowedGitHosts: config.allowedGitHosts,
+    secrets: environment,
+    model: config.ai ? new AnthropicModel(config.ai.model) : null,
+    logger: logger.child({ component: "ai" }),
+  });
   return {
+    ai,
     policies,
     teams,
     serviceAccounts,

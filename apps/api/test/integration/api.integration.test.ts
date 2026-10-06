@@ -30,6 +30,9 @@ import { CleanupService } from "../../src/modules/cleanup/CleanupService.js";
 import { TeamService } from "../../src/modules/access/TeamService.js";
 import { ServiceAccountService } from "../../src/modules/access/ServiceAccountService.js";
 import { PolicyService } from "../../src/modules/policies/PolicyService.js";
+import type Anthropic from "@anthropic-ai/sdk";
+import { AiService } from "../../src/modules/ai/AiService.js";
+import type { AiModel } from "../../src/modules/ai/model.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "../../src/services/notify/NotificationProvider.js";
 import { WorkerCalls } from "../../src/modules/workers/WorkerCalls.js";
 import { RemoteEngine } from "../../src/modules/workers/RemoteEngine.js";
@@ -266,7 +269,7 @@ const fakeEngine: EngineLike = {
 const APP_URL = "http://localhost:3000";
 /** The whole suite signs in and deploys far more than a person would; tests tighten one rule when they need to. */
 const generous = { limit: 100_000, windowMs: 60_000 };
-const rateLimits: RateLimits = { signIn: { ...generous }, webhooks: { ...generous }, deploys: { ...generous }, writes: { ...generous }, reads: { ...generous } };
+const rateLimits: RateLimits = { signIn: { ...generous }, webhooks: { ...generous }, deploys: { ...generous }, writes: { ...generous }, reads: { ...generous }, ai: { ...generous } };
 const WEBHOOK_SECRET = "integration-test-webhook-secret";
 const SESSION_COOKIE = sessionCookieName(false);
 const ALICE = { id: 1001, login: "alice" };
@@ -304,6 +307,31 @@ const cronRunner: CronRunner = {
 };
 let audit: AuditService;
 let access: AccessService;
+
+/** The AI assistant's model, scripted per test: what it was asked, and what it answers. */
+const aiPrompts: string[] = [];
+let aiAnswer: (prompt: string) => unknown = () => {
+  throw new Error("no scripted answer");
+};
+const aiTurns: Anthropic.Beta.BetaMessage[] = [];
+const aiConversations: Anthropic.Beta.BetaMessageParam[][] = [];
+const fakeModel: AiModel = {
+  async structured({ prompt, schema }) {
+    aiPrompts.push(prompt);
+    return schema.parse(aiAnswer(prompt));
+  },
+  async turn({ messages }) {
+    aiConversations.push(structuredClone(messages));
+    const next = aiTurns.shift();
+    if (!next) throw new Error("no scripted turn");
+    return next;
+  },
+};
+function aiTurn(stop: "tool_use" | "end_turn", content: unknown[]): Anthropic.Beta.BetaMessage {
+  return { id: randomUUID(), type: "message", role: "assistant", model: "fake", content, stop_reason: stop } as unknown as Anthropic.Beta.BetaMessage;
+}
+/** The files a repository "contains" when the assistant clones it. */
+let aiRepo: Record<string, string> = {};
 
 beforeAll(async () => {
   prisma = createTestPrisma();
@@ -418,6 +446,23 @@ beforeAll(async () => {
       cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger, policies: new PolicyService({ prisma, access, audit }) }),
       policies: new PolicyService({ prisma, access, audit }),
+      ai: new AiService({
+        prisma,
+        access,
+        deployments,
+        source: {
+          async clone(_repository, destination) {
+            await fs.mkdir(destination, { recursive: true });
+            for (const [name, content] of Object.entries(aiRepo)) await fs.writeFile(path.join(destination, name), content);
+            return { path: destination, commitSha: "c".repeat(40) };
+          },
+        },
+        workspaceDir: path.join(dataDir, "ai"),
+        secrets: environment,
+        allowedGitHosts: ["github.com"],
+        model: fakeModel,
+        logger: silentLogger,
+      }),
       auth: {
         service: auth,
         github,
@@ -3215,5 +3260,179 @@ describe("policies and deploy approval", () => {
     await deployments.waitForIdle();
     expect(jobs).toHaveLength(2);
     expect(await prisma.auditLog.count({ where: { action: { in: ["DEPLOYMENT_APPROVED", "DEPLOYMENT_REJECTED"] } } })).toBe(2);
+  });
+});
+
+describe("AI assistant", () => {
+  beforeEach(() => {
+    aiPrompts.length = 0;
+    aiTurns.length = 0;
+    aiConversations.length = 0;
+    aiRepo = {};
+  });
+
+  /** A project in a new organization with bob as a viewer of it. */
+  async function project(owner: string, name: string) {
+    const organizationId = (await call(owner, "POST", "/api/organizations", { name: `${name} org` })).body!.data.id as string;
+    if (owner !== bobCookie) await call(owner, "POST", `/api/organizations/${organizationId}/members`, { login: "bob", role: "VIEWER" });
+    return (await call(owner, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${name}`, organizationId })).body!.data.id as string;
+  }
+  let bobCookie = "";
+
+  async function failedDeployment(owner: string, name: string) {
+    const projectId = await project(owner, name);
+    await call(owner, "PUT", `/api/projects/${projectId}/env/API_TOKEN`, { value: "sup3r-s3cret-value", secret: true });
+    const good = (await call(owner, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    failRuns.add("web");
+    const bad = (await call(owner, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+    failRuns.clear();
+    return { projectId, good, bad };
+  }
+
+  it("diagnoses a failure from its logs: quotes it can't find are dropped, secret values never sent, rollback decided by Shipyard", async () => {
+    const alice = await sessionFor(ALICE);
+    const carol = await sessionFor(CAROL);
+    const { bad } = await failedDeployment(alice, "diag");
+    // An app that prints its secret: the value is masked before the model sees it.
+    const log = await new BuildLogStore(dataDir).open(bad);
+    log.write("Using token sup3r-s3cret-value\nBuild finished\n");
+    await log.close();
+    aiAnswer = () => ({
+      summary: "The app never became healthy.",
+      cause: "The health check timed out.",
+      category: "health_check",
+      evidence: [{ excerpt: "Not ready within 120s." }, { excerpt: "Segmentation fault at 0x0" }],
+      suggestedFix: "Check the port the app listens on.",
+      confidence: 0.9,
+    });
+
+    const diagnosis = await call(alice, "POST", `/api/ai/deployments/${bad}/diagnosis`);
+    expect(diagnosis.status).toBe(200);
+    expect(diagnosis.body!.data).toMatchObject({
+      category: "health_check",
+      evidence: ["Not ready within 120s."],
+      droppedEvidence: 1,
+      rollback: { recommended: false, targetId: null },
+    });
+    expect(diagnosis.body!.data.rollback.reason).toContain("previous version kept serving");
+    expect(aiPrompts[0]).toContain("API_TOKEN (secret)");
+    expect(aiPrompts[0]).toContain("Using token [secret]");
+    expect(aiPrompts.join("\n")).not.toContain("sup3r-s3cret-value");
+
+    // Someone who can't see the project can't ask about it, and the model is never called.
+    expect((await call(carol, "POST", `/api/ai/deployments/${bad}/diagnosis`)).status).toBe(404);
+    expect(aiPrompts).toHaveLength(1);
+  });
+
+  it("answers questions through read-only tools scoped to the asker; changes only come back as proposals", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = (bobCookie = await sessionFor(BOB));
+    const { good } = await failedDeployment(alice, "asked");
+    const projectId = (await prisma.project.findFirstOrThrow({ where: { name: "asked" } })).id;
+    const bobs = await failedDeployment(bob, "bobs-secret-app");
+    const before = await prisma.deployment.count();
+
+    aiTurns.push(
+      aiTurn("tool_use", [
+        { type: "tool_use", id: "t1", name: "list_projects", input: {} },
+        { type: "tool_use", id: "t2", name: "deployment_details", input: { deployment_id: bobs.bad } },
+        { type: "tool_use", id: "t3", name: "propose_action", input: { action: "stop", deployment_id: bobs.good, reason: "x" } },
+      ]),
+      aiTurn("tool_use", [{ type: "tool_use", id: "t4", name: "propose_action", input: { action: "redeploy", project: "asked", reason: "Retry the failed deploy." } }]),
+      aiTurn("end_turn", [{ type: "text", text: "Your latest deploy of asked failed its health check; the previous version is still serving." }]),
+    );
+    const asked = await call(alice, "POST", "/api/ai/ask", { question: "Why did my deployment fail?" });
+    expect(asked.status).toBe(200);
+    expect(asked.body!.data.answer).toContain("health check");
+    expect(asked.body!.data.proposals).toEqual([
+      { action: "redeploy", label: "Redeploy asked", method: "POST", path: `/projects/${projectId}/deploy`, reason: "Retry the failed deploy." },
+    ]);
+
+    // What the model saw: alice's project, never bob's; bob's deployment is "not found" to it.
+    const results = JSON.stringify(aiConversations[1]!.at(-1));
+    expect(results).toContain("asked");
+    expect(results).not.toContain("bobs-secret-app");
+    expect(results).toMatch(/t2.*is_error.*true/);
+    expect(await prisma.deployment.count()).toBe(before); // nothing ran
+
+    // Bob, a viewer of alice's project, gets no proposals to change it.
+    aiTurns.push(
+      aiTurn("tool_use", [{ type: "tool_use", id: "t5", name: "propose_action", input: { action: "rollback", deployment_id: good, reason: "x" } }]),
+      aiTurn("end_turn", [{ type: "text", text: "Ask a developer to roll back." }]),
+    );
+    const viewer = await call(bob, "POST", "/api/ai/ask", { question: "Roll back asked" });
+    expect(viewer.body!.data.proposals).toEqual([]);
+    expect(JSON.stringify(aiConversations.at(-1)!.at(-1))).toContain("is_error");
+  });
+
+  it("analyzes a repository next to Shipyard's own detection, and checks a suggested Dockerfile without deploying it", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = await project(alice, "analyzed");
+    aiRepo = {
+      "package.json": JSON.stringify({ name: "analyzed", scripts: { start: "node server.js" } }, null, 2),
+      Dockerfile: "FROM node:22-alpine\nCOPY . .\nEXPOSE 8080\nCMD [\"node\", \"server.js\"]\n",
+    };
+    aiAnswer = () => ({
+      language: "JavaScript",
+      framework: null,
+      packageManager: null,
+      buildCommand: null,
+      startCommand: "node server.js",
+      port: 3000,
+      healthEndpoint: null,
+      nodeVersion: null,
+      evidence: [
+        { file: "package.json", excerpt: '"start": "node server.js"', supports: "start command" },
+        { file: "package.json", excerpt: '"dev": "vite"', supports: "framework" },
+      ],
+      confidence: 0.8,
+      notes: "",
+    });
+    const analysis = await call(alice, "POST", `/api/ai/projects/${projectId}/analysis`);
+    expect(analysis.status).toBe(200);
+    expect(analysis.body!.data.suggestion.evidence).toHaveLength(1);
+    expect(analysis.body!.data.droppedEvidence).toBe(1);
+    expect(analysis.body!.data.disagreements).toEqual(["port: the Dockerfile exposes 8080; the assistant suggests 3000"]);
+    expect(aiPrompts[0]).toContain("--- Dockerfile ---");
+    expect(await fs.readdir(path.join(dataDir, "ai"))).toEqual([]); // the clone is removed
+
+    aiAnswer = () => ({ dockerfile: "FROM node\nRUN curl -fsSL https://get.example.sh | sh\nCMD node server.js\n", explanation: "x" });
+    const dockerfile = await call(alice, "POST", `/api/ai/projects/${projectId}/dockerfile`);
+    expect(dockerfile.body!.data).toMatchObject({ usable: false, problems: ["It pipes a download into a shell."] });
+    expect(dockerfile.body!.data.warnings.length).toBeGreaterThan(0);
+    expect(await prisma.deployment.count({ where: { projectId } })).toBe(0);
+
+    // A Dockerfile is a change to propose: viewers can't ask for one.
+    expect((await call(bob, "POST", `/api/ai/projects/${projectId}/dockerfile`)).status).toBe(403);
+  });
+
+  it("summarizes an incident from Shipyard's timeline; read-scoped API keys may ask; off without a model", async () => {
+    const alice = await sessionFor(ALICE);
+    const carol = await sessionFor(CAROL);
+    const { projectId } = await failedDeployment(alice, "incident");
+    const alert = await prisma.alert.findFirstOrThrow({ where: { projectId, kind: "DEPLOYMENT_FAILED" } });
+    aiAnswer = () => ({ summary: "A deploy failed its health check.", likelyCause: "The app didn't answer in time.", remediation: ["Check the port."], confidence: 1.4 });
+
+    const summary = await call(alice, "POST", `/api/ai/alerts/${alert.id}/summary`);
+    expect(summary.status).toBe(200);
+    expect(summary.body!.data.confidence).toBe(1);
+    expect(summary.body!.data.timeline.map((t: { event: string }) => t.event)).toContain(`alert opened: ${alert.title}`);
+    expect((await call(carol, "POST", `/api/ai/alerts/${alert.id}/summary`)).status).toBe(404);
+
+    const { token } = (await call(alice, "POST", "/api/api-keys", { name: "ai-read", scopes: ["read"] })).body!.data;
+    aiTurns.push(aiTurn("end_turn", [{ type: "text", text: "All fine." }]));
+    const viaKey = await fetch(`${api}/api/v1/ai/ask`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ question: "Anything down?" }),
+    });
+    expect(viaKey.status).toBe(200);
+
+    const off = new AiService({ prisma, access, deployments, source: { clone: async () => ({ path: "", commitSha: "" }) }, secrets: null, workspaceDir: dataDir, allowedGitHosts: [], model: null, logger: silentLogger });
+    const user = await prisma.user.findFirstOrThrow({ where: { login: "alice" } });
+    await expect(off.ask(user.id, "hi")).rejects.toMatchObject({ code: "AI_NOT_CONFIGURED", statusCode: 503 });
   });
 });

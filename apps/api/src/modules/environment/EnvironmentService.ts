@@ -156,6 +156,17 @@ export class EnvironmentService {
   }
 
   /**
+   * The decrypted values of these projects' secrets, to mask them in text
+   * that leaves Shipyard (the AI assistant's prompts). No access check: the
+   * caller has done it, and the values never leave the process.
+   */
+  async secretValues(projectIds: readonly string[]): Promise<string[]> {
+    const rows = await this.deps.prisma.environmentVariable.findMany({ where: { projectId: { in: [...projectIds] }, secret: true } });
+    // Very short values would mask ordinary text without protecting anything.
+    return rows.map((row) => this.reveal(row)).filter((value) => value.length >= 4);
+  }
+
+  /**
    * Encrypted rows for variables Shipyard sets itself (a database's password
    * and URL), to be written in the caller's transaction. No access check:
    * the caller has done it.

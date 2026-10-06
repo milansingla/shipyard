@@ -72,6 +72,7 @@ export interface RateLimits {
   deploys: RateLimitRule;
   writes: RateLimitRule;
   reads: RateLimitRule;
+  ai: RateLimitRule;
 }
 
 const MINUTE = 60_000;
@@ -91,6 +92,8 @@ export const DEFAULT_RATE_LIMITS: RateLimits = {
   writes: { limit: 120, windowMs: MINUTE },
   /** Per user: reads, including the dashboard's polling (~40/min per open tab). */
   reads: { limit: 1_200, windowMs: MINUTE },
+  /** Per user: AI assistant requests (each one is a paid model call, some several). */
+  ai: { limit: 10, windowMs: MINUTE },
 };
 
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);

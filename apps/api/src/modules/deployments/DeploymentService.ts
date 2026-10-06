@@ -1292,6 +1292,17 @@ export class DeploymentService {
     if (route) await this.deps.router.deactivate(route.name, deployment.id);
   }
 
+  /** The deployment a rollback from this one would bring back, or null if there is none. */
+  async rollbackCandidate(id: string, userId: string): Promise<Deployment | null> {
+    const { deployment } = await this.deps.access.deployment(id, userId, OrgRole.VIEWER);
+    try {
+      return await this.findRollbackTarget(deployment);
+    } catch (error) {
+      if (error instanceof ConflictError) return null;
+      throw error;
+    }
+  }
+
   /** Whether a deployment waits for approval, and how that was decided. */
   async approvalOf(id: string, userId: string): Promise<{ status: "NOT_REQUIRED" | "AWAITING" | "APPROVED" | "REJECTED"; decidedBy: string | null; decidedAt: Date | null }> {
     await this.deps.access.deployment(id, userId, OrgRole.VIEWER);

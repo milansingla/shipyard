@@ -151,6 +151,9 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
           <Link href="/alerts" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
             Alerts
           </Link>
+          <Link href="/assistant" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
+            Assistant
+          </Link>
           <Link href="/activity" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
             Activity
           </Link>
