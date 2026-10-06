@@ -11,8 +11,9 @@ export function atLeast(role: OrgRole, need: OrgRole): boolean {
 export type ProjectWithRole = Project & { role: OrgRole; organization: Pick<Organization, "id" | "name" | "personal"> };
 
 /**
- * Every authorization decision in one place. Access to a project comes only
- * from membership in its organization:
+ * Every authorization decision in one place. Access to a project comes from
+ * membership in its organization, and a team the member is in may grant a
+ * higher role on that project:
  *
  * - not a member → 404, the same as a project that doesn't exist, so ids of
  *   other teams' projects can't be probed;
@@ -33,8 +34,14 @@ export class AccessService {
         organization: { select: { id: true, name: true, personal: true, memberships: { where: { userId }, select: { role: true } } } },
       },
     });
-    const role = project?.organization.memberships[0]?.role;
-    if (!project || !role) throw new NotFoundError(`Project not found: ${projectId}`);
+    const membership = project?.organization.memberships[0]?.role;
+    if (!project || !membership) throw new NotFoundError(`Project not found: ${projectId}`);
+    // A team grant can raise a member's role on this project (never above ADMIN).
+    const grants = await this.prisma.teamProjectGrant.findMany({
+      where: { projectId, team: { members: { some: { userId } } } },
+      select: { role: true },
+    });
+    const role = grants.reduce<OrgRole>((best, grant) => (RANK[grant.role] > RANK[best] ? grant.role : best), membership);
     requireRole(role, need, project.organization.name);
     const { memberships: _memberships, ...organization } = project.organization;
     return { ...project, organization, role };

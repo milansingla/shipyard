@@ -27,6 +27,8 @@ import { WorkerRegistry } from "../../src/modules/workers/WorkerRegistry.js";
 import { MetricsService } from "../../src/modules/metrics/MetricsService.js";
 import { AlertService } from "../../src/modules/alerts/AlertService.js";
 import { CleanupService } from "../../src/modules/cleanup/CleanupService.js";
+import { TeamService } from "../../src/modules/access/TeamService.js";
+import { ServiceAccountService } from "../../src/modules/access/ServiceAccountService.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "../../src/services/notify/NotificationProvider.js";
 import { WorkerCalls } from "../../src/modules/workers/WorkerCalls.js";
 import { RemoteEngine } from "../../src/modules/workers/RemoteEngine.js";
@@ -372,6 +374,7 @@ beforeAll(async () => {
     logger: silentLogger,
   });
 
+  const apiKeys = new ApiKeyService({ prisma, audit, logger: silentLogger });
   apiServer.on(
     "request",
     createApp({
@@ -396,6 +399,8 @@ beforeAll(async () => {
         onOnline: (id) => alerts.workerOnline(id),
       })),
       workerCalls: (workerCalls = new WorkerCalls({ prisma, logger: silentLogger })),
+      teams: new TeamService({ prisma, access, audit }),
+      serviceAccounts: new ServiceAccountService({ prisma, access, audit, apiKeys }),
       metrics: (metrics = new MetricsService({ prisma, access, deployments, logger: silentLogger })),
       alerts: (alerts = new AlertService({
         prisma,
@@ -416,7 +421,7 @@ beforeAll(async () => {
         sessionCookie: SESSION_COOKIE,
         secureCookies: false,
         appUrl: APP_URL,
-        apiKeys: new ApiKeyService({ prisma, audit, logger: silentLogger }),
+        apiKeys,
       },
       webhooks: {
         service: new WebhookService({
@@ -524,7 +529,7 @@ describe("GitHub sign-in", () => {
 
     const me = await call(cookieFrom(callback, SESSION_COOKIE), "GET", "/api/auth/me");
     expect(me.status).toBe(200);
-    expect(me.body).toEqual({ data: { id: expect.any(String), githubId: "1001", login: "alice", name: null, avatarUrl: null } });
+    expect(me.body).toEqual({ data: { id: expect.any(String), githubId: "1001", login: "alice", name: null, avatarUrl: null, kind: "HUMAN" } });
     expect(JSON.stringify(me.body)).not.toContain("gho_");
   });
 
@@ -533,7 +538,7 @@ describe("GitHub sign-in", () => {
     const rawSession = cookie.split("=")[1]!;
 
     const user = await prisma.user.findUniqueOrThrow({ where: { githubId: 1001n } });
-    expect(user.githubAccessToken.startsWith("v1:")).toBe(true);
+    expect(user.githubAccessToken!.startsWith("v1:")).toBe(true);
     expect(user.githubAccessToken).not.toContain("gho_");
 
     const sessions = await prisma.session.findMany();
@@ -2999,5 +3004,87 @@ describe("cleanup", () => {
     }
     expect((await prisma.environment.findUniqueOrThrow({ where: { id: preview.id } })).status).toBe("CLOSED");
     expect(await prisma.workerCall.count()).toBe(0);
+  });
+});
+
+describe("teams, service accounts and scoped API keys", () => {
+  const bearer = async (token: string, method: string, route: string, body?: unknown) => {
+    const res = await fetch(`${api}${route}`, {
+      method,
+      headers: { authorization: `Bearer ${token}`, ...(body !== undefined && { "content-type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, body: text ? (JSON.parse(text) as Record<string, any>) : null };
+  };
+
+  it("a team grants its members a role on chosen projects only", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    await sessionFor(CAROL);
+    const orgId = (await call(alice, "POST", "/api/organizations", { name: "Grants" })).body!.data.id as string;
+    await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "bob", role: "VIEWER" });
+    const site = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/team-site", organizationId: orgId })).body!.data.id as string;
+    const billing = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/team-billing", organizationId: orgId })).body!.data.id as string;
+
+    expect((await call(bob, "POST", `/api/organizations/${orgId}/teams`, { name: "frontend" })).status).toBe(403);
+    const team = (await call(alice, "POST", `/api/organizations/${orgId}/teams`, { name: "frontend" })).body!.data;
+    expect((await call(alice, "POST", `/api/organizations/${orgId}/teams`, { name: "frontend" })).status).toBe(409);
+    expect((await call(alice, "POST", `/api/teams/${team.id}/members`, { login: "carol" })).status).toBe(400); // not in the organization
+    expect((await call(alice, "POST", `/api/teams/${team.id}/members`, { login: "bob" })).status).toBe(204);
+    expect((await call(alice, "PUT", `/api/teams/${team.id}/projects/${site}`, { role: "OWNER" })).status).toBe(400);
+
+    expect((await call(bob, "POST", `/api/projects/${site}/deploy`)).status).toBe(403); // a VIEWER, so far
+    expect((await call(alice, "PUT", `/api/teams/${team.id}/projects/${site}`, { role: "DEVELOPER" })).status).toBe(204);
+    expect((await call(bob, "POST", `/api/projects/${site}/deploy`)).status).toBe(202);
+    expect((await call(bob, "POST", `/api/projects/${billing}/deploy`)).status).toBe(403); // not granted
+    await deployments.waitForIdle();
+
+    const listed = (await call(bob, "GET", `/api/organizations/${orgId}/teams`)).body!.data as Array<Record<string, any>>;
+    expect(listed).toMatchObject([{ name: "frontend", members: [{ login: "bob" }], grants: [{ projectId: site, role: "DEVELOPER" }] }]);
+    expect((await call(alice, "DELETE", `/api/teams/${team.id}/projects/${site}`)).status).toBe(204);
+    expect((await call(bob, "POST", `/api/projects/${site}/deploy`)).status).toBe(403);
+    expect((await call(await sessionFor(CAROL), "GET", `/api/organizations/${orgId}/teams`)).status).toBe(404);
+  });
+
+  it("a service account acts with its role through scoped keys only, and stops when deleted", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const orgId = (await call(alice, "POST", "/api/organizations", { name: "Automation" })).body!.data.id as string;
+    await call(alice, "POST", `/api/organizations/${orgId}/members`, { login: "bob", role: "DEVELOPER" });
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/ci-app", organizationId: orgId })).body!.data.id as string;
+
+    expect((await call(bob, "POST", `/api/organizations/${orgId}/service-accounts`, { name: "ci", role: "DEVELOPER" })).status).toBe(403);
+    expect((await call(alice, "POST", `/api/organizations/${orgId}/service-accounts`, { name: "ci", role: "OWNER" })).status).toBe(400);
+    const account = (await call(alice, "POST", `/api/organizations/${orgId}/service-accounts`, { name: "ci", role: "DEVELOPER" })).body!.data;
+    expect(account).toMatchObject({ login: "ci[bot]", role: "DEVELOPER" });
+
+    const deployKey = (await call(alice, "POST", `/api/service-accounts/${account.id}/keys`, { name: "github-actions", scopes: ["deploy"] })).body!.data;
+    const readKey = (await call(alice, "POST", `/api/service-accounts/${account.id}/keys`, { name: "dashboard", scopes: ["read"] })).body!.data;
+    expect(deployKey.key.scopes).toEqual(["deploy"]);
+
+    expect((await bearer(deployKey.token, "GET", `/api/projects/${projectId}`)).status).toBe(200);
+    expect((await bearer(deployKey.token, "POST", `/api/projects/${projectId}/deploy`)).status).toBe(202);
+    const settings = await bearer(deployKey.token, "PATCH", `/api/projects/${projectId}`, { cpuLimit: 1 });
+    expect(settings.status).toBe(403);
+    expect(settings.body!.error.message).toContain("limited to deploy");
+    expect((await bearer(readKey.token, "POST", `/api/projects/${projectId}/deploy`)).status).toBe(403);
+    expect((await bearer(readKey.token, "GET", "/api/projects")).body!.data.map((p: Record<string, unknown>) => p.id)).toEqual([projectId]);
+    // A key can't mint keys, and a service account has no GitHub.
+    expect((await bearer(deployKey.token, "POST", `/api/service-accounts/${account.id}/keys`, { name: "x" })).status).toBe(403);
+    expect((await bearer(readKey.token, "GET", "/api/github/repos")).status).toBe(403);
+    await deployments.waitForIdle();
+
+    expect((await call(alice, "DELETE", `/api/service-accounts/${account.id}`)).status).toBe(204);
+    expect((await bearer(deployKey.token, "GET", "/api/projects")).status).toBe(401);
+  });
+
+  it("a person's own key can be scoped too", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/scoped" })).body!.data.id as string;
+    const { token } = (await call(alice, "POST", "/api/api-keys", { name: "read-only", scopes: ["read"] })).body!.data;
+    expect((await bearer(token, "GET", `/api/projects/${projectId}`)).status).toBe(200);
+    expect((await bearer(token, "POST", `/api/projects/${projectId}/deploy`)).status).toBe(403);
+    expect((await bearer(token, "DELETE", `/api/projects/${projectId}`)).status).toBe(403);
   });
 });

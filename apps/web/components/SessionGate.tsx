@@ -146,7 +146,7 @@ function Header({ user, onSignedOut }: { user: User; onSignedOut: () => void }) 
             <span className="hidden font-semibold sm:inline">{user.login}</span>
           </span>
           <Link href="/teams" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
-            Teams
+            Organizations
           </Link>
           <Link href="/alerts" className="text-sm underline decoration-rivet underline-offset-4 hover:decoration-ink">
             Alerts

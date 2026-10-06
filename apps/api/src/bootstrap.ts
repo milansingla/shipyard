@@ -29,6 +29,8 @@ import { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import { MetricsService } from "./modules/metrics/MetricsService.js";
 import { AlertService } from "./modules/alerts/AlertService.js";
 import { CleanupService } from "./modules/cleanup/CleanupService.js";
+import { TeamService } from "./modules/access/TeamService.js";
+import { ServiceAccountService } from "./modules/access/ServiceAccountService.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "./services/notify/NotificationProvider.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
@@ -67,6 +69,8 @@ export interface ApiServices extends EngineServices {
   metrics: MetricsService;
   cleanup: CleanupService;
   alerts: AlertService;
+  teams: TeamService;
+  serviceAccounts: ServiceAccountService | null;
   workerRouting: unknown;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
@@ -245,6 +249,8 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     onOnline: (workerId) => alerts.workerOnline(workerId),
   });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
+  const teams = new TeamService({ prisma, access, audit });
+  const serviceAccounts = auth ? new ServiceAccountService({ prisma, access, audit, apiKeys: auth.apiKeys }) : null;
   const guard = new UrlGuard(config.allowPrivateWebhooks);
   const alerts: AlertService = new AlertService({
     prisma,
@@ -258,6 +264,8 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
   });
   const metrics = new MetricsService({ prisma, access, deployments, logger: logger.child({ component: "metrics" }) });
   return {
+    teams,
+    serviceAccounts,
     workers,
     cleanup: new CleanupService({ prisma, deployments, environments, workspace: engineServices.workspace, logger: logger.child({ component: "cleanup" }) }),
     metrics,

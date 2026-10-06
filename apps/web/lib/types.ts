@@ -198,6 +198,8 @@ export interface ApiKey {
   lastUsedAt: string | null;
   expiresAt: string | null;
   revokedAt: string | null;
+  /** Empty = everything you may do; otherwise read, deploy or write. */
+  scopes: string[];
 }
 
 export interface AuditEntry {
@@ -336,4 +338,20 @@ export interface NotificationChannel {
   enabled: boolean;
   lastError: string | null;
   lastSentAt: string | null;
+}
+
+/** A team inside an organization, and the projects it is granted a role on. */
+export interface OrgTeam {
+  id: string;
+  name: string;
+  members: Array<{ id: string; login: string }>;
+  grants: Array<{ projectId: string; projectName: string; role: OrgRole }>;
+}
+
+export interface ServiceAccount {
+  id: string;
+  login: string;
+  name: string;
+  role: OrgRole;
+  keys: ApiKey[];
 }

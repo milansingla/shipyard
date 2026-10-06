@@ -59,6 +59,8 @@ const app = createApp({
   workerCalls: services.workerCalls,
   metrics: services.metrics,
   alerts: services.alerts,
+  teams: services.teams,
+  serviceAccounts: services.serviceAccounts ?? undefined,
   workerRouting: services.workerRouting,
   environments: services.environments,
   auth: services.auth,

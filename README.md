@@ -182,6 +182,9 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [Services](docs/services.md) — multi-service projects, private networking, per-service settings, volumes
 - [Databases](docs/databases.md) — self-hosted PostgreSQL services, `DATABASE_URL`, backups
 - [Cron jobs](docs/cron.md) — scheduled commands in a service's image, with every run recorded
+- [Access control](docs/rbac.md) — roles, teams, service accounts, API key scopes
+- [Workers](docs/workers.md) — worker machines, the deploy queue, scheduler and leases
+- [Observability](docs/observability.md) — metrics · [Operations](docs/operations.md) — alerts, backups, restore, cleanup, disaster recovery
 - [Environments](docs/environments.md) — production, development, pull-request previews; variables per environment
 - [Teams & roles](docs/teams.md) — organizations, OWNER/ADMIN/DEVELOPER/VIEWER, what each may do
 - [Environment variables & secrets](docs/environment.md) — encrypted per-project config, runtime vs build

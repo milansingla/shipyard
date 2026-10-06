@@ -20,6 +20,7 @@ export default function AccountPage() {
   const keys = useApi<ApiKey[]>("/api-keys");
   const [name, setName] = useState("");
   const [expiry, setExpiry] = useState("90");
+  const [scope, setScope] = useState("all");
   const [created, setCreated] = useState<{ name: string; token: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -43,7 +44,7 @@ export default function AccountPage() {
     void act(async () => {
       const result = await api<{ key: ApiKey; token: string }>("/api-keys", {
         method: "POST",
-        body: { name, ...(expiry !== "never" && { expiresInDays: Number(expiry) }) },
+        body: { name, ...(expiry !== "never" && { expiresInDays: Number(expiry) }), ...(scope !== "all" && { scopes: [scope] }) },
       });
       setCreated({ name: result.key.name, token: result.token });
       setCopied(false);
@@ -103,6 +104,14 @@ export default function AccountPage() {
                 {option.label}
               </option>
             ))}
+          </select>
+        </label>
+        <label className="flex flex-col gap-2">
+          <Label>May</Label>
+          <select value={scope} onChange={(event) => setScope(event.target.value)} className="h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink">
+            <option value="all">Do anything you can</option>
+            <option value="deploy">Read and deploy</option>
+            <option value="read">Only read</option>
           </select>
         </label>
         <Button type="submit" busy={busy}>

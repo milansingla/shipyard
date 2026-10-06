@@ -2,6 +2,8 @@
 
 import { type FormEvent, useState } from "react";
 
+import { OrgTeams } from "@/components/OrgTeams";
+import { ServiceAccounts } from "@/components/ServiceAccounts";
 import { Button, ErrorNote, Label } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { can } from "@/lib/roles";
@@ -46,15 +48,15 @@ export default function TeamsPage() {
 
   return (
     <div className="pt-12">
-      <h1 className="font-display text-5xl font-bold uppercase">Teams</h1>
+      <h1 className="font-display text-5xl font-bold uppercase">Organizations</h1>
       <p className="mt-3 max-w-2xl text-ink-soft">
-        A team shares projects. Your personal projects stay yours; create a team to work with others, then pick it when you
-        create a project.
+        An organization shares projects. Your personal projects stay yours; create an organization to work with others, then
+        pick it when you create a project. Inside one, teams give groups more access to chosen projects.
       </p>
 
       <div className="mt-8 grid gap-10 lg:grid-cols-[16rem_minmax(0,1fr)]">
         <div>
-          <ul className="flex flex-col gap-1" aria-label="Your teams">
+          <ul className="flex flex-col gap-1" aria-label="Your organizations">
             {teams.map((team) => (
               <li key={team.id}>
                 <button
@@ -73,23 +75,29 @@ export default function TeamsPage() {
               </li>
             ))}
           </ul>
-          {organizations.data && teams.length === 0 && <p className="text-sm text-ink-soft">You&apos;re not in a team yet.</p>}
+          {organizations.data && teams.length === 0 && <p className="text-sm text-ink-soft">You&apos;re not in an organization yet.</p>}
 
           <form onSubmit={(event) => void create(event)} className="mt-6 flex flex-col gap-2 border-t border-rivet pt-4">
-            <Label>New team</Label>
+            <Label>New organization</Label>
             <input value={name} onChange={(event) => setName(event.target.value)} required maxLength={64} placeholder="e.g. Acme" className={FIELD} />
             <Button type="submit" busy={busy}>
-              Create team
+              Create organization
             </Button>
           </form>
           {error && (
             <div className="mt-4">
-              <ErrorNote title="Couldn't create the team">{error.message}</ErrorNote>
+              <ErrorNote title="Couldn't create the organization">{error.message}</ErrorNote>
             </div>
           )}
         </div>
 
-        {selected && <Members key={selected.id} team={selected} onChanged={() => void organizations.reload()} />}
+        {selected && (
+          <div key={selected.id}>
+            <Members team={selected} onChanged={() => void organizations.reload()} />
+            <OrgTeams organization={selected} />
+            {can(selected.role, "ADMIN") && <ServiceAccounts organization={selected} />}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -14,6 +14,9 @@ export interface AuthUser {
   login: string;
   name: string | null;
   avatarUrl: string | null;
+  kind: "HUMAN" | "SERVICE_ACCOUNT";
+  /** Only for API keys: what the key may do (empty = everything its owner may). */
+  scopes?: readonly string[];
 }
 
 export interface AuthServiceDeps {
@@ -141,12 +144,13 @@ export class AuthService {
     const key = await this.deps.prisma.apiKey.findUnique({ where: { hash: hashToken(token) }, include: { user: true } });
     const now = this.now();
     if (!key || key.revokedAt || (key.expiresAt && key.expiresAt <= now)) return null;
-    if (!this.isAllowed(key.user.login)) return null;
+    // Service accounts aren't GitHub users: the sign-in allowlist is about people.
+    if (key.user.kind === "HUMAN" && !this.isAllowed(key.user.login)) return null;
     // At most one write a minute per key: "last used" doesn't need to be exact.
     if (!key.lastUsedAt || now.getTime() - key.lastUsedAt.getTime() > 60_000) {
       await this.deps.prisma.apiKey.update({ where: { id: key.id }, data: { lastUsedAt: now } });
     }
-    return toAuthUser(key.user);
+    return { ...toAuthUser(key.user), scopes: key.scopes };
   }
 
   /** Idempotent: signing out twice, or with an unknown cookie, is fine. */
@@ -159,6 +163,9 @@ export class AuthService {
   async githubToken(userId: string): Promise<string> {
     const user = await this.deps.prisma.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthenticatedError();
+    if (!user.githubAccessToken) {
+      throw new AppError(ErrorCode.FORBIDDEN, "Service accounts have no GitHub account: browse repositories as a person.", { statusCode: 403 });
+    }
     try {
       return this.deps.secretBox.decrypt(user.githubAccessToken);
     } catch {
@@ -197,7 +204,8 @@ export class AuthService {
 function toAuthUser(user: User): AuthUser {
   return {
     id: user.id,
-    githubId: user.githubId.toString(),
+    githubId: user.githubId?.toString() ?? "",
+    kind: user.kind,
     login: user.login,
     name: user.name,
     avatarUrl: user.avatarUrl,

@@ -42,13 +42,14 @@ enum DeploymentTrigger {
 /// A person who signed in with GitHub. GitHub is the only identity provider in V2.
 model User {
   id                String    @id @default(uuid()) @db.Uuid
-  /// GitHub's numeric account id: stable, unlike `login`, which users can rename.
-  githubId          BigInt    @unique
+  kind              UserKind  @default(HUMAN)
+  /// GitHub's numeric account id: stable, unlike `login`, which users can rename. null for service accounts.
+  githubId          BigInt?   @unique
   login             String
   name              String?
   avatarUrl         String?
-  /// AES-256-GCM ciphertext (see src/lib/secretBox.ts). Never returned by the API.
-  githubAccessToken String
+  /// AES-256-GCM ciphertext (see src/lib/secretBox.ts). Never returned by the API. null for service accounts.
+  githubAccessToken String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
   projectsCreated   Project[]
@@ -57,8 +58,16 @@ model User {
   deploymentEvents  DeploymentEvent[]
   apiKeys           ApiKey[]
   auditLogs         AuditLog[]
+  teams             TeamMember[]
 
   @@map("users")
+}
+
+enum UserKind {
+  /// Signs in with GitHub.
+  HUMAN
+  /// An automation identity of one organization (CI, scripts): API keys only, never a session.
+  SERVICE_ACCOUNT
 }
 
 /// A signed-in browser. The cookie holds a random token; only its SHA-256
@@ -118,6 +127,7 @@ model Project {
   services        Service[]
   cronJobs     CronJob[]
   environments Environment[]
+  teamGrants   TeamProjectGrant[]
 
   @@index([organizationId, createdAt(sort: Desc)])
   @@map("projects")
@@ -144,6 +154,7 @@ model Organization {
   createdAt   DateTime     @default(now())
   memberships Membership[]
   projects    Project[]
+  teams       Team[]
   notificationChannels NotificationChannel[]
   alerts      Alert[]
 
@@ -178,6 +189,8 @@ model ApiKey {
   lastUsedAt DateTime?
   expiresAt  DateTime?
   revokedAt  DateTime?
+  /// Empty = everything its owner may do; otherwise "read", "deploy" or "write".
+  scopes     String[]  @default([])
 
   @@index([userId])
   @@map("api_keys")
@@ -210,6 +223,11 @@ enum AuditAction {
   CRON_JOB_CHANGED
   CRON_JOB_DELETED
   CRON_JOB_RUN
+  TEAM_CREATED
+  TEAM_CHANGED
+  TEAM_DELETED
+  SERVICE_ACCOUNT_CREATED
+  SERVICE_ACCOUNT_DELETED
 }
 
 /// Who did what, append-only. Kept when the project is deleted (no foreign
@@ -793,4 +811,44 @@ model Alert {
   @@index([organizationId, status, openedAt(sort: Desc)])
   @@index([fingerprint, status])
   @@map("alerts")
+}
+
+/// A group of an organization's members, granted roles on specific projects.
+/// A member's role on a project is the higher of their organization role and
+/// their teams' grants on it.
+model Team {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String             @db.Uuid
+  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  createdAt      DateTime           @default(now())
+  members        TeamMember[]
+  grants         TeamProjectGrant[]
+
+  @@unique([organizationId, name])
+  @@map("teams")
+}
+
+model TeamMember {
+  teamId String @db.Uuid
+  team   Team   @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([teamId, userId])
+  @@index([userId])
+  @@map("team_members")
+}
+
+model TeamProjectGrant {
+  teamId    String  @db.Uuid
+  team      Team    @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  projectId String  @db.Uuid
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  /// Never OWNER: owning is an organization role.
+  role      OrgRole
+
+  @@id([teamId, projectId])
+  @@index([projectId])
+  @@map("team_project_grants")
 }

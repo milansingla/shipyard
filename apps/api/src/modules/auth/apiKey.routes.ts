@@ -6,11 +6,14 @@ import { sendData } from "../../lib/http.js";
 import { idParamsSchema, parseInput } from "../../lib/validation.js";
 import { requireUser } from "../../middleware/authenticate.js";
 import type { ApiKeyService } from "./ApiKeyService.js";
+import { API_KEY_SCOPES } from "../../middleware/apiKeyScopes.js";
 
 const createApiKeySchema = z.strictObject({
   name: z.string().trim().min(1).max(64),
   /** Omit for a key that doesn't expire. */
   expiresInDays: z.int().min(1).max(365).optional(),
+  /** Omit (or write) for everything you may do; read, or deploy, to limit it. */
+  scopes: z.array(z.enum(API_KEY_SCOPES)).max(3).optional(),
 });
 
 export function createApiKeyRouter(apiKeys: ApiKeyService): Router {

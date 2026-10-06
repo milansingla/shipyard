@@ -14,6 +14,7 @@ export interface ApiKeyView {
   lastUsedAt: Date | null;
   expiresAt: Date | null;
   revokedAt: Date | null;
+  scopes: string[];
 }
 
 export interface ApiKeyServiceDeps {
@@ -41,7 +42,12 @@ export class ApiKeyService {
   }
 
   /** Returns the token: the only time it is ever available. */
-  async create(userId: string, input: { name: string; expiresInDays?: number }): Promise<{ key: ApiKeyView; token: string }> {
+  async create(
+    userId: string,
+    input: { name: string; expiresInDays?: number; scopes?: readonly string[] },
+    /** Who is creating it, if not the owner (an admin creating a service account's key). */
+    actorId: string = userId,
+  ): Promise<{ key: ApiKeyView; token: string }> {
     const active = await this.deps.prisma.apiKey.count({ where: { userId, revokedAt: null } });
     if (active >= MAX_API_KEYS_PER_USER) {
       throw new ValidationError(`You can have at most ${MAX_API_KEYS_PER_USER} active API keys. Revoke one first.`);
@@ -50,10 +56,14 @@ export class ApiKeyService {
     const expiresAt =
       input.expiresInDays === undefined ? null : new Date(this.now().getTime() + input.expiresInDays * 86_400_000);
     const key = await this.deps.prisma.apiKey.create({
-      data: { userId, name: input.name, prefix: token.slice(0, 12), hash: hashToken(token), expiresAt },
+      data: { userId, name: input.name, prefix: token.slice(0, 12), hash: hashToken(token), expiresAt, scopes: [...new Set(input.scopes ?? [])] },
     });
     this.deps.logger.info({ userId, apiKeyId: key.id, name: key.name }, "API key created");
-    await this.deps.audit.record({ action: "API_KEY_CREATED", actorId: userId, metadata: { apiKeyId: key.id, name: key.name } });
+    await this.deps.audit.record({
+      action: "API_KEY_CREATED",
+      actorId,
+      metadata: { apiKeyId: key.id, name: key.name, scopes: key.scopes.join(",") || "all", ...(actorId !== userId && { for: userId }) },
+    });
     return { key: toView(key), token };
   }
 
@@ -70,6 +80,6 @@ export class ApiKeyService {
 }
 
 function toView(key: ApiKeyView & Record<string, unknown>): ApiKeyView {
-  const { id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt } = key;
-  return { id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt };
+  const { id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt, scopes } = key;
+  return { id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt, scopes };
 }
