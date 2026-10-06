@@ -12,7 +12,7 @@ import { MetricsPanel } from "@/components/MetricsPanel";
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
 import { ServicesPanel, confirmDeletion } from "@/components/ServicesPanel";
 import { ProjectSettings } from "@/components/ProjectSettings";
-import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
+import { Button, ErrorNote, GridBackdrop, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
@@ -91,6 +91,7 @@ export default function ProjectPage() {
       </Link>
 
       <div className="panel relative mt-4 overflow-hidden">
+      <GridBackdrop />
       <div className="relative flex flex-wrap items-end justify-between gap-6">
         <div className="min-w-0">
           <p className="mb-3 text-xs font-semibold text-ink-soft">Project</p>

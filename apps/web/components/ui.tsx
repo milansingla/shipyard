@@ -120,3 +120,8 @@ export function Label({ children }: { children: ReactNode }) {
 export function Mono({ children, className = "" }: { children: ReactNode; className?: string }) {
   return <span className={`font-mono text-[0.8125rem] ${className}`}>{children}</span>;
 }
+
+/** The grid-and-spotlight backdrop of a hero card. Decorative; the card needs `relative overflow-hidden`. */
+export function GridBackdrop() {
+  return <div aria-hidden className="grid-backdrop" />;
+}

@@ -19,7 +19,7 @@
   --color-sea: #34d399;
   --color-sea-wash: rgb(52 211 153 / 0.12);
   --color-signal: #fbbf24;
-  --color-oxide: #ef4444;
+  --color-oxide: #e5484d; /* Vercel (Geist) red */
   --color-oxide-wash: rgb(255 255 255 / 0.05);
   --color-console: rgb(0 0 0 / 0.6);
 
@@ -220,6 +220,27 @@ body::before {
  * on the glass itself, never on an ancestor: an ancestor fading would cut
  * the panel off from what is behind it and the blur would pop in at the end.
  */
+/*
+ * An engineering grid that fades out from one corner, with a soft
+ * spotlight: the backdrop of hero cards. Static, so it never repaints.
+ */
+@utility grid-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(38rem 22rem at 85% -10%, rgb(255 255 255 / 0.09), transparent 70%),
+    linear-gradient(to right, rgb(255 255 255 / 0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(255 255 255 / 0.055) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    2.5rem 2.5rem,
+    2.5rem 2.5rem;
+  background-position: 0 0, -1px -1px, -1px -1px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 90% at 90% 0%, #000 20%, transparent 75%);
+  mask-image: radial-gradient(ellipse 70% 90% at 90% 0%, #000 20%, transparent 75%);
+}
+
 @keyframes glass-in {
   from {
     opacity: 0;

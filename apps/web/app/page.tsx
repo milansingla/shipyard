@@ -3,7 +3,7 @@
 import Link from "next/link";
 
 import { ArrowIcon } from "@/components/icons";
-import { ErrorNote, HullName, Mono, StatusBadge, buttonClass } from "@/components/ui";
+import { ErrorNote, GridBackdrop, HullName, Mono, StatusBadge, buttonClass } from "@/components/ui";
 import { relativeTime, safeHttpUrl } from "@/lib/format";
 import { isInProgress, statusInfo, type Tone } from "@/lib/status";
 import type { ProjectWithLatestDeployment } from "@/lib/types";
@@ -29,6 +29,8 @@ export default function ProjectsPage() {
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(0,1fr)]">
         {/* Hero: what Shipyard does, and the fleet in four numbers. */}
         <section aria-label="Overview" className="glass relative flex min-h-[22rem] flex-col justify-between overflow-hidden rounded-[1.75rem] p-6 sm:p-8">
+          <GridBackdrop />
+          <PipelineArt />
           <div className="relative max-w-md">
             <p className="text-xs font-semibold text-ink-soft">Your fleet</p>
             <p className="headline mt-3 text-[clamp(2rem,4.4vw,3.25rem)] font-semibold leading-[1.05] tracking-[-0.015em]">
@@ -139,6 +141,40 @@ export default function ProjectsPage() {
   );
 }
 
+/** Shipyard's own pipeline, step by step: what "Ship every repository" means. Decorative. */
+const PIPELINE = ["Clone repository", "Detect the stack", "Build the image", "Health check", "Live"] as const;
+
+function PipelineArt() {
+  return (
+    <ol aria-hidden className="pointer-events-none absolute right-8 top-8 hidden w-56 flex-col gap-2 xl:flex">
+      {PIPELINE.map((step, index) => {
+        const live = index === PIPELINE.length - 1;
+        return (
+          <li
+            key={step}
+            className={`relative flex items-center gap-3 rounded-xl border px-3 py-2 text-[0.8125rem] [animation:glass-in_600ms_var(--ease-out-soft)_both] ${
+              live ? "border-white/25 bg-white/[0.1] font-medium text-white" : "border-white/[0.07] bg-white/[0.035] text-ink-soft"
+            }`}
+            style={{ animationDelay: `${200 + index * 110}ms` }}
+          >
+            <span className={`flex size-5 shrink-0 items-center justify-center rounded-full border ${live ? "border-white/60" : "border-white/20"}`}>
+              {live ? (
+                <span className="size-2 rounded-full bg-white signal-pulse" />
+              ) : (
+                <svg viewBox="0 0 12 12" className="size-2.5" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M2.5 6.2l2.2 2.2 4.8-4.8" />
+                </svg>
+              )}
+            </span>
+            {step}
+            {index < PIPELINE.length - 1 && <span className="absolute -bottom-2 left-[1.375rem] h-2 w-px bg-white/15" />}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 function countTones(projects: ProjectWithLatestDeployment[]): Record<Tone, number> {
   const counts: Record<Tone, number> = { live: 0, working: 0, failed: 0, idle: 0 };
   for (const project of projects) counts[project.latestDeployment ? statusInfo(project.latestDeployment.status).tone : "idle"] += 1;
@@ -229,7 +265,7 @@ function LatestCard({ project }: { project: ProjectWithLatestDeployment | undefi
 const TONE_TILE: Record<Tone, string> = {
   live: "from-[#5eead4] to-[#059669]",
   working: "from-[#fcd34d] to-[#d97706]",
-  failed: "from-[#ef4444] to-[#991b1b]",
+  failed: "from-[#e5484d] to-[#8a1d22]",
   idle: "from-[#a1a1aa] to-[#52525b]",
 };
 
