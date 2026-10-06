@@ -4,7 +4,7 @@ import { type FormEvent, useState } from "react";
 
 import { Button, ErrorNote, Label, Mono } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
-import type { EnvironmentTarget, EnvironmentVariable, Service } from "@/lib/types";
+import type { EnvironmentTarget, EnvironmentVariable, Service, VariableEnvironment } from "@/lib/types";
 import { useApi } from "@/lib/useApi";
 
 const TARGET_LABEL: Record<EnvironmentTarget, string> = {
@@ -13,9 +13,20 @@ const TARGET_LABEL: Record<EnvironmentTarget, string> = {
   BOTH: "Build + runtime",
 };
 
-/** `?service=<id>` for a service's own variable; nothing for a project-wide one. */
-function scopeQuery(serviceId: string): string {
-  return serviceId ? `?service=${encodeURIComponent(serviceId)}` : "";
+const ENVIRONMENT_LABEL: Record<VariableEnvironment, string> = {
+  ALL: "All",
+  PRODUCTION: "Production",
+  PREVIEW: "Previews",
+  DEVELOPMENT: "Development",
+};
+
+/** `?service=<id>` for a service's own variable, `environment=` for one environment's; nothing for project-wide, all. */
+function scopeQuery(serviceId: string, environment: VariableEnvironment): string {
+  const params = new URLSearchParams();
+  if (serviceId) params.set("service", serviceId);
+  if (environment !== "ALL") params.set("environment", environment);
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }
 
 const FIELD = "h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink disabled:opacity-60";
@@ -23,6 +34,7 @@ const FIELD = "h-10 border border-rivet bg-plate px-3 text-sm focus:border-ink d
 interface Draft {
   /** "" = every service. */
   serviceId: string;
+  environment: VariableEnvironment;
   key: string;
   value: string;
   secret: boolean;
@@ -31,7 +43,7 @@ interface Draft {
   existing: boolean;
 }
 
-const EMPTY: Draft = { serviceId: "", key: "", value: "", secret: false, target: "RUNTIME", existing: false };
+const EMPTY: Draft = { serviceId: "", environment: "ALL", key: "", value: "", secret: false, target: "RUNTIME", existing: false };
 
 /** A project's environment variables and secrets. Values apply on the next deploy. */
 export function EnvironmentPanel({
@@ -66,7 +78,7 @@ export function EnvironmentPanel({
   const save = (event: FormEvent) => {
     event.preventDefault();
     void act(async () => {
-      await api(`/projects/${projectId}/env/${encodeURIComponent(draft.key.trim())}${scopeQuery(draft.serviceId)}`, {
+      await api(`/projects/${projectId}/env/${encodeURIComponent(draft.key.trim())}${scopeQuery(draft.serviceId, draft.environment)}`, {
         method: "PUT",
         body: { value: draft.value, secret: draft.secret, target: draft.secret ? "RUNTIME" : draft.target },
       });
@@ -77,7 +89,7 @@ export function EnvironmentPanel({
   const remove = (variable: EnvironmentVariable) => {
     if (!window.confirm(`Delete ${variable.key}? Deployments already running keep it until the next deploy.`)) return;
     void act(async () => {
-      await api(`/projects/${projectId}/env/${encodeURIComponent(variable.key)}${scopeQuery(variable.serviceId ?? "")}`, {
+      await api(`/projects/${projectId}/env/${encodeURIComponent(variable.key)}${scopeQuery(variable.serviceId ?? "", variable.environment)}`, {
         method: "DELETE",
       });
       if (draft.key === variable.key) setDraft(EMPTY);
@@ -88,6 +100,7 @@ export function EnvironmentPanel({
     setError(null);
     setDraft({
       serviceId: variable.serviceId ?? "",
+      environment: variable.environment,
       key: variable.key,
       value: variable.value ?? "", // a secret's value is never sent back: type a new one
       secret: variable.secret,
@@ -122,10 +135,10 @@ export function EnvironmentPanel({
       {list.length > 0 && (
         // relative: keeps the buttons' screen-reader labels (absolutely positioned) inside the scroll box.
         <div className="relative mt-4 overflow-x-auto">
-          <table className="w-full min-w-[36rem] text-left text-sm">
+          <table className="w-full min-w-[44rem] text-left text-sm">
             <thead className="border-b border-rivet">
               <tr>
-                {["Name", ...(scoped ? ["For"] : []), "Value", "Available at", ""].map((h) => (
+                {["Name", ...(scoped ? ["For"] : []), "Environments", "Value", "Available at", ""].map((h) => (
                   <th key={h || "actions"} scope="col" className="py-2 pr-4 font-normal">
                     {h && <Label>{h}</Label>}
                   </th>
@@ -134,7 +147,7 @@ export function EnvironmentPanel({
             </thead>
             <tbody className="divide-y divide-rivet">
               {list.map((variable) => (
-                <tr key={`${variable.serviceId ?? "*"}:${variable.key}`}>
+                <tr key={`${variable.serviceId ?? "*"}:${variable.environment}:${variable.key}`}>
                   <td className="py-3 pr-4">
                     <Mono className="font-semibold">{variable.key}</Mono>
                   </td>
@@ -143,6 +156,14 @@ export function EnvironmentPanel({
                       {variable.serviceId ? serviceName.get(variable.serviceId) ?? "—" : "All services"}
                     </td>
                   )}
+                  <td className="py-3 pr-4 text-ink-soft">
+                    {ENVIRONMENT_LABEL[variable.environment]}
+                    {variable.environment === "ALL" && variable.secret && (
+                      <span className="block text-xs" title="A preview runs a pull request's code: it only gets secrets set for Previews.">
+                        not previews
+                      </span>
+                    )}
+                  </td>
                   <td className="max-w-[22rem] py-3 pr-4">
                     {variable.value === null && !variable.secret ? (
                       <span className="text-xs text-ink-soft">hidden for your role</span>
@@ -203,6 +224,20 @@ export function EnvironmentPanel({
               </select>
             </label>
           )}
+          <label className="flex flex-col gap-2 sm:col-span-3">
+            <Label>Environments</Label>
+            <select
+              value={draft.environment}
+              onChange={(event) => setDraft({ ...draft, environment: event.target.value as VariableEnvironment })}
+              disabled={draft.existing}
+              className={FIELD}
+            >
+              <option value="ALL">All (a secret: all but previews)</option>
+              <option value="PRODUCTION">Production only</option>
+              <option value="PREVIEW">Previews only (overrides the shared value)</option>
+              <option value="DEVELOPMENT">Development only (overrides the shared value)</option>
+            </select>
+          </label>
           <label className="flex flex-col gap-2">
             <Label>Name</Label>
             <input

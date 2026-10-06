@@ -41,6 +41,8 @@ export interface Deployment {
   containerId: string | null;
   containerPort: number | null;
   hostPort: number | null;
+  /** null = production; otherwise a development environment or a pull request's preview. */
+  environmentId: string | null;
   /** Identical containers this deployment runs; logs show the first. */
   replicas: number;
   deploymentUrl: string | null;
@@ -150,8 +152,12 @@ export interface ProjectWithLatestDeployment extends Project {
 /** When a variable is available: to the running app, to the build, or both. */
 export type EnvironmentTarget = "RUNTIME" | "BUILD" | "BOTH";
 
+/** Which environments a variable applies to. */
+export type VariableEnvironment = "ALL" | "PRODUCTION" | "PREVIEW" | "DEVELOPMENT";
+
 export interface EnvironmentVariable {
   key: string;
+  environment: VariableEnvironment;
   /** null = every service; otherwise the one service it applies to (and overrides the shared value for). */
   serviceId: string | null;
   /** null for secrets: the API never sends a secret's value back. */
@@ -258,4 +264,21 @@ export interface CronJob {
   nextRunAt: string | null;
   managedBy: "DASHBOARD" | "CONFIG_FILE";
   lastRun: CronRun | null;
+}
+
+/** An environment besides production (which is the project itself). */
+export interface ProjectEnvironment {
+  id: string;
+  projectId: string;
+  type: "DEVELOPMENT" | "PREVIEW";
+  /** "dev" or "pr-<number>": the first part of its hostnames. */
+  name: string;
+  branch: string;
+  pullRequest: number | null;
+  title: string | null;
+  status: "ACTIVE" | "CLOSED";
+  createdAt: string;
+  closedAt: string | null;
+  /** The newest deployment of each of its services. */
+  deployments: Deployment[];
 }

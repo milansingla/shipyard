@@ -123,6 +123,7 @@ api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
 | `GET /api/audit-logs?projectId=&limit=&before=` | who did what (Activity page) |
 | `GET/POST /api/projects/:id/services` · `PATCH/DELETE /api/services/:id` · `POST /api/services/:id/deploy` | services — see [docs/services.md](docs/services.md); `{"type": "POSTGRES"}` adds a database ([docs/databases.md](docs/databases.md)) |
 | `GET/POST /api/services/:id/volumes` · `DELETE /api/volumes/:id` | persistent volumes (detaching keeps the data) |
+| `GET/POST /api/projects/:id/environments` · `PATCH /api/environments/:id` · `POST /api/environments/:id/deploy` · `…/close` | environments — see [docs/environments.md](docs/environments.md) |
 | `GET/POST /api/projects/:id/cron-jobs` · `PATCH/DELETE /api/cron-jobs/:id` · `POST /api/cron-jobs/:id/run` · `GET /api/cron-jobs/:id/runs` · `GET /api/cron-runs/:id` | cron jobs — see [docs/cron.md](docs/cron.md) |
 | `GET/POST /api/organizations` · `…/:id/members` | teams and members — see [docs/teams.md](docs/teams.md) |
 | `GET/POST /api/api-keys` · `DELETE /api/api-keys/:id` | API keys for the CLI/scripts (`Authorization: Bearer shp_…`) |
@@ -181,6 +182,7 @@ phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 - [Services](docs/services.md) — multi-service projects, private networking, per-service settings, volumes
 - [Databases](docs/databases.md) — self-hosted PostgreSQL services, `DATABASE_URL`, backups
 - [Cron jobs](docs/cron.md) — scheduled commands in a service's image, with every run recorded
+- [Environments](docs/environments.md) — production, development, pull-request previews; variables per environment
 - [Teams & roles](docs/teams.md) — organizations, OWNER/ADMIN/DEVELOPER/VIEWER, what each may do
 - [Environment variables & secrets](docs/environment.md) — encrypted per-project config, runtime vs build
 - [Database](docs/database.md) — schema and persistence decisions

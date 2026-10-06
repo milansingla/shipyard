@@ -33,11 +33,14 @@ export async function provisionPostgres(
   input: { name: string; version: PostgresVersion; managedBy?: "DASHBOARD" | "CONFIG_FILE" },
 ): Promise<ProvisionedDatabase> {
   return deps.prisma.$transaction(async (tx) => {
-    const projectVariables = await tx.environmentVariable.findMany({ where: { projectId: project.id }, select: { key: true, scope: true } });
+    const projectVariables = await tx.environmentVariable.findMany({ where: { projectId: project.id }, select: { key: true, scope: true, environment: true } });
     if (projectVariables.length + 2 > MAX_ENV_VARS_PER_PROJECT) {
       throw new ValidationError(`A database needs 2 environment variables, and a project can have at most ${MAX_ENV_VARS_PER_PROJECT}.`);
     }
-    const variable = connectionVariable(input.name, new Set(projectVariables.filter((v) => v.scope === "project").map((v) => v.key)));
+    const variable = connectionVariable(
+      input.name,
+      new Set(projectVariables.filter((v) => v.scope === "project" && v.environment === "ALL").map((v) => v.key)),
+    );
     if (!variable) {
       throw new ConflictError(ErrorCode.PROJECT_ALREADY_EXISTS, `DATABASE_URL and ${input.name.toUpperCase()}_DATABASE_URL are both taken. Delete one, or name the database differently.`);
     }

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import { healthCheckPathSchema } from "../projects/project.schemas.js";
 import { MAX_REPLICAS } from "../../services/docker/naming.js";
+import { RESERVED_PREFIX } from "../environments/environmentRules.js";
 import { DEFAULT_POSTGRES_VERSION, POSTGRES_VERSIONS } from "./postgres.js";
 
 /** A DNS label (its name on the project network), short enough to prefix a project's hostname. */
@@ -9,7 +10,8 @@ export const serviceNameSchema = z
   .string()
   .trim()
   .regex(/^[a-z](?:[a-z0-9-]{0,18}[a-z0-9])?$/, "must be 1–20 lowercase letters, digits or -, starting with a letter")
-  .refine((name) => !name.includes("--"), "must not contain --");
+  .refine((name) => !name.includes("--"), "must not contain --")
+  .refine((name) => !RESERVED_PREFIX.test(name), "must not start with dev or pr-<number>: environments use those addresses");
 
 /** A directory inside the repository: relative, no `..`, no leading or trailing /. */
 export const sourceDirSchema = z

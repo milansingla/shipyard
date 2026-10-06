@@ -29,6 +29,7 @@ const app = createApp({
   services: services.services,
   volumes: services.volumes,
   cron: services.cron,
+  environments: services.environments,
   auth: services.auth,
   webhooks: services.webhooks,
   allowedOrigins: [config.publicUrl, config.appUrl],

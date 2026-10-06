@@ -8,6 +8,11 @@ export const MAX_ENV_VALUE_LENGTH = 32 * 1024;
 export const MAX_ENV_VARS_PER_PROJECT = 100;
 
 export const ENV_TARGETS = ["RUNTIME", "BUILD", "BOTH"] as const;
+/** ALL = every environment, except that a secret set for ALL never reaches a preview. */
+export const VARIABLE_ENVIRONMENTS = ["ALL", "PRODUCTION", "PREVIEW", "DEVELOPMENT"] as const;
+export type VariableEnvironmentName = (typeof VARIABLE_ENVIRONMENTS)[number];
+/** Where a deployment runs. */
+export type DeploymentEnvironmentName = Exclude<VariableEnvironmentName, "ALL">;
 
 export const envKeySchema = z
   .string()

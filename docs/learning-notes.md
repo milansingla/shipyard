@@ -662,3 +662,15 @@ flight finish before the process exits.
 **Interview: why 5-field cron in UTC only?** Time zones bring daylight-saving
 gaps (a 02:30 job that doesn't exist one night, or runs twice another).
 UTC has neither; converting a local time is the user's explicit choice.
+
+## Environments
+
+- **Make the common case implicit**: production is "no environment" (null),
+  so every existing deployment stayed valid without a data migration, and
+  every query about the live app says `environmentId: null` explicitly.
+- **Least privilege for untrusted code**: a preview runs a pull request's
+  code, so it gets no production secrets unless one is deliberately set for
+  previews. The safe default is the one that needs no remembering.
+- **Bind ciphertexts to their context**: the environment is part of what a
+  secret is encrypted against, so moving a production value into a preview
+  row (a bug, or a malicious write) fails to decrypt instead of leaking.

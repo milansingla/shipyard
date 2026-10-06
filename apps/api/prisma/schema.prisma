@@ -107,6 +107,8 @@ model Project {
   /// Memory in MB (swap disabled); null = no limit.
   memoryLimitMb   Int?
   restartPolicy   RestartPolicy @default(UNLESS_STOPPED)
+  /// Build a preview for each pull request of a branch in this repository.
+  previewDeployments Boolean   @default(false)
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
   deployments     Deployment[]
@@ -114,6 +116,7 @@ model Project {
   domains         ProjectDomain[]
   services        Service[]
   cronJobs     CronJob[]
+  environments Environment[]
 
   @@index([organizationId, createdAt(sort: Desc)])
   @@map("projects")
@@ -425,10 +428,13 @@ model EnvironmentVariable {
   value     String
   secret    Boolean                   @default(false)
   target    EnvironmentVariableTarget @default(RUNTIME)
+  /// Which environments get it. A secret set for ALL is a production secret:
+  /// previews only get secrets set for PREVIEW.
+  environment VariableEnvironment     @default(ALL)
   createdAt DateTime                  @default(now())
   updatedAt DateTime                  @updatedAt
 
-  @@unique([projectId, scope, key])
+  @@unique([projectId, scope, environment, key])
   @@map("environment_variables")
 }
 
@@ -443,6 +449,9 @@ model Deployment {
   /// multi-service migration gave older ones their project's "web" service).
   serviceId     String           @db.Uuid
   service       Service          @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  /// null = production. Otherwise a development environment or a pull request's preview.
+  environmentId String?          @db.Uuid
+  environment   Environment?     @relation(fields: [environmentId], references: [id], onDelete: Cascade)
   status        DeploymentStatus @default(QUEUED)
   trigger       DeploymentTrigger @default(MANUAL)
   /// Branch at the time of deployment (the project's branch may change later).
@@ -468,8 +477,54 @@ model Deployment {
 
   @@index([projectId, createdAt(sort: Desc)])
   @@index([serviceId, createdAt(sort: Desc)])
+  @@index([environmentId, createdAt(sort: Desc)])
   @@index([status])
   @@map("deployments")
+}
+
+/// Which environments a variable applies to.
+enum VariableEnvironment {
+  ALL
+  PRODUCTION
+  PREVIEW
+  DEVELOPMENT
+}
+
+enum EnvironmentType {
+  /// One per project: a long-lived copy tracking another branch, at dev-<slug>.
+  DEVELOPMENT
+  /// One per pull request, at pr-<number>-<slug>; removed when the PR closes.
+  PREVIEW
+}
+
+enum EnvironmentStatus {
+  ACTIVE
+  /// Its containers are gone (PR closed, or deleted); its deployments stay as history.
+  CLOSED
+}
+
+/// An environment besides production (which is the project itself). Runs the
+/// project's web services and workers from another branch, without its
+/// databases, volumes, custom domains or production secrets.
+model Environment {
+  id          String            @id @default(uuid()) @db.Uuid
+  projectId   String            @db.Uuid
+  project     Project           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  type        EnvironmentType
+  /// "dev" or "pr-<number>": the first part of its hostnames.
+  name        String
+  branch      String
+  pullRequest Int?
+  /// The pull request's title, for display.
+  title       String?
+  status      EnvironmentStatus @default(ACTIVE)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+  closedAt    DateTime?
+  deployments Deployment[]
+
+  @@unique([projectId, name])
+  @@map("environments")
 }
 
 enum DeploymentEventType {

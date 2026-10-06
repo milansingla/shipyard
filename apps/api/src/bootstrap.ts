@@ -20,6 +20,7 @@ import { ConfigSync } from "./modules/services/ConfigSync.js";
 import { ServiceService } from "./modules/services/ServiceService.js";
 import { VolumeService } from "./modules/services/VolumeService.js";
 import { CronService } from "./modules/cron/CronService.js";
+import { ProjectEnvironments } from "./modules/environments/ProjectEnvironments.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
@@ -50,6 +51,7 @@ export interface ApiServices extends EngineServices {
   services: ServiceService;
   volumes: VolumeService;
   cron: CronService;
+  environments: ProjectEnvironments;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -180,8 +182,24 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     runner: engineServices.docker,
     logger: logger.child({ component: "cron" }),
   });
+  const environments = new ProjectEnvironments({ prisma, access, deployments, logger: logger.child({ component: "environments" }) });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
-  return { ...engineServices, prisma, projects, deployments, environment, domains, audit, organizations, services, volumes, cron, auth, webhooks };
+  return {
+    ...engineServices,
+    prisma,
+    projects,
+    deployments,
+    environment,
+    domains,
+    audit,
+    organizations,
+    services,
+    volumes,
+    cron,
+    environments,
+    auth,
+    webhooks,
+  };
 }
 
 function createAuth(

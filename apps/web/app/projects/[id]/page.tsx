@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import { CronPanel } from "@/components/CronPanel";
 import { DomainsPanel } from "@/components/DomainsPanel";
+import { EnvironmentsPanel } from "@/components/EnvironmentsPanel";
 import { EnvironmentPanel } from "@/components/EnvironmentPanel";
 import { ServicesPanel, confirmDeletion } from "@/components/ServicesPanel";
 import { ProjectSettings } from "@/components/ProjectSettings";
@@ -13,7 +14,7 @@ import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/compone
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
 import { isInProgress } from "@/lib/status";
-import type { Deployment, ProjectWithLatestDeployment, Service } from "@/lib/types";
+import type { Deployment, ProjectEnvironment, ProjectWithLatestDeployment, Service } from "@/lib/types";
 import { can } from "@/lib/roles";
 import { useApi } from "@/lib/useApi";
 
@@ -24,6 +25,8 @@ export default function ProjectPage() {
   const services = useApi<Service[]>(`/projects/${id}/services`, {
     pollMs: (list) => (list.some((s) => s.latestDeployment && isInProgress(s.latestDeployment.status)) ? 3_000 : null),
   });
+  // Names for the history's environment tags (dev, pr-12).
+  const environments = useApi<ProjectEnvironment[]>(`/projects/${id}/environments`);
   const history = useApi<Deployment[]>(`/projects/${id}/deployments?limit=50`, {
     pollMs: (list) => (list.some((d) => isInProgress(d.status)) ? 3_000 : null),
   });
@@ -76,7 +79,7 @@ export default function ProjectPage() {
   const serviceName = new Map((services.data ?? []).map((service) => [service.id, service.name]));
   const multiService = serviceName.size > 1;
   const primary = services.data?.find((service) => service.primary);
-  const running = history.data?.find((d) => d.status === "RUNNING" && (!primary || d.serviceId === primary.id));
+  const running = history.data?.find((d) => d.status === "RUNNING" && !d.environmentId && (!primary || d.serviceId === primary.id));
   const runningUrl = safeHttpUrl(running?.deploymentUrl ?? null);
 
   return (
@@ -150,6 +153,15 @@ export default function ProjectPage() {
         onDeployed={(deployment) => router.push(`/deployments/${deployment.id}`)}
       />
 
+      <EnvironmentsPanel
+        projectId={p.id}
+        productionBranch={p.branch}
+        services={services.data ?? []}
+        canEdit={can(p.role, "ADMIN")}
+        canDeploy={can(p.role, "DEVELOPER")}
+        onDeployed={(deployment) => router.push(`/deployments/${deployment.id}`)}
+      />
+
       <DomainsPanel projectId={p.id} canEdit={can(p.role, "ADMIN")} />
 
       <CronPanel projectId={p.id} services={services.data ?? []} canEdit={can(p.role, "ADMIN")} canRun={can(p.role, "DEVELOPER")} />
@@ -188,6 +200,11 @@ export default function ProjectPage() {
                     <Link href={`/deployments/${d.id}`} className="font-mono underline decoration-rivet underline-offset-4 group-hover:decoration-ink">
                       {shortId(d.id)}
                     </Link>
+                    {d.environmentId && (
+                      <span className="ml-2 rounded-sm bg-sea-wash px-1.5 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-sea">
+                        {environments.data?.find((environment) => environment.id === d.environmentId)?.name ?? "env"}
+                      </span>
+                    )}
                     {d.trigger === "PUSH" && (
                       <span className="ml-2 rounded-sm border border-rivet px-1.5 py-0.5 text-[0.6875rem] font-semibold uppercase tracking-wider text-ink-soft">
                         push

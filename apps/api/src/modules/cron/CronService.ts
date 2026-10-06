@@ -213,7 +213,7 @@ export class CronService {
     }
     const service = await prisma.service.findUniqueOrThrow({ where: { id: job.serviceId } });
     const deployment = await prisma.deployment.findFirst({
-      where: { serviceId: job.serviceId, status: DeploymentStatus.RUNNING },
+      where: { serviceId: job.serviceId, environmentId: null, status: DeploymentStatus.RUNNING },
       orderBy: { finishedAt: "desc" },
     });
     if (!deployment) return skip(`Nothing to run: ${service.name} has no running deployment. Deploy it first.`);

@@ -69,17 +69,36 @@ export class WebhookService {
       },
       orderBy: { createdAt: "asc" },
     });
-    if (projects.length === 0) return `ignored: no project deploys ${owner}/${name}@${branch}`;
+    // Development environments tracking this branch deploy too.
+    const environments = await this.deps.prisma.environment.findMany({
+      where: {
+        type: "DEVELOPMENT",
+        status: "ACTIVE",
+        branch,
+        project: { repositoryOwner: { equals: owner, mode: "insensitive" }, repositoryName: { equals: name, mode: "insensitive" } },
+      },
+      include: { project: { select: { slug: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    const targets = [
+      ...projects.map((project) => ({ projectId: project.id, environmentId: null, label: project.slug })),
+      ...environments.map((environment) => ({
+        projectId: environment.projectId,
+        environmentId: environment.id,
+        label: `${environment.name}-${environment.project.slug}`,
+      })),
+    ];
+    if (targets.length === 0) return `ignored: no project deploys ${owner}/${name}@${branch}`;
 
     const results: string[] = [];
-    for (const project of projects) {
+    for (const target of targets) {
       try {
-        const result = await this.deps.deployments.deployOnPush(project.id);
-        results.push(`${result.outcome === "started" ? "deploying" : "queued"} ${project.slug}`);
+        const result = await this.deps.deployments.deployOnPush(target.projectId, target.environmentId);
+        results.push(`${result.outcome === "started" ? "deploying" : "queued"} ${target.label}`);
       } catch (error) {
         // One project's problem must not stop the others from deploying.
-        this.deps.logger.warn({ err: error, projectId: project.id }, "Push deploy failed to start");
-        results.push(`failed ${project.slug}: ${errorMessage(error)}`);
+        this.deps.logger.warn({ err: error, projectId: target.projectId }, "Push deploy failed to start");
+        results.push(`failed ${target.label}: ${errorMessage(error)}`);
       }
     }
     return `${commitSha.slice(0, 7)} on ${branch}: ${results.join("; ")}`;

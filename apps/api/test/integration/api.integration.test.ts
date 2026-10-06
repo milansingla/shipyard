@@ -21,6 +21,7 @@ import { ServiceService } from "../../src/modules/services/ServiceService.js";
 import { VolumeService } from "../../src/modules/services/VolumeService.js";
 import { projectNetworkName } from "../../src/modules/services/serviceRules.js";
 import { type CronRunner, CronService } from "../../src/modules/cron/CronService.js";
+import { ProjectEnvironments } from "../../src/modules/environments/ProjectEnvironments.js";
 import type { OneOffContainerOptions, OneOffResult } from "../../src/services/docker/DockerService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
@@ -154,6 +155,9 @@ let lastJob: DeploymentJob | null = null;
 /** shipyard.yaml per repository name, as the fake git "reads" it at the branch head. */
 const repoFiles = new Map<string, string>();
 
+/** Deployments whose containers and image the fake engine was asked to remove. */
+const destroyedDeployments: string[] = [];
+
 /** Docker volumes the fake engine was asked to delete, with their data. */
 const removedVolumes: string[] = [];
 
@@ -220,7 +224,9 @@ const fakeEngine: EngineLike = {
   async getLogs() {
     return [{ stream: "stdout" as const, text: "hello\n" }];
   },
-  async destroy() {},
+  async destroy(artifacts) {
+    if (artifacts.deploymentId) destroyedDeployments.push(artifacts.deploymentId);
+  },
   async inspect(containerId) {
     if (removedContainers.has(containerId)) throw new NotFoundError(`Container not found: ${containerId}`);
     return { running: true, exitCode: null, hostPort: 49_999 };
@@ -348,6 +354,7 @@ beforeAll(async () => {
       organizations: new OrganizationService({ prisma, access, audit, logger: silentLogger }),
       services: new ServiceService({ prisma, access, deployments, audit, environment, logger: silentLogger }),
       volumes: new VolumeService({ prisma, access, audit, logger: silentLogger }),
+      environments: new ProjectEnvironments({ prisma, access, deployments, logger: silentLogger }),
       cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
@@ -379,6 +386,7 @@ beforeEach(async () => {
   jobs.length = 0;
   repoFiles.clear();
   removedVolumes.length = 0;
+  destroyedDeployments.length = 0;
   engineEvents.length = 0;
   failRuns.clear();
   cronCalls.length = 0;
@@ -2228,5 +2236,154 @@ describe("cron jobs", () => {
     await call(alice, "POST", `/api/projects/${projectId}/deploy`);
     await deployments.waitForIdle();
     expect(await prisma.cronJob.findUniqueOrThrow({ where: { id: jobs[0]!.id } })).toMatchObject({ schedule: "@hourly", enabled: false, nextRunAt: null });
+  });
+});
+
+/** A signed GitHub delivery, as GitHub would send it. */
+async function deliverWebhook(event: string, payload: unknown) {
+  const body = JSON.stringify(payload);
+  const res = await fetch(`${api}/api/webhooks/github`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-github-event": event,
+      "x-github-delivery": randomUUID(),
+      "x-hub-signature-256": signGitHubPayload(WEBHOOK_SECRET, body),
+    },
+    body,
+  });
+  return { status: res.status, body: (await res.json()) as Record<string, any> };
+}
+
+describe("environments", () => {
+  async function stack(cookie: string, repo: string) {
+    const projectId = (await call(cookie, "POST", "/api/projects", { repositoryUrl: `https://github.com/acme/${repo}` })).body!.data.id as string;
+    await call(cookie, "POST", `/api/projects/${projectId}/services`, { name: "db", type: "POSTGRES" });
+    await call(cookie, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    return projectId;
+  }
+
+  it("a development environment runs the apps from another branch at dev-<slug>, next to production", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = await stack(alice, "shop");
+    await call(alice, "PUT", `/api/projects/${projectId}/env/LOG_LEVEL`, { value: "info" });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/LOG_LEVEL?environment=DEVELOPMENT`, { value: "debug" });
+
+    expect((await call(alice, "POST", `/api/projects/${projectId}/environments`, { type: "DEVELOPMENT", branch: "main" })).status).toBe(400);
+    expect((await call(alice, "POST", `/api/projects/${projectId}/environments`, { type: "DEVELOPMENT", branch: "--force" })).status).toBe(400);
+    const created = await call(alice, "POST", `/api/projects/${projectId}/environments`, { type: "DEVELOPMENT", branch: "develop" });
+    expect(created.status).toBe(201);
+    const devId = created.body!.data.id as string;
+    expect(created.body!.data).toMatchObject({ type: "DEVELOPMENT", name: "dev", branch: "develop", status: "ACTIVE" });
+    expect((await call(alice, "POST", `/api/projects/${projectId}/environments`, { type: "DEVELOPMENT", branch: "next" })).status).toBe(409);
+
+    // Deploying it doesn't block production: each environment has its own deploy lock.
+    jobs.length = 0;
+    let release!: () => void;
+    holdRuns = new Promise((resolve) => (release = resolve));
+    const devDeploy = await call(alice, "POST", `/api/environments/${devId}/deploy`);
+    expect(devDeploy.status).toBe(202);
+    expect((await call(alice, "POST", `/api/projects/${projectId}/deploy`)).status).toBe(202);
+    release();
+    holdRuns = null;
+    await deployments.waitForIdle();
+
+    const devJob = jobs.find((job) => job.routeName === "dev-shop")!;
+    expect(devJob).toMatchObject({ branch: "develop", replicas: 1, volumes: [], domains: [] });
+    expect(devJob.env!.runtime.LOG_LEVEL).toBe("debug");
+    expect(devJob.env!.runtime.DATABASE_URL).toBeDefined(); // not a preview: production's ALL secrets apply
+    expect(jobs.filter((job) => job.service?.type === "POSTGRES")).toEqual([]); // the database is production's
+    expect(liveRoutes.get("dev-shop")).toBe(devDeploy.body!.data.id);
+    expect(liveRoutes.get("shop")).toBeDefined(); // production still live
+
+    const dev = await prisma.deployment.findUniqueOrThrow({ where: { id: devDeploy.body!.data.id } });
+    expect(dev).toMatchObject({ environmentId: devId, status: "RUNNING", branch: "develop" });
+    // Production's history and services ignore it.
+    const services = (await call(alice, "GET", `/api/projects/${projectId}/services`)).body!.data as Array<Record<string, any>>;
+    expect(services.find((service) => service.name === "web")!.latestDeployment.environmentId).toBeNull();
+
+    // A push to develop deploys the development environment, not production.
+    jobs.length = 0;
+    const pushed = await deliverWebhook("push", {
+      ref: "refs/heads/develop",
+      after: "d".repeat(40),
+      repository: { name: "shop", owner: { login: "acme" } },
+    });
+    expect(pushed.body.data.outcome).toContain("deploying dev-shop");
+    await deployments.waitForIdle();
+    expect(jobs.map((job) => job.routeName)).toEqual(["dev-shop"]);
+
+    const listed = (await call(alice, "GET", `/api/projects/${projectId}/environments`)).body!.data as Array<Record<string, any>>;
+    expect(listed).toMatchObject([{ id: devId, name: "dev", deployments: [{ status: "RUNNING" }] }]);
+  });
+
+  it("closing an environment removes its containers and route, keeps its history, and refuses further deploys", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const projectId = await stack(alice, "closing");
+    const devId = (await call(alice, "POST", `/api/projects/${projectId}/environments`, { type: "DEVELOPMENT", branch: "develop" })).body!.data.id;
+    const deployed = (await call(alice, "POST", `/api/environments/${devId}/deploy`)).body!.data.id as string;
+    await deployments.waitForIdle();
+
+    expect((await call(bob, "POST", `/api/environments/${devId}/close`)).status).toBe(404);
+    const closed = await call(alice, "POST", `/api/environments/${devId}/close`);
+    expect(closed.body!.data).toMatchObject({ status: "CLOSED" });
+    expect(destroyedDeployments).toContain(deployed);
+    expect(liveRoutes.has("dev-closing")).toBe(false);
+    expect(liveRoutes.has("closing")).toBe(true);
+    expect((await prisma.deployment.findUniqueOrThrow({ where: { id: deployed } })).status).toBe("STOPPED");
+    expect((await call(alice, "POST", `/api/environments/${devId}/deploy`)).status).toBe(409);
+    expect((await call(alice, "POST", `/api/deployments/${deployed}/restart`)).status).toBe(409);
+    expect((await call(alice, "POST", `/api/environments/${devId}/close`)).status).toBe(200); // idempotent
+
+    // Reopening keeps the name and takes a branch.
+    const reopened = await call(alice, "POST", `/api/projects/${projectId}/environments`, { type: "DEVELOPMENT", branch: "staging" });
+    expect(reopened.body!.data).toMatchObject({ id: devId, status: "ACTIVE", branch: "staging" });
+  });
+
+  it("variables per environment: a production secret never reaches a preview", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/vars-env" })).body!.data.id as string;
+    await call(alice, "PUT", `/api/projects/${projectId}/env/STRIPE_KEY`, { value: "sk_live", secret: true });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/API_URL`, { value: "https://api.example.com" });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/STRIPE_KEY?environment=PREVIEW`, { value: "sk_test", secret: true });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/ONLY_PROD?environment=PRODUCTION`, { value: "1" });
+    await call(alice, "PUT", `/api/projects/${projectId}/env/SENTRY_DSN`, { value: "dsn", secret: true });
+    expect((await call(alice, "PUT", `/api/projects/${projectId}/env/X?environment=STAGING`, { value: "1" })).status).toBe(400);
+
+    const listed = (await call(alice, "GET", `/api/projects/${projectId}/env`)).body!.data as Array<Record<string, any>>;
+    expect(listed.filter((v) => v.key === "STRIPE_KEY").map((v) => v.environment)).toEqual(["ALL", "PREVIEW"]);
+
+    expect((await environment.forDeployment(projectId, undefined, "PRODUCTION")).runtime).toEqual({
+      STRIPE_KEY: "sk_live",
+      API_URL: "https://api.example.com",
+      ONLY_PROD: "1",
+      SENTRY_DSN: "dsn",
+    });
+    // Previews: non-secret ALL values, and only the secrets set for PREVIEW.
+    expect((await environment.forDeployment(projectId, undefined, "PREVIEW")).runtime).toEqual({
+      STRIPE_KEY: "sk_test",
+      API_URL: "https://api.example.com",
+    });
+
+    // Copying the production ciphertext into a preview row doesn't decrypt there.
+    const live = await prisma.environmentVariable.findFirstOrThrow({ where: { projectId, key: "STRIPE_KEY", environment: "ALL" } });
+    await prisma.environmentVariable.updateMany({ where: { projectId, key: "STRIPE_KEY", environment: "PREVIEW" }, data: { value: live.value } });
+    await expect(environment.forDeployment(projectId, undefined, "PREVIEW")).rejects.toThrow("can't be decrypted");
+
+    expect((await call(alice, "DELETE", `/api/projects/${projectId}/env/STRIPE_KEY?environment=PREVIEW`)).status).toBe(204);
+    expect(await prisma.environmentVariable.count({ where: { projectId, key: "STRIPE_KEY" } })).toBe(1);
+  });
+
+  it("keeps dev- and pr-<n>- addresses for environments", async () => {
+    const alice = await sessionFor(ALICE);
+    expect((await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/dev-tools" })).status).toBe(400);
+    expect((await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/pr-12-site" })).status).toBe(400);
+    expect((await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/devtools" })).status).toBe(201);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/names" })).body!.data.id;
+    for (const name of ["dev", "pr-3", "dev-api", "pr-1-x"]) {
+      expect({ name, status: (await call(alice, "POST", `/api/projects/${projectId}/services`, { name })).status }).toEqual({ name, status: 400 });
+    }
   });
 });

@@ -18,7 +18,8 @@ import { ShipyardLabel } from "../../services/docker/DockerService.js";
 import { formatLogChunks } from "../../services/docker/logs.js";
 import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
-import type { Service } from "../../db/prisma.js";
+import type { Environment, Service } from "../../db/prisma.js";
+import { environmentRouteName, variableEnvironment } from "../environments/environmentRules.js";
 import type { AccessService } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import type { EnvironmentService } from "../environment/EnvironmentService.js";
@@ -226,30 +227,40 @@ export class DeploymentService {
     projectId: string,
     actorId: string | null,
     trigger: DeploymentTrigger = DeploymentTrigger.MANUAL,
-    options: { serviceIds?: readonly string[] } = {},
+    options: { serviceIds?: readonly string[]; environmentId?: string } = {},
   ): Promise<Deployment> {
     const project =
       actorId === null
         ? await this.loadProject(projectId)
         : await this.deps.access.project(projectId, actorId, OrgRole.DEVELOPER);
+    const environment = options.environmentId ? await this.activeEnvironment(projectId, options.environmentId) : null;
     // shipyard.yaml first: it may add services or change how they build. A broken file
     // still produces a deployment (FAILED, with the reason) so a push doesn't fail silently.
+    // Only for production: another environment's branch (a pull request) must not
+    // change the project's services.
     let notes: string[] = [];
-    try {
-      notes = (await this.deps.configSync?.sync(project)) ?? [];
-    } catch (error) {
-      if (!(error instanceof AppError) || error.code !== ErrorCode.CONFIG_INVALID) throw error;
-      return this.recordConfigFailure(project, actorId, trigger, error);
+    if (!environment) {
+      try {
+        notes = (await this.deps.configSync?.sync(project)) ?? [];
+      } catch (error) {
+        if (!(error instanceof AppError) || error.code !== ErrorCode.CONFIG_INVALID) throw error;
+        return this.recordConfigFailure(project, actorId, trigger, error);
+      }
     }
     const services = await this.services(projectId);
+    // Other environments run the web services and workers; databases (and their data) are production's.
+    const candidates = environment ? services.filter((service) => service.type !== "POSTGRES") : services;
     const selected = options.serviceIds
-      ? services.filter((service) => options.serviceIds!.includes(service.id))
-      : await this.withoutRunningDatabases(services);
+      ? candidates.filter((service) => options.serviceIds!.includes(service.id))
+      : environment
+        ? candidates
+        : await this.withoutRunningDatabases(candidates);
     if (selected.length === 0) {
       if (options.serviceIds) throw new NotFoundError("No such service in this project.");
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "Nothing to deploy: the database is already running. Deploy it from its service to restart it.");
     }
-    this.lockProject(projectId);
+    const lock = lockKey(projectId, environment?.id ?? null);
+    this.lockProject(lock);
 
     let deployments: Deployment[];
     try {
@@ -263,9 +274,10 @@ export class DeploymentService {
                 id,
                 projectId,
                 serviceId: service.id,
+                environmentId: environment?.id ?? null,
                 trigger,
-                branch: project.branch,
-                ...this.deps.engine.artifactNames({ id, name: artifactName(project, service) }),
+                branch: environment?.branch ?? project.branch,
+                ...this.deps.engine.artifactNames({ id, name: deploymentArtifactName(project, service, environment) }),
               },
             }),
           );
@@ -276,14 +288,14 @@ export class DeploymentService {
               toStatus: DeploymentStatus.QUEUED,
               // A push is Shipyard acting on GitHub's behalf, not the owner clicking "Deploy".
               actorId,
-              message: trigger === DeploymentTrigger.PUSH ? `Push to ${project.branch}` : null,
+              message: trigger === DeploymentTrigger.PUSH ? `Push to ${environment?.branch ?? project.branch}` : null,
             },
           });
         }
         return created;
       });
     } catch (error) {
-      this.unlockProject(projectId);
+      this.unlockProject(lock);
       throw error;
     }
 
@@ -296,11 +308,12 @@ export class DeploymentService {
           deploymentId: deployment.id,
           service: services.find((service) => service.id === deployment.serviceId)!.name,
           trigger,
-          branch: project.branch,
+          branch: environment?.branch ?? project.branch,
+          ...(environment && { environment: environment.name }),
         },
       });
     }
-    this.track(this.executeAll(project, deployments, services, notes).finally(() => this.unlockProject(projectId)));
+    this.track(this.executeAll(project, deployments, services, notes, environment).finally(() => this.unlockProject(lock)));
     const primaryId = primaryServiceId(services);
     return deployments.find((deployment) => deployment.serviceId === primaryId) ?? deployments[0]!;
   }
@@ -311,12 +324,16 @@ export class DeploymentService {
    * verified). Unlike deploy(), a busy project is not an error: the push is
    * remembered and deployed when the current work ends.
    */
-  async deployOnPush(projectId: string): Promise<PushDeployResult> {
-    if (this.busyProjects.has(projectId)) {
-      this.pushWhileBusy.add(projectId);
+  async deployOnPush(projectId: string, environmentId: string | null = null): Promise<PushDeployResult> {
+    const key = lockKey(projectId, environmentId);
+    if (this.busyProjects.has(key)) {
+      this.pushWhileBusy.add(key);
       return { outcome: "queued" };
     }
-    return { outcome: "started", deployment: await this.deploy(projectId, null, DeploymentTrigger.PUSH) };
+    return {
+      outcome: "started",
+      deployment: await this.deploy(projectId, null, DeploymentTrigger.PUSH, environmentId ? { environmentId } : {}),
+    };
   }
 
   /** Deploys the latest commit of the same project/branch as an existing deployment. */
@@ -338,18 +355,20 @@ export class DeploymentService {
    */
   async restart(id: string, userId: string): Promise<Deployment> {
     const { deployment, project } = await this.deps.access.deployment(id, userId, OrgRole.DEVELOPER);
+    if (deployment.environmentId) await this.activeEnvironment(project.id, deployment.environmentId);
     assertTransition(deployment.status, DeploymentStatus.STARTING);
     if (!deployment.containerId) {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "This deployment has no container to restart.");
     }
 
-    this.lockProject(deployment.projectId);
+    const lock = lockKey(deployment.projectId, deployment.environmentId);
+    this.lockProject(lock);
     try {
-      const stopped = await this.stopForReplacement(deployment.serviceId, id, `Stopped to restart deployment ${displayId(id)}`);
+      const stopped = await this.stopForReplacement(deployment, `Stopped to restart deployment ${displayId(id)}`);
       let current = await this.moveTo(deployment, DeploymentStatus.STARTING, {}, { actorId: userId, message: "Restart" });
       let result;
       try {
-        const route = await this.routeFor(project, deployment.serviceId);
+        const route = await this.routeFor(project, deployment);
         result = await this.deps.engine.restart(deployment.containerId, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
@@ -363,10 +382,10 @@ export class DeploymentService {
         deploymentUrl: result.deploymentUrl,
         errorMessage: null,
       });
-      await this.retireOthers(deployment.serviceId, id);
+      await this.retireOthers(deployment, id);
       return running;
     } finally {
-      this.unlockProject(deployment.projectId);
+      this.unlockProject(lock);
     }
   }
 
@@ -379,6 +398,7 @@ export class DeploymentService {
    */
   async rollback(id: string, userId: string): Promise<Deployment> {
     const { deployment: source, project } = await this.deps.access.deployment(id, userId, OrgRole.DEVELOPER);
+    if (source.environmentId) await this.activeEnvironment(project.id, source.environmentId);
     const { prisma } = this.deps;
 
     const done = await prisma.deploymentEvent.findFirst({
@@ -393,17 +413,18 @@ export class DeploymentService {
       throw new ConflictError(ErrorCode.DEPLOYMENT_IN_PROGRESS, "This deployment is still in progress. Wait for it to finish.");
     }
 
-    this.lockProject(project.id);
+    const lock = lockKey(project.id, source.environmentId);
+    this.lockProject(lock);
     try {
       const target = await this.findRollbackTarget(source);
-      const stopped = await this.stopForReplacement(target.serviceId, target.id, `Stopped to roll back to deployment ${displayId(target.id)}`);
+      const stopped = await this.stopForReplacement(target, `Stopped to roll back to deployment ${displayId(target.id)}`);
       let current = await this.moveTo(target, DeploymentStatus.ROLLING_BACK, {}, {
         actorId: userId,
         message: `Rolling back from deployment ${displayId(source.id)}`,
       });
       let result;
       try {
-        const route = await this.routeFor(project, target.serviceId);
+        const route = await this.routeFor(project, target);
         result = await this.deps.engine.restart(target.containerId!, route, async (stage) => {
           current = await this.moveTo(current, stage);
         });
@@ -419,7 +440,7 @@ export class DeploymentService {
         deploymentUrl: result.deploymentUrl,
         errorMessage: null,
       });
-      await this.retireOthers(target.serviceId, target.id, `Rolled back to deployment ${displayId(target.id)}`);
+      await this.retireOthers(target, target.id, `Rolled back to deployment ${displayId(target.id)}`);
       await prisma.deploymentEvent.createMany({
         data: [
           {
@@ -447,7 +468,7 @@ export class DeploymentService {
       });
       return running;
     } finally {
-      this.unlockProject(project.id);
+      this.unlockProject(lock);
     }
   }
 
@@ -512,7 +533,7 @@ export class DeploymentService {
 
   /** Like destroyProjectDeployments, for one service (see ServiceService.delete). */
   async destroyServiceDeployments(projectId: string, serviceId: string, finalize: () => Promise<void>): Promise<void> {
-    this.lockProject(projectId);
+    this.lockWholeProject(projectId);
     try {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { serviceId } });
       for (const deployment of deployments) {
@@ -531,8 +552,29 @@ export class DeploymentService {
    * (deleting the project row) while still holding the project lock, so no new
    * deployment can sneak in between.
    */
+  /**
+   * Takes an environment down: its live deployments are stopped and every
+   * container and image of it removed. The deployments stay as history.
+   */
+  async closeEnvironment(projectId: string, environmentId: string, finalize: () => Promise<void>): Promise<void> {
+    const lock = lockKey(projectId, environmentId);
+    this.lockProject(lock);
+    try {
+      const deployments = await this.deps.prisma.deployment.findMany({ where: { environmentId } });
+      for (const deployment of deployments) {
+        if (deployment.status === DeploymentStatus.RUNNING || deployment.status === DeploymentStatus.HEALTHY) {
+          await this.stopDeployment(deployment, { message: "Environment closed" });
+        }
+        await this.deps.engine.destroy({ deploymentId: deployment.id, containerId: deployment.containerId, imageName: deployment.imageName });
+      }
+      await finalize();
+    } finally {
+      this.unlockProject(lock);
+    }
+  }
+
   async destroyProjectDeployments(projectId: string, finalize: () => Promise<void>): Promise<void> {
-    this.lockProject(projectId);
+    this.lockWholeProject(projectId);
     try {
       const deployments = await this.deps.prisma.deployment.findMany({ where: { projectId } });
       for (const deployment of deployments) {
@@ -585,7 +627,7 @@ export class DeploymentService {
       include: { project: { select: { id: true, slug: true } } },
     });
     for (const deployment of running) {
-      const route = await this.routeFor(deployment.project, deployment.serviceId);
+      const route = await this.routeFor(deployment.project, deployment);
       const reason = await this.checkStillRunning(deployment, route?.name ?? null);
       if (reason) {
         await this.markFailed(deployment.id, reason, DeploymentStatus.RUNNING);
@@ -614,7 +656,13 @@ export class DeploymentService {
    * live before the backend it calls. Each service switches with zero downtime
    * on its own; one failing doesn't stop the others (it keeps its previous version).
    */
-  private async executeAll(project: Project, deployments: Deployment[], services: Service[], notes: string[] = []): Promise<void> {
+  private async executeAll(
+    project: Project,
+    deployments: Deployment[],
+    services: Service[],
+    notes: string[] = [],
+    environment: Environment | null = null,
+  ): Promise<void> {
     const primaryId = primaryServiceId(services);
     const order = (deployment: Deployment) => {
       const service = services.find((s) => s.id === deployment.serviceId)!;
@@ -623,7 +671,7 @@ export class DeploymentService {
       return service.id === primaryId ? 2 : service.type === "WEB" && service.public ? 1 : 0;
     };
     for (const deployment of [...deployments].sort((a, b) => order(a) - order(b))) {
-      await this.execute(project, deployment, services.find((s) => s.id === deployment.serviceId)!, primaryId, notes);
+      await this.execute(project, deployment, services.find((s) => s.id === deployment.serviceId)!, primaryId, notes, environment);
     }
   }
 
@@ -633,6 +681,7 @@ export class DeploymentService {
     service: Service,
     primaryId: string | null,
     notes: string[] = [],
+    environment: Environment | null = null,
   ): Promise<void> {
     const logger = this.deps.logger.child({ deploymentId: deployment.id, projectId: project.id, service: service.name });
     let writer: BuildLogWriter | null = null;
@@ -647,23 +696,26 @@ export class DeploymentService {
         // Re-validated on every deploy: the allowlist may have changed since creation.
         repository: parseRepositoryUrl(project.repositoryUrl, this.deps.allowedGitHosts),
         branch: deployment.branch,
-        name: artifactName(project, service),
-        routeName: routeName(project, service, primaryId),
+        name: deploymentArtifactName(project, service, environment),
+        routeName: environmentRouteName(environment, routeName(project, service, primaryId)),
         service: serviceSpec(project, service),
         labels: { [ShipyardLabel.PROJECT_ID]: project.id },
-        domains: await this.serviceDomains(project.id, service.id, primaryId),
+        // Custom domains, volumes (production data) and replicas are production's.
+        domains: environment ? [] : await this.serviceDomains(project.id, service.id, primaryId),
         resources: effectiveResources(project, service),
         healthCheck: effectiveHealthCheck(project, service),
-        replicas: service.type === "POSTGRES" ? 1 : service.replicas,
-        volumes: (await this.deps.prisma.volume.findMany({ where: { serviceId: service.id } })).map((volume) => ({
-          name: volume.dockerName,
-          mountPath: volume.mountPath,
-        })),
-        env: (await this.deps.environment?.forDeployment(project.id, service.id)) ?? undefined,
+        replicas: environment || service.type === "POSTGRES" ? 1 : service.replicas,
+        volumes: environment
+          ? []
+          : (await this.deps.prisma.volume.findMany({ where: { serviceId: service.id } })).map((volume) => ({
+              name: volume.dockerName,
+              mountPath: volume.mountPath,
+            })),
+        env: (await this.deps.environment?.forDeployment(project.id, service.id, variableEnvironment(environment))) ?? undefined,
       };
 
       if (job.service?.stopFirst) {
-        stopped = await this.stopForReplacement(service.id, deployment.id, `Stopped for deployment ${displayId(deployment.id)}`);
+        stopped = await this.stopForReplacement(deployment, `Stopped for deployment ${displayId(deployment.id)}`);
         if (stopped.length > 0) logWriter.write(`Stopped the running ${service.name} first: two copies must never share its data\n`);
       }
       await this.deps.engine.run(job, {
@@ -671,7 +723,7 @@ export class DeploymentService {
         onLog: (source, text) => logWriter.write(source === "runtime" ? prefixLines("[app] ", text) : text),
       });
 
-      await this.retireOthers(deployment.serviceId, deployment.id);
+      await this.retireOthers(deployment, deployment.id);
     } catch (error) {
       // The engine already persisted FAILED for errors inside the pipeline.
       if (!(error instanceof DeploymentFailedError)) {
@@ -749,6 +801,7 @@ export class DeploymentService {
     const candidates = await this.deps.prisma.deployment.findMany({
       where: {
         serviceId: source.serviceId,
+        environmentId: source.environmentId,
         id: { not: source.id },
         createdAt: { lt: source.createdAt },
         status: DeploymentStatus.STOPPED,
@@ -778,11 +831,16 @@ export class DeploymentService {
    * returns what it stopped, to bring back if the new one fails. Throws if it
    * can't stop one: better no new deployment than two servers on one volume.
    */
-  private async stopForReplacement(serviceId: string, keepId: string, message: string): Promise<Deployment[]> {
-    const service = await this.deps.prisma.service.findUnique({ where: { id: serviceId }, select: { type: true } });
+  private async stopForReplacement(keep: Pick<Deployment, "id" | "serviceId" | "environmentId">, message: string): Promise<Deployment[]> {
+    const service = await this.deps.prisma.service.findUnique({ where: { id: keep.serviceId }, select: { type: true } });
     if (service?.type !== "POSTGRES") return [];
     const running = await this.deps.prisma.deployment.findMany({
-      where: { serviceId, id: { not: keepId }, status: { in: [DeploymentStatus.RUNNING, DeploymentStatus.HEALTHY] } },
+      where: {
+        serviceId: keep.serviceId,
+        environmentId: keep.environmentId,
+        id: { not: keep.id },
+        status: { in: [DeploymentStatus.RUNNING, DeploymentStatus.HEALTHY] },
+      },
     });
     const stopped: Deployment[] = [];
     for (const deployment of running) stopped.push(await this.stopDeployment(deployment, { message }));
@@ -811,6 +869,7 @@ export class DeploymentService {
     const running = await this.deps.prisma.deployment.findMany({
       where: {
         serviceId: { in: services.filter((service) => service.type === "POSTGRES").map((service) => service.id) },
+        environmentId: null,
         status: { in: [DeploymentStatus.RUNNING, ...IN_PROGRESS_STATUSES] },
       },
       select: { serviceId: true },
@@ -819,11 +878,16 @@ export class DeploymentService {
     return services.filter((service) => !busy.has(service.id));
   }
 
-  /** Stops the service's other healthy deployments, keeping containers for rollback. */
-  private async retireOthers(serviceId: string, keepId: string, reason?: string): Promise<void> {
+  /** Stops the service's other healthy deployments in the same environment, keeping containers for rollback. */
+  private async retireOthers(
+    of: Pick<Deployment, "serviceId" | "environmentId">,
+    keepId: string,
+    reason?: string,
+  ): Promise<void> {
     const others = await this.deps.prisma.deployment.findMany({
       where: {
-        serviceId,
+        serviceId: of.serviceId,
+        environmentId: of.environmentId,
         id: { not: keepId },
         status: { in: [DeploymentStatus.RUNNING, DeploymentStatus.HEALTHY] },
       },
@@ -951,7 +1015,7 @@ export class DeploymentService {
     const targets = new Map<string, RouteTarget>();
     for (const deployment of running) {
       if (!deployment.containerName || deployment.containerPort === null) continue;
-      const route = await this.routeFor(deployment.project, deployment.serviceId);
+      const route = await this.routeFor(deployment.project, deployment);
       if (!route) continue;
       targets.set(route.name, {
         ...route,
@@ -972,11 +1036,11 @@ export class DeploymentService {
    */
   async refreshRoute(projectId: string): Promise<void> {
     const live = await this.deps.prisma.deployment.findMany({
-      where: { projectId, status: DeploymentStatus.RUNNING, service: { type: "WEB", public: true } },
+      where: { projectId, environmentId: null, status: DeploymentStatus.RUNNING, service: { type: "WEB", public: true } },
       include: { project: true, service: true },
     });
     for (const deployment of live) {
-      const route = await this.routeFor(deployment.project, deployment.serviceId);
+      const route = await this.routeFor(deployment.project, deployment);
       if (!route || !deployment.containerName || deployment.containerPort === null) continue;
       await this.deps.router.activate({
         ...route,
@@ -993,13 +1057,35 @@ export class DeploymentService {
     return this.deps.prisma.service.findMany({ where: { projectId }, orderBy: { createdAt: "asc" } });
   }
 
-  /** Where a service is routed, or null when it isn't (workers, private services). */
-  private async routeFor(project: Pick<Project, "id" | "slug">, serviceId: string): Promise<{ name: string; aliases: string[] } | null> {
+  /**
+   * Where a deployment's service is routed in its environment, or null when it
+   * isn't (workers, private services). Custom domains are production's only.
+   */
+  private async routeFor(
+    project: Pick<Project, "id" | "slug">,
+    deployment: Pick<Deployment, "serviceId" | "environmentId">,
+  ): Promise<{ name: string; aliases: string[] } | null> {
     const services = await this.services(project.id);
-    const service = services.find((candidate) => candidate.id === serviceId);
+    const service = services.find((candidate) => candidate.id === deployment.serviceId);
     if (!service || service.type !== "WEB" || !service.public) return null;
     const primaryId = primaryServiceId(services);
-    return { name: routeName(project, service, primaryId), aliases: await this.serviceDomains(project.id, service.id, primaryId) };
+    const environment = deployment.environmentId
+      ? await this.deps.prisma.environment.findUnique({ where: { id: deployment.environmentId } })
+      : null;
+    return {
+      name: environmentRouteName(environment, routeName(project, service, primaryId)),
+      aliases: environment ? [] : await this.serviceDomains(project.id, service.id, primaryId),
+    };
+  }
+
+  /** An environment of this project that is still active (a closed preview can't be deployed). */
+  private async activeEnvironment(projectId: string, environmentId: string): Promise<Environment> {
+    const environment = await this.deps.prisma.environment.findFirst({ where: { id: environmentId, projectId } });
+    if (!environment) throw new NotFoundError(`Environment not found: ${environmentId}`);
+    if (environment.status !== "ACTIVE") {
+      throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, `The ${environment.name} environment is closed.`);
+    }
+    return environment;
   }
 
   /** A service's custom domains; domains without a service belong to the primary one. */
@@ -1014,12 +1100,12 @@ export class DeploymentService {
 
 
   /** Takes the deployment out of the router, if the route still points at it. */
-  private async deactivateRoute(deployment: Pick<Deployment, "id" | "projectId" | "serviceId">): Promise<void> {
+  private async deactivateRoute(deployment: Pick<Deployment, "id" | "projectId" | "serviceId" | "environmentId">): Promise<void> {
     const project = await this.deps.prisma.project.findUnique({
       where: { id: deployment.projectId },
       select: { id: true, slug: true },
     });
-    const route = project && (await this.routeFor(project, deployment.serviceId));
+    const route = project && (await this.routeFor(project, deployment));
     if (route) await this.deps.router.deactivate(route.name, deployment.id);
   }
 
@@ -1039,28 +1125,42 @@ export class DeploymentService {
 
 
 
-  private lockProject(projectId: string): void {
-    if (this.busyProjects.has(projectId)) {
+  /** `key`: the project (production), or project/environment. See lockKey(). */
+  private lockProject(key: string): void {
+    if (this.busyProjects.has(key)) {
       throw new ConflictError(
         ErrorCode.DEPLOYMENT_IN_PROGRESS,
         "Another deployment or restart of this project is in progress. Wait for it to finish.",
       );
     }
+    this.busyProjects.add(key);
+  }
+
+  private unlockProject(key: string): void {
+    this.busyProjects.delete(key);
+    if (this.pushWhileBusy.delete(key)) this.track(this.deployQueuedPush(key));
+  }
+
+  /** Locks every environment of a project (deleting it, or one of its services). */
+  private lockWholeProject(projectId: string): void {
+    if ([...this.busyProjects].some((key) => key === projectId || key.startsWith(`${projectId}/`))) {
+      throw new ConflictError(
+        ErrorCode.DEPLOYMENT_IN_PROGRESS,
+        "A deployment of this project is in progress (in some environment). Wait for it to finish.",
+      );
+    }
     this.busyProjects.add(projectId);
   }
 
-  private unlockProject(projectId: string): void {
-    this.busyProjects.delete(projectId);
-    if (this.pushWhileBusy.delete(projectId)) this.track(this.deployQueuedPush(projectId));
-  }
-
   /** Runs the deploy a push asked for while the project was busy. */
-  private async deployQueuedPush(projectId: string): Promise<void> {
+  private async deployQueuedPush(key: string): Promise<void> {
+    const [projectId, environmentId = null] = key.split("/");
     try {
       // Unscoped lookup: the push's signature was verified when it arrived; the deploy runs as the project's owner.
       const project = await this.deps.prisma.project.findUnique({ where: { id: projectId } });
       if (!project) return; // deleted in the meantime
-      const result = await this.deployOnPush(project.id);
+      if (environmentId && (await this.deps.prisma.environment.findUnique({ where: { id: environmentId } }))?.status !== "ACTIVE") return;
+      const result = await this.deployOnPush(project.id, environmentId);
       this.deps.logger.info({ projectId, outcome: result.outcome }, "Deployed a push received during a previous deploy");
     } catch (error) {
       this.deps.logger.error({ err: error, projectId }, "Could not deploy a queued push");
@@ -1101,3 +1201,14 @@ function prefixLines(prefix: string, text: string): string {
   return text.replace(/^(?=.)/gm, prefix);
 }
 
+
+/** The deploy lock: one deploy/restart at a time per project environment (production = the project id). */
+function lockKey(projectId: string, environmentId: string | null): string {
+  return environmentId ? `${projectId}/${environmentId}` : projectId;
+}
+
+/** Base for image and container names: the environment's name is part of them. */
+function deploymentArtifactName(project: Pick<Project, "slug">, service: Pick<Service, "name">, environment: Pick<Environment, "name"> | null): string {
+  const base = artifactName(project, service);
+  return environment ? `${environment.name}-${base}` : base;
+}

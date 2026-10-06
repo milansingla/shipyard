@@ -1,5 +1,5 @@
 import { type Deployment, OrgRole, type PrismaClient, type Project, isUniqueViolation } from "../../db/prisma.js";
-import { ConflictError, ErrorCode } from "../../lib/errors.js";
+import { ConflictError, ErrorCode, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
 import { toDockerSlug } from "../../services/docker/naming.js";
 import { validateBranchName } from "../../services/git/branchName.js";
@@ -8,6 +8,7 @@ import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { AccessService, ProjectWithRole } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import { volumesExist } from "../services/ServiceService.js";
+import { RESERVED_PREFIX } from "../environments/environmentRules.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
 import type { CreateProjectInput, UpdateProjectInput } from "./project.schemas.js";
 
@@ -92,7 +93,7 @@ export class ProjectService {
       where: this.deps.access.visibleProjects(userId),
       orderBy: { createdAt: "desc" },
       include: {
-        deployments: { orderBy: { createdAt: "desc" }, take: 1 },
+        deployments: { where: { environmentId: null }, orderBy: { createdAt: "desc" }, take: 1 },
         organization: { select: { id: true, name: true, personal: true, memberships: { where: { userId }, select: { role: true } } } },
       },
     });
@@ -144,6 +145,9 @@ export class ProjectService {
    * slug must not equal such an address of an existing project.
    */
   private async assertAddressFree(slug: string): Promise<void> {
+    if (RESERVED_PREFIX.test(slug)) {
+      throw new ValidationError(`"${slug}" can't be a project's address: names starting with dev- or pr-<number>- belong to environments.`);
+    }
     const splits = [...slug.matchAll(/-/g)].map((match) => match.index!);
     for (const at of splits) {
       const clash = await this.deps.prisma.service.findFirst({
@@ -157,6 +161,6 @@ export class ProjectService {
   }
 
   private async latestDeployment(projectId: string): Promise<Deployment | null> {
-    return this.deps.prisma.deployment.findFirst({ where: { projectId }, orderBy: { createdAt: "desc" } });
+    return this.deps.prisma.deployment.findFirst({ where: { projectId, environmentId: null }, orderBy: { createdAt: "desc" } });
   }
 }

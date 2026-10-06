@@ -58,7 +58,8 @@ export class ServiceService {
     const services = await this.deps.prisma.service.findMany({
       where: { projectId },
       orderBy: { createdAt: "asc" },
-      include: { deployments: { orderBy: { createdAt: "desc" }, take: 1 }, volumes: { orderBy: { createdAt: "asc" } } },
+      // Production's: other environments are listed with their environment.
+      include: { deployments: { where: { environmentId: null }, orderBy: { createdAt: "desc" }, take: 1 }, volumes: { orderBy: { createdAt: "asc" } } },
     });
     const primaryId = primaryServiceId(services);
     return services.map(({ deployments, ...service }) => ({
@@ -175,7 +176,7 @@ export class ServiceService {
       await this.deps.deployments.removeVolumes(volumes.map((volume) => volume.dockerName));
       await this.deps.prisma.$transaction([
         this.deps.prisma.volume.deleteMany({ where: { serviceId } }),
-        this.deps.prisma.environmentVariable.deleteMany({ where: { projectId: project.id, scope: "project", key: { in: urlKeys } } }),
+        this.deps.prisma.environmentVariable.deleteMany({ where: { projectId: project.id, scope: "project", environment: "ALL", key: { in: urlKeys } } }),
         this.deps.prisma.environmentVariable.deleteMany({ where: { projectId: project.id, scope: serviceId } }),
         this.deps.prisma.service.delete({ where: { id: serviceId } }), // cascades to deployments and its domains
       ]);

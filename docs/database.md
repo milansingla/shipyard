@@ -148,6 +148,15 @@ conditional update so each occurrence runs once. A run: status, trigger,
 the deployment whose image it ran, times, exit code, the last 64 KB of
 output. 50 runs are kept per job. Both cascade with their project/service.
 
+### Environment (`environments`), `deployments.environmentId`, `environment_variables.environment`
+
+Production is the project itself: deployments with `environmentId` null.
+An `environments` row is a development environment (`dev`) or a pull
+request's preview (`pr-<n>`, a check constraint requires the number); it is
+closed, never deleted, so its deployments stay as history. A variable's
+`environment` is ALL or one environment; it is part of the unique key and of
+the encryption context.
+
 ### Volume (`volumes`)
 
 A service's persistent directory: `name`, `mountPath` (each unique per
