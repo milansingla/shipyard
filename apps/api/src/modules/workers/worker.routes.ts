@@ -35,6 +35,7 @@ const completeSchema = z.union([
 ]);
 const heartbeatSchema = z.strictObject({
   runningJobs: z.int().min(0).max(10_000),
+  diskFreePercent: z.number().min(0).max(100).optional(),
   cpus: capacity.cpus.optional(),
   memoryMb: capacity.memoryMb.optional(),
 });

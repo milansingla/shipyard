@@ -312,3 +312,28 @@ export interface ProjectMetrics {
     averageBuildMs: number | null;
   };
 }
+
+export interface AlertItem {
+  id: string;
+  organizationId: string | null;
+  projectId: string | null;
+  kind: "DEPLOYMENT_FAILED" | "APP_DOWN" | "WORKER_OFFLINE" | "HIGH_CPU" | "HIGH_MEMORY" | "DISK_PRESSURE";
+  severity: "WARNING" | "CRITICAL";
+  title: string;
+  message: string;
+  status: "OPEN" | "RESOLVED";
+  openedAt: string;
+  resolvedAt: string | null;
+}
+
+/** Where alerts are sent. The URL is never returned, only its host. */
+export interface NotificationChannel {
+  id: string;
+  organizationId: string | null;
+  name: string;
+  type: "WEBHOOK" | "SLACK";
+  host: string;
+  enabled: boolean;
+  lastError: string | null;
+  lastSentAt: string | null;
+}

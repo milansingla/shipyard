@@ -20,6 +20,9 @@ export async function resetTables(prisma: PrismaClient): Promise<void> {
   await prisma.volume.deleteMany(); // restricts service deletion: data is never removed implicitly
   await prisma.deployment.deleteMany();
   await prisma.worker.deleteMany();
+  await prisma.alert.deleteMany();
+  await prisma.notificationChannel.deleteMany();
+  await prisma.metricSample.deleteMany();
   await prisma.project.deleteMany();
   await prisma.organization.deleteMany(); // memberships cascade
   await prisma.session.deleteMany();

@@ -30,6 +30,8 @@ import type { ProjectEnvironments } from "./modules/environments/ProjectEnvironm
 import { createWorkerAdminRouter, createWorkerAgentRouter } from "./modules/workers/worker.routes.js";
 import type { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import { createMetricsRouter } from "./modules/metrics/metrics.routes.js";
+import { createAlertRouter } from "./modules/alerts/alert.routes.js";
+import type { AlertService } from "./modules/alerts/AlertService.js";
 import type { MetricsService } from "./modules/metrics/MetricsService.js";
 import type { WorkerRegistry } from "./modules/workers/WorkerRegistry.js";
 import type { ServiceService } from "./modules/services/ServiceService.js";
@@ -66,6 +68,7 @@ export interface AppDeps {
   environments?: ProjectEnvironments;
   workers?: WorkerRegistry;
   metrics?: MetricsService;
+  alerts?: AlertService;
   /** Engine calls to remote workers; null = remote workers can't run deploys. */
   workerCalls?: WorkerCalls | null;
   /** Told to workers when they register: how app URLs look. */
@@ -138,6 +141,7 @@ export function createApp(deps: AppDeps): Express {
     if (deps.environments) app.use("/api", createProjectEnvironmentsRouter(deps.environments));
     if (deps.workers) app.use("/api", createWorkerAdminRouter(deps.workers));
     if (deps.metrics) app.use("/api", createMetricsRouter(deps.metrics));
+    if (deps.alerts) app.use("/api", createAlertRouter(deps.alerts));
   }
 
   app.use(notFoundHandler);

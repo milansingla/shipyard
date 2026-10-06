@@ -144,6 +144,8 @@ model Organization {
   createdAt   DateTime     @default(now())
   memberships Membership[]
   projects    Project[]
+  notificationChannels NotificationChannel[]
+  alerts      Alert[]
 
   @@map("organizations")
 }
@@ -609,6 +611,8 @@ model Worker {
   runningJobs     Int          @default(0)
   /// Runs deploy jobs (the built-in worker, and agents that said so when registering).
   acceptsJobs     Boolean      @default(false)
+  /// Free space on its Docker disk, %, as of its last heartbeat (null = not reported).
+  diskFreePercent Float?
   lastHeartbeatAt DateTime     @default(now())
   createdAt       DateTime     @default(now())
   updatedAt       DateTime     @updatedAt
@@ -717,4 +721,76 @@ model MetricSample {
   @@index([deploymentId, at])
   @@index([at])
   @@map("metric_samples")
+}
+
+enum NotificationChannelType {
+  /// POSTs a JSON alert to a URL.
+  WEBHOOK
+  /// A Slack incoming webhook.
+  SLACK
+}
+
+/// Where an organization's alerts are sent. organizationId null = the
+/// platform's own channel (worker alerts), managed by SHIPYARD_ADMINS.
+model NotificationChannel {
+  id             String                  @id @default(uuid()) @db.Uuid
+  organizationId String?                 @db.Uuid
+  organization   Organization?           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  type           NotificationChannelType
+  /// SecretBox ciphertext: a Slack webhook URL is a credential.
+  url            String
+  /// The URL's host, shown instead of the URL.
+  host           String
+  enabled        Boolean                 @default(true)
+  lastError      String?
+  lastSentAt     DateTime?
+  createdAt      DateTime                @default(now())
+
+  @@index([organizationId])
+  @@map("notification_channels")
+}
+
+enum AlertKind {
+  DEPLOYMENT_FAILED
+  /// A RUNNING deployment's app isn't running (crashed, crash-looping).
+  APP_DOWN
+  WORKER_OFFLINE
+  HIGH_CPU
+  HIGH_MEMORY
+  DISK_PRESSURE
+}
+
+enum AlertSeverity {
+  WARNING
+  CRITICAL
+}
+
+enum AlertStatus {
+  OPEN
+  RESOLVED
+}
+
+/// Something wrong, once: an open alert with the same fingerprint is reused
+/// (a partial unique index in the migration), and channels hear about it when
+/// it opens and when it resolves.
+model Alert {
+  id             String        @id @default(uuid()) @db.Uuid
+  /// null = a platform alert (workers).
+  organizationId String?       @db.Uuid
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  projectId      String?       @db.Uuid
+  kind           AlertKind
+  severity       AlertSeverity
+  /// What it is about, e.g. "HIGH_CPU:<deployment id>".
+  fingerprint    String
+  title          String
+  message        String
+  status         AlertStatus   @default(OPEN)
+  openedAt       DateTime      @default(now())
+  resolvedAt     DateTime?
+
+  @@index([organizationId, status, openedAt(sort: Desc)])
+  @@index([fingerprint, status])
+  @@map("alerts")
 }

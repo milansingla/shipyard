@@ -25,6 +25,8 @@ import { ProjectEnvironments } from "../../src/modules/environments/ProjectEnvir
 import { PreviewService } from "../../src/modules/environments/PreviewService.js";
 import { WorkerRegistry } from "../../src/modules/workers/WorkerRegistry.js";
 import { MetricsService } from "../../src/modules/metrics/MetricsService.js";
+import { AlertService } from "../../src/modules/alerts/AlertService.js";
+import { SlackProvider, UrlGuard, WebhookProvider } from "../../src/services/notify/NotificationProvider.js";
 import { WorkerCalls } from "../../src/modules/workers/WorkerCalls.js";
 import { RemoteEngine } from "../../src/modules/workers/RemoteEngine.js";
 import { runWorkerAgent } from "../../src/worker/agent.js";
@@ -278,6 +280,7 @@ let environment: EnvironmentService;
 let cron: CronService;
 let workers: WorkerRegistry;
 let metrics: MetricsService;
+let alerts: AlertService;
 let workerCalls: WorkerCalls;
 /** Every route the control plane's router was asked to apply. */
 const routeTargets: RouteTarget[] = [];
@@ -346,6 +349,7 @@ beforeAll(async () => {
       logger: silentLogger,
     }),
     engine: fakeEngine,
+    onFinished: (input) => alerts.deploymentFinished(input),
     remoteEngine: (workerId) =>
       new RemoteEngine(workerId, workerCalls, fakeEngine, async (target) => {
         const worker = await prisma.worker.findUniqueOrThrow({ where: { id: workerId } });
@@ -386,10 +390,22 @@ beforeAll(async () => {
         logger: silentLogger,
         onOffline: async (ids) => {
           for (const id of ids) await workerCalls.failWorker(id, "the worker stopped responding.");
+          await alerts.workerOffline(ids);
         },
+        onOnline: (id) => alerts.workerOnline(id),
       })),
       workerCalls: (workerCalls = new WorkerCalls({ prisma, logger: silentLogger })),
       metrics: (metrics = new MetricsService({ prisma, access, deployments, logger: silentLogger })),
+      alerts: (alerts = new AlertService({
+        prisma,
+        access,
+        secretBox,
+        providers: { WEBHOOK: new WebhookProvider(new UrlGuard(true)), SLACK: new SlackProvider(new UrlGuard(true)) },
+        guard: new UrlGuard(true), // the receiver below is on localhost
+        isAdmin: (login) => login === "alice",
+        appUrl: APP_URL,
+        logger: silentLogger,
+      })),
       workerRouting: { mode: "traefik", domain: "localhost", httpPort: 80, httpsPort: null },
       cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
@@ -2834,5 +2850,120 @@ describe("metrics", () => {
     // Samples older than a day are dropped at the next sampling.
     await metrics.sample(new Date(Date.now() + 25 * 60 * 60 * 1000));
     expect(await prisma.metricSample.count({ where: { projectId } })).toBe(1); // just the new one
+  });
+});
+
+describe("alerts", () => {
+  /** A webhook receiver on localhost: what Slack or a monitoring tool would get. */
+  async function receiver() {
+    const received: Array<Record<string, any>> = [];
+    const server = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", () => {
+        received.push({ path: req.url, ...JSON.parse(body) });
+        res.end("ok");
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as AddressInfo;
+    return { received, url: (path: string) => `http://127.0.0.1:${port}${path}`, close: () => new Promise((r) => server.close(r)) };
+  }
+  const personalOrg = async (login: string) => (await prisma.organization.findFirstOrThrow({ where: { slug: `user-${login}` } })).id;
+
+  it("organization admins add channels; the URL is stored encrypted and never shown; a test notification arrives", async () => {
+    const hook = await receiver();
+    try {
+      const alice = await sessionFor(ALICE);
+      const bob = await sessionFor(BOB);
+      const orgId = await personalOrg("alice");
+      expect((await call(bob, "POST", `/api/organizations/${orgId}/notification-channels`, { name: "x", type: "WEBHOOK", url: hook.url("/x") })).status).toBe(404);
+      expect((await call(alice, "POST", `/api/organizations/${orgId}/notification-channels`, { name: "x", type: "WEBHOOK", url: "ftp://x" })).status).toBe(400);
+      const created = await call(alice, "POST", `/api/organizations/${orgId}/notification-channels`, { name: "Ops hook", type: "WEBHOOK", url: hook.url("/hook?token=s3cret") });
+      expect(created.status).toBe(201);
+      expect(created.body!.data).toMatchObject({ name: "Ops hook", type: "WEBHOOK", host: "127.0.0.1" });
+      expect(JSON.stringify(created.body)).not.toContain("s3cret");
+      const stored = await prisma.notificationChannel.findUniqueOrThrow({ where: { id: created.body!.data.id } });
+      expect(stored.url).not.toContain("s3cret");
+
+      const tested = await call(alice, "POST", `/api/notification-channels/${created.body!.data.id}/test`);
+      expect(tested.body!.data).toMatchObject({ lastError: null });
+      expect(hook.received).toMatchObject([{ path: "/hook?token=s3cret", kind: "TEST", title: "Test notification" }]);
+      expect((await call(bob, "POST", `/api/notification-channels/${created.body!.data.id}/test`)).status).toBe(404);
+    } finally {
+      await hook.close();
+    }
+  });
+
+  it("a failing production deploy opens one alert, tells the channels, and resolves when a deploy succeeds", async () => {
+    const hook = await receiver();
+    try {
+      const alice = await sessionFor(ALICE);
+      const orgId = await personalOrg("alice");
+      await call(alice, "POST", `/api/organizations/${orgId}/notification-channels`, { name: "hook", type: "WEBHOOK", url: hook.url("/hook") });
+      await call(alice, "POST", `/api/organizations/${orgId}/notification-channels`, { name: "slack", type: "SLACK", url: hook.url("/slack") });
+      const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/alerting" })).body!.data.id as string;
+
+      failRuns.add("web");
+      await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+      await deployments.waitForIdle();
+      await call(alice, "POST", `/api/projects/${projectId}/deploy`); // fails again: same alert
+      await deployments.waitForIdle();
+      await alerts.waitForIdle();
+      const open = (await call(alice, "GET", "/api/alerts?status=OPEN")).body!.data as Array<Record<string, any>>;
+      expect(open).toMatchObject([{ kind: "DEPLOYMENT_FAILED", severity: "WARNING", title: "alerting: deploying web failed", projectId }]);
+      expect(hook.received.filter((r) => r.path === "/hook")).toMatchObject([
+        { kind: "DEPLOYMENT_FAILED", status: "OPEN", project: { id: projectId, name: "alerting" }, url: `${APP_URL}/projects/${projectId}` },
+      ]);
+      expect(hook.received.find((r) => r.path === "/slack")!.text).toContain(":warning: *alerting: deploying web failed*");
+
+      failRuns.clear();
+      await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+      await deployments.waitForIdle();
+      await alerts.waitForIdle();
+      expect((await call(alice, "GET", "/api/alerts?status=OPEN")).body!.data).toEqual([]);
+      expect(hook.received.filter((r) => r.path === "/hook").map((r) => r.status)).toEqual(["OPEN", "RESOLVED"]);
+      // Other organizations don't see it.
+      expect((await call(await sessionFor(BOB), "GET", "/api/alerts")).body!.data).toEqual([]);
+    } finally {
+      await hook.close();
+    }
+  });
+
+  it("reads the metric samples: an app down, sustained high CPU and memory; they resolve when it recovers", async () => {
+    const alice = await sessionFor(ALICE);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/hot" })).body!.data.id as string;
+    await call(alice, "PATCH", `/api/projects/${projectId}`, { cpuLimit: 0.5 });
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    const live = await prisma.deployment.findFirstOrThrow({ where: { projectId, status: "RUNNING" } });
+    const sample = (cpuPercent: number, memoryMb: number, running: number, minutesAgo: number) =>
+      prisma.metricSample.create({
+        data: { deploymentId: live.id, projectId, serviceId: live.serviceId, cpuPercent, memoryMb, memoryLimitMb: 256, restartCount: 3, running, at: new Date(Date.now() - minutesAgo * 30_000) },
+      });
+    for (let i = 5; i >= 1; i -= 1) await sample(49, 240, 1, i);
+    await sample(48, 245, 0, 0);
+    expect(await alerts.evaluate()).toEqual({ opened: 3, resolved: 0 });
+    const kinds = ((await call(alice, "GET", "/api/alerts?status=OPEN")).body!.data as Array<Record<string, any>>).map((a) => a.kind).sort();
+    expect(kinds).toEqual(["APP_DOWN", "HIGH_CPU", "HIGH_MEMORY"]);
+
+    await sample(5, 80, 1, -1);
+    expect(await alerts.evaluate()).toEqual({ opened: 0, resolved: 3 });
+  });
+
+  it("worker alerts are the platform's: offline and disk pressure, seen by platform admins only", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const worker = await prisma.worker.create({
+      data: { name: "w-alert", hostname: "w", cpus: 2, memoryMb: 2048, version: "4.0.0", tokenHash: "x".repeat(64), diskFreePercent: 4, lastHeartbeatAt: new Date(Date.now() - 60_000) },
+    });
+    await workers.sweep();
+    await alerts.evaluate();
+    expect(((await call(alice, "GET", "/api/alerts?status=OPEN")).body!.data as Array<Record<string, any>>).map((a) => a.kind).sort()).toEqual(["WORKER_OFFLINE"]);
+    expect((await call(bob, "GET", "/api/alerts")).body!.data).toEqual([]);
+
+    await workers.heartbeat(worker.id, { runningJobs: 0, diskFreePercent: 3 });
+    await alerts.evaluate();
+    expect(((await call(alice, "GET", "/api/alerts?status=OPEN")).body!.data as Array<Record<string, any>>).map((a) => a.kind)).toEqual(["DISK_PRESSURE"]);
   });
 });

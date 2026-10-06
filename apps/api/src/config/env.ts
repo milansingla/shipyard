@@ -61,6 +61,8 @@ const envSchema = z.object({
   SHIPYARD_WORKER_JOIN_TOKEN: z.string().min(32, "must be at least 32 characters (`openssl rand -hex 32`)").optional(),
   /** GitHub logins that administer the platform itself (workers), comma-separated. */
   SHIPYARD_ADMINS: z.string().optional(),
+  /** Lets alert webhooks point at private addresses and plain http (local development only). */
+  SHIPYARD_ALLOW_PRIVATE_WEBHOOKS: z.enum(["true", "false"]).default("false"),
   /** This process's worker name (default: the hostname). */
   SHIPYARD_WORKER_NAME: z
     .string()
@@ -142,6 +144,8 @@ export interface AppConfig {
     /** This machine's worker name. */
     name: string;
   };
+  /** Alert webhooks may target private addresses (development only). */
+  allowPrivateWebhooks: boolean;
 }
 
 /** Pure: turns an env-like object into validated config. Throws on invalid input. */
@@ -213,6 +217,7 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     githubWebhookSecret: parsed.GITHUB_WEBHOOK_SECRET ?? null,
     trustProxy: parsed.SHIPYARD_TRUST_PROXY ?? false,
     registry: parseRegistry(parsed),
+    allowPrivateWebhooks: parsed.SHIPYARD_ALLOW_PRIVATE_WEBHOOKS === "true",
     workers: {
       joinToken: parsed.SHIPYARD_WORKER_JOIN_TOKEN ?? null,
       admins: (parsed.SHIPYARD_ADMINS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean),

@@ -6,6 +6,7 @@ import os from "node:os";
 import { createLogger } from "./lib/logger.js";
 import { HEARTBEAT_INTERVAL_MS } from "./modules/workers/WorkerRegistry.js";
 import { SHIPYARD_VERSION } from "./version.js";
+import { diskFreePercent } from "./lib/disk.js";
 
 const config = loadConfig();
 const logger = createLogger({ level: config.logLevel, pretty: config.env === "development" });
@@ -28,9 +29,10 @@ await services.deployments.reconcileOnStartup();
 await services.cron.reconcileOnStartup();
 services.deployments.startQueue();
 services.metrics.start();
+services.alerts.start();
 const workerLoop = setInterval(() => {
   void services.workers
-    .heartbeat(builtInWorker.id, { runningJobs: services.deployments.runningJobs })
+    .heartbeat(builtInWorker.id, { runningJobs: services.deployments.runningJobs, diskFreePercent: diskFreePercent(config.dataDir) })
     .then(() => services.workers.sweep())
     .catch((error: unknown) => logger.error({ err: error }, "Worker heartbeat failed"));
 }, HEARTBEAT_INTERVAL_MS);
@@ -55,6 +57,7 @@ const app = createApp({
   workers: services.workers,
   workerCalls: services.workerCalls,
   metrics: services.metrics,
+  alerts: services.alerts,
   workerRouting: services.workerRouting,
   environments: services.environments,
   auth: services.auth,
@@ -77,6 +80,7 @@ function shutdown(signal: NodeJS.Signals): void {
   clearInterval(workerLoop);
   services.deployments.stopQueue();
   services.metrics.stop();
+  services.alerts.stop();
   // In-flight deploys are not awaited (a build can take minutes); they are
   // marked FAILED by reconcileOnStartup() on the next start.
   server.close((error) => {

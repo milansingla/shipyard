@@ -21,6 +21,8 @@ export interface AgentOptions {
   signal?: AbortSignal;
   /** Calls run at once. */
   concurrency?: number;
+  /** Free space on this machine's Docker disk, % (reported with heartbeats). */
+  diskFreePercent?: () => number | undefined;
 }
 
 interface Call {
@@ -85,7 +87,8 @@ export async function runWorkerAgent(options: AgentOptions): Promise<void> {
 
   let inflight = 0;
   const heartbeat = setInterval(() => {
-    post(`/api/workers/${worker.id}/heartbeat`, token, { runningJobs: inflight }).catch((error: unknown) =>
+    const disk = options.diskFreePercent?.();
+    post(`/api/workers/${worker.id}/heartbeat`, token, { runningJobs: inflight, ...(disk !== undefined && { diskFreePercent: disk }) }).catch((error: unknown) =>
       logger.warn({ err: error }, "Heartbeat failed"),
     );
   }, heartbeatIntervalMs);

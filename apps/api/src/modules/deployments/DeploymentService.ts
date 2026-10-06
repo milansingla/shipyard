@@ -61,6 +61,8 @@ export interface DeploymentServiceDeps {
   prisma: PrismaClient;
   /** This machine's engine (the built-in worker). */
   engine: EngineLike;
+  /** Told when a deployment finished (alerting). */
+  onFinished?: (input: { deployment: Deployment; project: Project; serviceName: string }) => Promise<void>;
   /** The engine of a remote worker, by id; omitted = every deployment runs here. */
   remoteEngine?: (workerId: string) => EngineLike;
   access: AccessService;
@@ -894,6 +896,9 @@ export class DeploymentService {
             ? { deploymentId: outcome.id, service: service.name, commitSha: outcome.commitSha }
             : { deploymentId: outcome.id, service: service.name, failedStage: outcome.failedStage },
         });
+        await this.deps.onFinished?.({ deployment: outcome, project, serviceName: service.name }).catch((error: unknown) =>
+          logger.warn({ err: error }, "Deployment outcome hook failed"),
+        );
       }
     }
   }

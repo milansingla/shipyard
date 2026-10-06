@@ -27,6 +27,8 @@ import { WorkerRegistry } from "./modules/workers/WorkerRegistry.js";
 import { RemoteEngine } from "./modules/workers/RemoteEngine.js";
 import { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import { MetricsService } from "./modules/metrics/MetricsService.js";
+import { AlertService } from "./modules/alerts/AlertService.js";
+import { SlackProvider, UrlGuard, WebhookProvider } from "./services/notify/NotificationProvider.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
@@ -61,6 +63,7 @@ export interface ApiServices extends EngineServices {
   workers: WorkerRegistry;
   workerCalls: WorkerCalls;
   metrics: MetricsService;
+  alerts: AlertService;
   workerRouting: unknown;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
@@ -158,6 +161,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
 
   const deployments = new DeploymentService({
     remoteEngine,
+    onFinished: (input) => alerts.deploymentFinished(input),
     prisma,
     access,
     audit,
@@ -232,13 +236,27 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     logger: logger.child({ component: "workers" }),
     onOffline: async (workerIds) => {
       for (const workerId of workerIds) await workerCalls.failWorker(workerId, "the worker stopped responding.");
+      await alerts.workerOffline(workerIds);
     },
+    onOnline: (workerId) => alerts.workerOnline(workerId),
   });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
+  const guard = new UrlGuard(config.allowPrivateWebhooks);
+  const alerts: AlertService = new AlertService({
+    prisma,
+    access,
+    secretBox,
+    providers: { WEBHOOK: new WebhookProvider(guard), SLACK: new SlackProvider(guard) },
+    guard,
+    isAdmin: (login) => workers.isAdmin(login),
+    appUrl: config.appUrl,
+    logger: logger.child({ component: "alerts" }),
+  });
   const metrics = new MetricsService({ prisma, access, deployments, logger: logger.child({ component: "metrics" }) });
   return {
     workers,
     metrics,
+    alerts,
     workerCalls,
     workerRouting: config.routing
       ? { mode: "traefik", domain: config.routing.domain, httpPort: config.routing.httpPort, httpsPort: config.routing.tls?.httpsPort ?? null }

@@ -6,6 +6,7 @@ import { AppError, ErrorCode } from "./lib/errors.js";
 import { createLogger } from "./lib/logger.js";
 import { SHIPYARD_VERSION } from "./version.js";
 import { runWorkerAgent } from "./worker/agent.js";
+import { diskFreePercent } from "./lib/disk.js";
 
 /**
  * A Shipyard worker: `npm run worker` on a machine with Docker. Needs
@@ -44,4 +45,5 @@ await runWorkerAgent({
   },
   logger,
   signal: shutdown.signal,
+  diskFreePercent: () => diskFreePercent(config.workspaceDir),
 });

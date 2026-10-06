@@ -30,6 +30,7 @@ export interface WorkerRegistryDeps {
   logger: Logger;
   /** Called when workers go OFFLINE (their calls fail as WORKER_LOST). */
   onOffline?: (workerIds: readonly string[]) => Promise<void>;
+  onOnline?: (workerId: string) => Promise<void>;
 }
 
 /** What the API shows: never the token hash. */
@@ -85,7 +86,7 @@ export class WorkerRegistry {
   }
 
   /** A sign of life. Brings an OFFLINE worker back ONLINE; a DRAINING one stays DRAINING. */
-  async heartbeat(workerId: string, report: { runningJobs: number; cpus?: number; memoryMb?: number }): Promise<WorkerView> {
+  async heartbeat(workerId: string, report: { runningJobs: number; cpus?: number; memoryMb?: number; diskFreePercent?: number }): Promise<WorkerView> {
     const current = await this.deps.prisma.worker.findUnique({ where: { id: workerId } });
     if (!current) throw new NotFoundError(`Worker not found: ${workerId}`);
     const worker = await this.deps.prisma.worker.update({
@@ -95,10 +96,14 @@ export class WorkerRegistry {
         runningJobs: report.runningJobs,
         ...(report.cpus !== undefined && { cpus: report.cpus }),
         ...(report.memoryMb !== undefined && { memoryMb: report.memoryMb }),
+        ...(report.diskFreePercent !== undefined && { diskFreePercent: report.diskFreePercent }),
         ...(current.status === "OFFLINE" && { status: "ONLINE" }),
       },
     });
-    if (current.status === "OFFLINE") this.deps.logger.info({ workerId, name: worker.name }, "Worker back online");
+    if (current.status === "OFFLINE") {
+      this.deps.logger.info({ workerId, name: worker.name }, "Worker back online");
+      await this.deps.onOnline?.(workerId);
+    }
     return view(worker);
   }
 
