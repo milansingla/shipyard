@@ -57,6 +57,16 @@ const envSchema = z.object({
   SHIPYARD_REGISTRY_PASSWORD: z.string().min(1).optional(),
   /** Proxies whose X-Forwarded-For is believed (Express "trust proxy" syntax), e.g. "127.0.0.1". Unset = none. */
   SHIPYARD_TRUST_PROXY: z.string().trim().min(1).optional(),
+  /** Lets worker machines register; long and random (`openssl rand -hex 32`). Unset = only the built-in worker. */
+  SHIPYARD_WORKER_JOIN_TOKEN: z.string().min(32, "must be at least 32 characters (`openssl rand -hex 32`)").optional(),
+  /** GitHub logins that administer the platform itself (workers), comma-separated. */
+  SHIPYARD_ADMINS: z.string().optional(),
+  /** This process's worker name (default: the hostname). */
+  SHIPYARD_WORKER_NAME: z
+    .string()
+    .trim()
+    .regex(/^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/, "must be a lowercase DNS label, up to 40 characters")
+    .optional(),
   /** Where browsers reach this API; used for the OAuth callback URL. Default http://localhost:<PORT>. */
   SHIPYARD_PUBLIC_URL: z.url({ protocol: /^https?$/ }).optional(),
   /** Where the browser is sent after signing in (the dashboard). Default: SHIPYARD_PUBLIC_URL. */
@@ -124,6 +134,14 @@ export interface AppConfig {
   trustProxy: string | false;
   /** null = images stay in local Docker. */
   registry: { prefix: string; credentials: { username: string; password: string } | null } | null;
+  workers: {
+    /** null = no other machine may register as a worker. */
+    joinToken: string | null;
+    /** Lower-cased GitHub logins of platform administrators. */
+    admins: readonly string[];
+    /** This machine's worker name. */
+    name: string;
+  };
 }
 
 /** Pure: turns an env-like object into validated config. Throws on invalid input. */
@@ -195,6 +213,11 @@ export function parseConfig(rawEnv: NodeJS.ProcessEnv): AppConfig {
     githubWebhookSecret: parsed.GITHUB_WEBHOOK_SECRET ?? null,
     trustProxy: parsed.SHIPYARD_TRUST_PROXY ?? false,
     registry: parseRegistry(parsed),
+    workers: {
+      joinToken: parsed.SHIPYARD_WORKER_JOIN_TOKEN ?? null,
+      admins: (parsed.SHIPYARD_ADMINS ?? "").split(",").map((login) => login.trim().toLowerCase()).filter(Boolean),
+      name: parsed.SHIPYARD_WORKER_NAME ?? workerNameFromHost(os.hostname()),
+    },
     auth: {
       ...parseAuth(parsed),
       sessionTtlMs: parsed.SHIPYARD_SESSION_TTL_HOURS * 60 * 60 * 1000,
@@ -246,6 +269,12 @@ function parseRegistry(parsed: z.infer<typeof envSchema>): AppConfig["registry"]
     return null;
   }
   return { prefix, credentials: username && password ? { username, password } : null };
+}
+
+/** The hostname as a DNS label ("Milans-MacBook.local" → "milans-macbook-local"). */
+export function workerNameFromHost(hostname: string): string {
+  const label = hostname.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40).replace(/-+$/, "");
+  return label || "worker";
 }
 
 function trimTrailingSlash(url: string): string {

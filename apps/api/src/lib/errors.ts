@@ -77,6 +77,12 @@ export class NotFoundError extends AppError {
 }
 
 /** No valid session (HTTP 401). The client should sign in again. */
+export class ForbiddenError extends AppError {
+  constructor(message: string) {
+    super(ErrorCode.FORBIDDEN, message, { statusCode: 403 });
+  }
+}
+
 export class UnauthenticatedError extends AppError {
   constructor(message = "Sign in to continue.") {
     super(ErrorCode.UNAUTHENTICATED, message, { statusCode: 401 });

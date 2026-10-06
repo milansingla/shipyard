@@ -27,6 +27,8 @@ import { createCronRouter } from "./modules/cron/cron.routes.js";
 import type { CronService } from "./modules/cron/CronService.js";
 import { createProjectEnvironmentsRouter } from "./modules/environments/environment.routes.js";
 import type { ProjectEnvironments } from "./modules/environments/ProjectEnvironments.js";
+import { createWorkerAdminRouter, createWorkerAgentRouter } from "./modules/workers/worker.routes.js";
+import type { WorkerRegistry } from "./modules/workers/WorkerRegistry.js";
 import type { ServiceService } from "./modules/services/ServiceService.js";
 import type { VolumeService } from "./modules/services/VolumeService.js";
 import { createWebhookRouter } from "./modules/webhooks/webhook.routes.js";
@@ -59,6 +61,7 @@ export interface AppDeps {
   services?: ServiceService;
   cron?: CronService;
   environments?: ProjectEnvironments;
+  workers?: WorkerRegistry;
   volumes?: VolumeService;
   /** null/omitted = GitHub sign-in not configured: protected routes answer 503. */
   auth?: AppAuth | null;
@@ -95,6 +98,11 @@ export function createApp(deps: AppDeps): Express {
   app.use(express.json({ limit: "100kb" }));
 
   app.use("/api", createHealthRouter(docker));
+  if (deps.workers) {
+    // Workers authenticate with their own secrets, not user sessions.
+    app.use("/api/workers/register", rateLimit("worker-register", limits.signIn, (req) => req.ip ?? "unknown"));
+    app.use("/api", createWorkerAgentRouter(deps.workers));
+  }
   if (auth) {
     app.use("/api", authenticate(auth.service, auth.sessionCookie));
     // Per signed-in user (anonymous requests are refused by requireUser anyway).
@@ -120,6 +128,7 @@ export function createApp(deps: AppDeps): Express {
     if (deps.services && deps.volumes) app.use("/api", createServiceRouter(deps.services, deps.volumes));
     if (deps.cron) app.use("/api", createCronRouter(deps.cron));
     if (deps.environments) app.use("/api", createProjectEnvironmentsRouter(deps.environments));
+    if (deps.workers) app.use("/api", createWorkerAdminRouter(deps.workers));
   }
 
   app.use(notFoundHandler);

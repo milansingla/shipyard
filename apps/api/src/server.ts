@@ -1,7 +1,11 @@
 import { createApp } from "./app.js";
 import { createApiServices } from "./bootstrap.js";
 import { loadConfig, requireDatabaseUrl } from "./config/env.js";
+import os from "node:os";
+
 import { createLogger } from "./lib/logger.js";
+import { HEARTBEAT_INTERVAL_MS } from "./modules/workers/WorkerRegistry.js";
+import { SHIPYARD_VERSION } from "./version.js";
 
 const config = loadConfig();
 const logger = createLogger({ level: config.logLevel, pretty: config.env === "development" });
@@ -12,6 +16,22 @@ const services = createApiServices(config, requireDatabaseUrl(config), logger);
 await services.prisma.$connect();
 await services.deployments.reconcileOnStartup();
 await services.cron.reconcileOnStartup();
+
+// The control plane is also a worker: it runs deployments with this machine's Docker.
+const builtInWorker = await services.workers.registerBuiltIn({
+  name: config.workers.name,
+  hostname: os.hostname(),
+  cpus: os.availableParallelism(),
+  memoryMb: Math.round(os.totalmem() / 1024 / 1024),
+  version: SHIPYARD_VERSION,
+});
+const workerLoop = setInterval(() => {
+  void services.workers
+    .heartbeat(builtInWorker.id, { runningJobs: 0 })
+    .then(() => services.workers.sweep())
+    .catch((error: unknown) => logger.error({ err: error }, "Worker heartbeat failed"));
+}, HEARTBEAT_INTERVAL_MS);
+workerLoop.unref();
 await services.auth?.service.deleteExpiredSessions();
 await services.webhooks?.service.pruneDeliveries();
 if (!services.auth) {
@@ -29,6 +49,7 @@ const app = createApp({
   services: services.services,
   volumes: services.volumes,
   cron: services.cron,
+  workers: services.workers,
   environments: services.environments,
   auth: services.auth,
   webhooks: services.webhooks,
@@ -47,6 +68,7 @@ const server = app.listen(config.port, config.host, () => {
 function shutdown(signal: NodeJS.Signals): void {
   logger.info({ signal }, "Shutting down");
   services.cron.stop();
+  clearInterval(workerLoop);
   // In-flight deploys are not awaited (a build can take minutes); they are
   // marked FAILED by reconcileOnStartup() on the next start.
   server.close((error) => {

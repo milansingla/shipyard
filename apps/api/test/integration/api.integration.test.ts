@@ -23,6 +23,7 @@ import { projectNetworkName } from "../../src/modules/services/serviceRules.js";
 import { type CronRunner, CronService } from "../../src/modules/cron/CronService.js";
 import { ProjectEnvironments } from "../../src/modules/environments/ProjectEnvironments.js";
 import { PreviewService } from "../../src/modules/environments/PreviewService.js";
+import { WorkerRegistry } from "../../src/modules/workers/WorkerRegistry.js";
 import type { OneOffContainerOptions, OneOffResult } from "../../src/services/docker/DockerService.js";
 import { AuditService } from "../../src/modules/audit/AuditService.js";
 import { ApiKeyService } from "../../src/modules/auth/ApiKeyService.js";
@@ -264,6 +265,8 @@ let dataDir: string;
 let deployments: DeploymentService;
 let environment: EnvironmentService;
 let cron: CronService;
+let workers: WorkerRegistry;
+const WORKER_JOIN_TOKEN = "j".repeat(48);
 
 /** Stands in for Docker when a cron job runs: records what it was asked, answers `cronResult`. */
 const cronCalls: OneOffContainerOptions[] = [];
@@ -356,6 +359,7 @@ beforeAll(async () => {
       services: new ServiceService({ prisma, access, deployments, audit, environment, logger: silentLogger }),
       volumes: new VolumeService({ prisma, access, audit, logger: silentLogger }),
       environments: new ProjectEnvironments({ prisma, access, deployments, logger: silentLogger }),
+      workers: (workers = new WorkerRegistry({ prisma, joinToken: WORKER_JOIN_TOKEN, admins: ["alice"], logger: silentLogger })),
       cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
       domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
       auth: {
@@ -2470,5 +2474,80 @@ describe("pull request previews", () => {
     await deployments.waitForIdle();
     expect(jobs).toEqual([]);
     expect(await prisma.environment.count({ where: { projectId } })).toBe(0);
+  });
+});
+
+describe("workers", () => {
+  const info = { name: "builder-1", hostname: "builder-1.internal", cpus: 8, memoryMb: 16_384, version: "4.0.0" };
+  async function workerCall(method: string, path: string, token: string | null, body?: unknown) {
+    const res = await fetch(`${api}${path}`, {
+      method,
+      headers: { "content-type": "application/json", ...(token && { authorization: `Bearer ${token}` }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, body: res.status === 204 ? null : ((await res.json()) as Record<string, any>) };
+  }
+
+  it("registers with the join token, gets its own secret once, heartbeats with it", async () => {
+    expect((await workerCall("POST", "/api/workers/register", null, info)).status).toBe(401);
+    expect((await workerCall("POST", "/api/workers/register", "x".repeat(48), info)).status).toBe(401);
+    expect((await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, { ...info, name: "Bad Name" })).status).toBe(400);
+
+    const registered = await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, info);
+    expect(registered.status).toBe(201);
+    const { worker, token, heartbeatIntervalMs } = registered.body!.data;
+    expect(token).toMatch(/^shpw_[A-Za-z0-9_-]{43}$/);
+    expect(heartbeatIntervalMs).toBeGreaterThan(0);
+    expect(worker).toMatchObject({ name: "builder-1", status: "ONLINE", cpus: 8, builtIn: false });
+    expect(worker.tokenHash).toBeUndefined();
+    expect((await prisma.worker.findUniqueOrThrow({ where: { id: worker.id } })).tokenHash).not.toContain(token);
+
+    const beat = await workerCall("POST", `/api/workers/${worker.id}/heartbeat`, token, { runningJobs: 2 });
+    expect(beat.status).toBe(200);
+    expect(beat.body!.data).toMatchObject({ runningJobs: 2, status: "ONLINE" });
+
+    // Its secret works for it only; re-registering replaces it.
+    const other = (await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, { ...info, name: "builder-2" })).body!.data;
+    expect((await workerCall("POST", `/api/workers/${other.worker.id}/heartbeat`, token, { runningJobs: 0 })).status).toBe(401);
+    const again = (await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, info)).body!.data;
+    expect(again.worker.id).toBe(worker.id);
+    expect((await workerCall("POST", `/api/workers/${worker.id}/heartbeat`, token, { runningJobs: 0 })).status).toBe(401);
+    expect((await workerCall("POST", `/api/workers/${worker.id}/heartbeat`, again.token, { runningJobs: 0 })).status).toBe(200);
+
+    // A user's API key or session is not a worker secret.
+    const alice = await sessionFor(ALICE);
+    expect((await call(alice, "POST", `/api/workers/${worker.id}/heartbeat`, { runningJobs: 0 })).status).toBe(401);
+  });
+
+  it("goes OFFLINE when heartbeats stop, and comes back with the next one", async () => {
+    const { worker, token } = (await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, info)).body!.data;
+    expect(await workers.sweep(new Date(Date.now() + 10_000))).toEqual([]);
+    expect(await workers.sweep(new Date(Date.now() + 60_000))).toEqual([worker.id]);
+    expect((await prisma.worker.findUniqueOrThrow({ where: { id: worker.id } })).status).toBe("OFFLINE");
+    await workerCall("POST", `/api/workers/${worker.id}/heartbeat`, token, { runningJobs: 0 });
+    expect((await prisma.worker.findUniqueOrThrow({ where: { id: worker.id } })).status).toBe("ONLINE");
+    expect((await workerCall("POST", `/api/workers/${worker.id}/disconnect`, token)).status).toBe(204);
+    expect((await prisma.worker.findUniqueOrThrow({ where: { id: worker.id } })).status).toBe("OFFLINE");
+  });
+
+  it("platform admins list and drain workers; a draining worker stays draining through heartbeats", async () => {
+    const alice = await sessionFor(ALICE); // in SHIPYARD_ADMINS
+    const bob = await sessionFor(BOB);
+    const builtIn = await workers.registerBuiltIn({ ...info, name: "control-plane" });
+    const { worker, token } = (await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, info)).body!.data;
+
+    expect((await call(bob, "GET", "/api/workers")).status).toBe(403);
+    expect((await call(bob, "POST", `/api/workers/${worker.id}/drain`)).status).toBe(403);
+    const listed = (await call(alice, "GET", "/api/workers")).body!.data as Array<Record<string, any>>;
+    expect(listed.map((w) => [w.name, w.builtIn])).toEqual([["control-plane", true], ["builder-1", false]]);
+    expect(listed.every((w) => w.tokenHash === undefined)).toBe(true);
+
+    expect((await call(alice, "POST", `/api/workers/${worker.id}/drain`)).body!.data.status).toBe("DRAINING");
+    await workerCall("POST", `/api/workers/${worker.id}/heartbeat`, token, { runningJobs: 1 });
+    expect((await prisma.worker.findUniqueOrThrow({ where: { id: worker.id } })).status).toBe("DRAINING");
+    expect((await call(alice, "POST", `/api/workers/${worker.id}/undrain`)).body!.data.status).toBe("ONLINE");
+
+    // Nobody can take the control plane's own name.
+    expect((await workerCall("POST", "/api/workers/register", WORKER_JOIN_TOKEN, { ...info, name: builtIn.name })).status).toBe(403);
   });
 });

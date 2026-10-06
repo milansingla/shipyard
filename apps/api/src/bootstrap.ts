@@ -22,6 +22,7 @@ import { VolumeService } from "./modules/services/VolumeService.js";
 import { CronService } from "./modules/cron/CronService.js";
 import { ProjectEnvironments } from "./modules/environments/ProjectEnvironments.js";
 import { PreviewService } from "./modules/environments/PreviewService.js";
+import { WorkerRegistry } from "./modules/workers/WorkerRegistry.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
 import { DeploymentEngine } from "./services/deployment/DeploymentEngine.js";
 import { HealthCheckService } from "./services/deployment/HealthCheckService.js";
@@ -53,6 +54,7 @@ export interface ApiServices extends EngineServices {
   volumes: VolumeService;
   cron: CronService;
   environments: ProjectEnvironments;
+  workers: WorkerRegistry;
   /** null when GitHub sign-in is not configured. */
   auth: AppAuth | null;
   /** null when GITHUB_WEBHOOK_SECRET is not set. */
@@ -194,8 +196,15 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     logger: logger.child({ component: "cron" }),
   });
   const environments = new ProjectEnvironments({ prisma, access, deployments, logger: logger.child({ component: "environments" }) });
+  const workers = new WorkerRegistry({
+    prisma,
+    joinToken: config.workers.joinToken,
+    admins: config.workers.admins,
+    logger: logger.child({ component: "workers" }),
+  });
   const auth = createAuth(config, prisma, secretBox, audit, logger);
   return {
+    workers,
     ...engineServices,
     prisma,
     projects,
