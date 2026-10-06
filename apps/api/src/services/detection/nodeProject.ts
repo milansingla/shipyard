@@ -4,7 +4,7 @@ import { z } from "zod";
 import { AppError, ErrorCode } from "../../lib/errors.js";
 import { isRegularFile, readRegularFile } from "./files.js";
 
-export type PackageManager = "npm" | "pnpm" | "yarn";
+export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
 
 /** Node majors with official `node:<major>-slim` images, newest first. */
 export const SUPPORTED_NODE_MAJORS = [24, 22, 20] as const;
@@ -14,6 +14,8 @@ export const DEFAULT_NODE_MAJOR = 24;
 const LOCKFILES: ReadonlyArray<{ file: string; manager: PackageManager }> = [
   { file: "pnpm-lock.yaml", manager: "pnpm" },
   { file: "yarn.lock", manager: "yarn" },
+  { file: "bun.lock", manager: "bun" },
+  { file: "bun.lockb", manager: "bun" },
   { file: "package-lock.json", manager: "npm" },
   { file: "npm-shrinkwrap.json", manager: "npm" },
 ];
@@ -30,7 +32,10 @@ const MAX_PACKAGE_JSON_BYTES = 1024 * 1024;
 const SAFE_ENTRY_PATH = /^(?:\.\/)?[A-Za-z0-9_@][A-Za-z0-9_@.\/-]{0,199}$/;
 
 const packageJsonSchema = z.looseObject({
+  name: z.string().optional(),
   main: z.string().optional(),
+  dependencies: z.record(z.string(), z.string()).optional().catch(undefined),
+  devDependencies: z.record(z.string(), z.string()).optional().catch(undefined),
   scripts: z.record(z.string(), z.string()).optional(),
   engines: z.looseObject({ node: z.string().optional() }).optional(),
   packageManager: z.string().optional(),
@@ -42,7 +47,7 @@ const INSTALL_HOOKS = ["preinstall", "install", "postinstall", "prepare"];
 /** Package-manager config the install reads, copied with the manifests when present. */
 const INSTALL_CONFIG_FILES = [".npmrc", ".yarnrc"];
 
-type PackageJson = z.infer<typeof packageJsonSchema>;
+export type PackageJson = z.infer<typeof packageJsonSchema>;
 
 export interface NodeProject {
   packageManager: PackageManager;
@@ -73,8 +78,10 @@ export interface NodeProject {
  */
 export async function detectNodeProject(
   sourceDir: string,
-  /** A start command configured for the service: detection doesn't need to find one. */
-  options: { startCommand?: string | null } = {},
+  options: {
+    /** A start command configured for the service: detection doesn't need to find one. */
+    startCommand?: string | null;
+  } = {},
 ): Promise<NodeProject | null> {
   const raw = await readRegularFile(sourceDir, "package.json", MAX_PACKAGE_JSON_BYTES);
   if (raw === null) return null;
@@ -101,7 +108,7 @@ export async function detectNodeProject(
   };
 }
 
-async function selectDependencyFiles(
+export async function selectDependencyFiles(
   sourceDir: string,
   pkg: PackageJson,
   manager: PackageManager,
@@ -168,7 +175,7 @@ export function selectNodeMajor(range: string | undefined, notes: string[] = [])
   return major;
 }
 
-async function detectPackageManager(
+export async function detectPackageManager(
   sourceDir: string,
   field: string | undefined,
   notes: string[],
@@ -180,11 +187,11 @@ async function detectPackageManager(
 
   if (field !== undefined) {
     // Corepack format: name@exact.version, optionally +sha… — e.g. "pnpm@9.12.0".
-    const match = /^(npm|pnpm|yarn)@(\d+)\.\d+\.\d+(?:[-+][\w.+-]*)?$/.exec(field.trim());
+    const match = /^(npm|pnpm|yarn|bun)@(\d+)\.\d+\.\d+(?:[-+][\w.+-]*)?$/.exec(field.trim());
     if (!match?.[1] || !match[2]) {
       throw detectionError(
         `Unsupported "packageManager" in package.json: "${truncate(field)}". ` +
-          `Shipyard supports npm, pnpm and yarn (e.g. "pnpm@9.12.0").`,
+          `Shipyard supports npm, pnpm, yarn and bun (e.g. "pnpm@9.12.0").`,
       );
     }
     const manager = match[1] as PackageManager;
@@ -205,8 +212,21 @@ async function detectPackageManager(
   return { manager: chosen.manager, major: null, lockfile: chosen.file };
 }
 
-async function resolveStartCommand(sourceDir: string, pkg: PackageJson, manager: PackageManager): Promise<string[]> {
+/**
+ * How the app starts: `preferredScript` (e.g. NestJS's start:prod) or the
+ * start script, then a framework's own server (`frameworkStart`), then
+ * `main`, then a conventional entry file.
+ */
+export async function resolveStartCommand(
+  sourceDir: string,
+  pkg: PackageJson,
+  manager: PackageManager,
+  frameworkStart: string[] | null = null,
+  preferredScript: string | null = null,
+): Promise<string[]> {
+  if (preferredScript && pkg.scripts?.[preferredScript]?.trim()) return [manager, "run", preferredScript];
   if (pkg.scripts?.start?.trim()) return [manager, "start"];
+  if (frameworkStart) return frameworkStart;
 
   if (pkg.main !== undefined) {
     if (!isSafeEntryPath(pkg.main)) {
@@ -229,11 +249,11 @@ export function isSafeEntryPath(value: string): boolean {
   return SAFE_ENTRY_PATH.test(value) && !value.split("/").includes("..");
 }
 
-function detectionError(message: string): AppError {
+export function detectionError(message: string): AppError {
   return new AppError(ErrorCode.PROJECT_DETECTION_FAILED, message, { statusCode: 422 });
 }
 
 /** Repository content ends up in logs and API errors; keep echoed values short. */
-function truncate(value: string, max = 80): string {
+export function truncate(value: string, max = 80): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;
 }

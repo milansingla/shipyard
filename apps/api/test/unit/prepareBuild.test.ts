@@ -25,14 +25,14 @@ describe("prepareBuild", () => {
     await fs.writeFile(path.join(dir, "Dockerfile"), "FROM node\nEXPOSE 8080\n");
     await fs.writeFile(path.join(dir, "package.json"), "{}");
 
-    expect(await prepareBuild(dir, collect)).toEqual({ dockerfile: "Dockerfile", containerPort: 8080, source: "repository" });
+    expect(await prepareBuild(dir, collect)).toMatchObject({ dockerfile: "Dockerfile", containerPort: 8080, source: "repository", contextDir: await fs.realpath(dir) });
     expect(await fs.readdir(dir)).not.toContain(GENERATED_DOCKERFILE_NAME);
   });
 
   it("generates a Dockerfile and .dockerignore for a Node project", async () => {
     await fs.writeFile(path.join(dir, "package.json"), JSON.stringify({ scripts: { start: "node server.js" } }));
 
-    expect(await prepareBuild(dir, collect)).toEqual({
+    expect(await prepareBuild(dir, collect)).toMatchObject({
       dockerfile: GENERATED_DOCKERFILE_NAME,
       containerPort: 3000,
       source: "generated",

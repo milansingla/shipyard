@@ -39,6 +39,7 @@ const HEALTH_PORT_APP = path.resolve(here, "../fixtures/health-port-app");
 const MEMORY_HOG_APP = path.resolve(here, "../fixtures/memory-hog");
 const VOLUME_APP = path.resolve(here, "../fixtures/volume-app");
 const MULTI_SERVICE_APP = path.resolve(here, "../fixtures/multi-service");
+const DETECT = path.resolve(here, "../fixtures/detect");
 
 function localSource(sourceDir: string): SourceProvider {
   return {
@@ -522,3 +523,33 @@ describe("deployment engine against real Docker", () => {
   });
 });
 
+
+// Repositories without a Dockerfile, in different languages: detected, a
+// Dockerfile generated, built for real, started, health-checked and served.
+describe("repository detection against real Docker", () => {
+  it.each([
+    ["monorepo-npm", "Node.js", "hello from the monorepo", "Service:         apps/web"],
+    ["fastapi", "Python", '{"hello":"fastapi"}', "Framework:       FastAPI"],
+    ["flask", "Python", "hello from flask", "Framework:       Flask"],
+    ["go", "Go", "hello from go", "Language:        Go"],
+    ["php", "PHP", "hello from php", "Language:        PHP"],
+    ["static", "HTML", "hello from static", "Language:        HTML"],
+    ["vite", "Node.js", '<div id="app"></div>', "Framework:       Vite"],
+  ])("%s: detected as %s, built and serving", async (fixture, language, body, logLine) => {
+    let systemLog = "";
+    const record = await engine(path.join(DETECT, fixture)).run(job(`detect-${fixture}`), {
+      onLog: (source, text) => void (source === "system" && (systemLog += text)),
+    });
+    created.push(record);
+
+    expect(record.status).toBe(S.RUNNING);
+    expect(systemLog).toContain(`Language:        ${language}`);
+    expect(systemLog).toContain(logLine);
+    expect(systemLog).toContain("Dockerfile:      generated");
+    const base = record.deploymentUrl!.replace("localhost", "127.0.0.1");
+    const response = await fetch(base);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain(body);
+    if (fixture === "static") expect((await fetch(`${base}/.secrets`)).status).toBe(404);
+  });
+});

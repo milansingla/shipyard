@@ -116,7 +116,7 @@ describe("detectNodeProject", () => {
   it.each([
     ["not json", "not valid JSON"],
     [{ scripts: { start: 42 } }, 'at "scripts.start"'],
-    [{ packageManager: "bun@1.1.0" }, "Unsupported"],
+    [{ packageManager: "deno@2.0.0" }, "Unsupported"],
     [{ packageManager: "pnpm@latest" }, "Unsupported"],
     [{ main: "../../etc/passwd" }, "not a safe relative path"],
     [{ main: "server.js; rm -rf /" }, "not a safe relative path"],

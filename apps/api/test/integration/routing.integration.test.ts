@@ -32,6 +32,7 @@ const HELLO_APP = path.resolve(here, "../../../../examples/hello-node");
 const CRASHING_APP = path.resolve(here, "../fixtures/crashing-app");
 const REPLICA_APP = path.resolve(here, "../fixtures/replica-app");
 const COMPOSE_FILE = path.resolve(here, "../../../../docker-compose.yml");
+const MONOREPO_APP = path.resolve(here, "../fixtures/detect/monorepo-npm");
 
 const suffix = randomUUID().slice(0, 8);
 const NETWORK = `shipyard-it-edge-${suffix}`;
@@ -323,5 +324,30 @@ describe("replicas behind Traefik", () => {
     }
     expect(answers.map((a) => a.status)).toEqual(Array(10).fill(200));
     expect(new Set(answers.map((a) => a.body)).size).toBe(1); // only the surviving replica
+  });
+});
+
+// The failure this replaced: a monorepo with nothing deployable at its root.
+// Detected, generated, built, health-checked and routed by Traefik to HTTP 200.
+describe("a detected repository behind Traefik", () => {
+  it("finds the app in a monorepo, generates its Dockerfile, and serves it at its hostname", async () => {
+    let systemLog = "";
+    const record = await engine(MONOREPO_APP).run({ ...job(), name: "mono" }, { onLog: (source, text) => void (source === "system" && (systemLog += text)) });
+    created.push(record);
+
+    expect(record.status).toBe("RUNNING");
+    expect(systemLog).toContain("the only service found is in apps/web");
+    expect(systemLog).not.toContain("No Dockerfile or package.json found");
+    expect(record.deploymentUrl).toBe(`http://mono.localhost:${traefikPort}`);
+    const body = await new Promise<{ status: number; text: string }>((resolve, reject) => {
+      http
+        .get({ host: "127.0.0.1", port: traefikPort, path: "/", headers: { host: "mono.localhost" }, agent: false, timeout: 5_000 }, (response) => {
+          let text = "";
+          response.on("data", (chunk: Buffer) => (text += chunk.toString()));
+          response.on("end", () => resolve({ status: response.statusCode ?? 0, text }));
+        })
+        .on("error", reject);
+    });
+    expect(body).toEqual({ status: 200, text: "hello from the monorepo\n" });
   });
 });

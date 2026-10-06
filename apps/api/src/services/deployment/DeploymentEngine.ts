@@ -153,14 +153,17 @@ export class DeploymentEngine {
         state.commitSha = source.commitSha;
         log("system", `Cloned ${job.repository.cloneUrl} at ${source.commitSha.slice(0, 7)}\n`);
 
-        // 2. Detect: the repository's own Dockerfile, or one generated for a Node.js project.
+        // 2. Detect: the repository's own Dockerfile, or one generated for the detected language and framework.
         await moveTo(DeploymentStatus.DETECTING);
-        const buildDir = await resolveSourceDir(source.path, service?.sourceDir ?? ".");
-        const plan = await prepareBuild(buildDir, (text) => log("system", text), Object.keys(env.build).sort(), {
-          buildCommand: service?.buildCommand,
-          startCommand: service?.startCommand,
-          port: service?.port,
-        });
+        const serviceDir = await resolveSourceDir(source.path, service?.sourceDir ?? ".");
+        const plan = await prepareBuild(
+          serviceDir,
+          (text) => log("system", text),
+          Object.keys(env.build).sort(),
+          { buildCommand: service?.buildCommand, startCommand: service?.startCommand, port: service?.port },
+          { repositoryDir: source.path },
+        );
+        const buildDir = plan.contextDir;
         log("system", describeEnvironment(env));
         state.containerPort = worker ? null : plan.containerPort;
         command = plan.command;

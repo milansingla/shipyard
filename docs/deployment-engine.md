@@ -15,10 +15,11 @@ validate input ──✗──► ValidationError (no deployment is created)
       │
   CLONING ─────────── git clone --depth 1 --single-branch [--branch B] -- <url> <workspace>/<id>
       │               git rev-parse HEAD  → commitSha
-  DETECTING ───────── prepareBuild():
-      │                 repo has a Dockerfile  → use it; port from last EXPOSE, else 3000
-      │                 else package.json      → generate .shipyard.Dockerfile; port 3000
-      │                 else                   → DOCKERFILE_NOT_FOUND
+  DETECTING ───────── prepareBuild() → RepositoryDetector:
+      │                 service's Dockerfile (or Dockerfile.*, or docker-compose's) → use it
+      │                 else language/framework detected → generate .shipyard.Dockerfile
+      │                 root not an app → find the service (workspaces, apps/*, frontend/, …)
+      │                 else → DOCKERFILE_NOT_FOUND / PROJECT_DETECTION_FAILED, saying what was found
   BUILDING ────────── docker build (tar of the clone; .dockerignore applied, .git excluded)
       │               workspace deleted (source now lives in the image)
   STARTING ────────── docker create + start, PORT=<port>, published on 127.0.0.1:<random>
@@ -133,19 +134,82 @@ only ever change the path, never the host being probed.
 Code: [`services/build/prepareBuild.ts`](../apps/api/src/services/build/prepareBuild.ts),
 [`services/detection/`](../apps/api/src/services/detection/)
 
-The repository's own `Dockerfile` always wins — the user stays in control.
-Without one, a `package.json` at the root makes it a Node.js project and
-Shipyard generates `.shipyard.Dockerfile` (a reserved name, so it can never
-overwrite a repository file). Anything else fails with `DOCKERFILE_NOT_FOUND`.
+`RepositoryDetector` decides how to build a service from the clone. It only
+reads (nothing in the repository runs on the host) and writes nothing but
+the generated files, into the disposable clone. Priority:
 
-| Decision         | Rule                                                                                      |
-| ---------------- | ----------------------------------------------------------------------------------------- |
-| Package manager  | `packageManager` field (corepack) → else lockfile: `pnpm-lock.yaml`, `yarn.lock`, `package-lock.json` → else npm |
-| Install          | `npm ci` / `pnpm install --frozen-lockfile` / `yarn install --frozen-lockfile` (`--immutable` for Yarn 2+); plain install without a lockfile |
-| Node version     | newest of 24, 22, 20 satisfying `engines.node`; default 24; unsatisfiable → error          |
-| Build            | `<pm> run build` if a `build` script exists                                                |
-| Start            | `start` script → `<pm> start`; else `node <main>`; else `server.js` / `index.js` / `app.js` |
-| Port             | 3000, passed as `PORT`                                                                    |
+1. **The repository's own Dockerfile** in the service's directory: `Dockerfile`
+   (or `dockerfile`), else one unambiguous variant (`Dockerfile.prod`,
+   `api.Dockerfile`; production-named first, dev/test ones skipped). A
+   Dockerfile in `apps/web` whose `COPY` paths only exist at the repository
+   root is built with the root as its context.
+2. **Configured settings**: the service's source directory, build/start
+   command and port (dashboard or `shipyard.yaml`) override detection.
+3. **docker-compose** (`compose.yaml`, `docker-compose.yml`, …) that builds
+   exactly one service: its Dockerfile, context and container port. Compose
+   is only read, never run; image-only services (databases) are noted.
+4. **Language and framework detection**, the clearest match winning:
+
+| Language | Detected from | Frameworks | Build → run | Default port |
+| -------- | ------------- | ---------- | ----------- | ------------ |
+| Node.js | `package.json`; npm / pnpm / yarn / bun from `packageManager` or the lockfile (`bun.lock[b]` too) | Next.js, Nuxt, Remix, SvelteKit (adapter-node / -static), Astro, NestJS, Express, Fastify, Koa, Hono, hapi | install, `<pm> run build`, start script (NestJS `start:prod`; framework server when there's no start script) | 3000 (Astro 4321), or a port hard-coded in `listen()` |
+| Static frontends | Vite (React, Vue, Svelte, Solid, Preact), Create React App, Vue CLI, Angular, Astro, Gatsby, Next.js `output: "export"` | | built with Node, served by **nginx** (`dist/`, `build/`, `out/`, angular.json, vite `outDir`; else found after the build). No dev server in production | 8080 |
+| Python | `requirements.txt`, `pyproject.toml`, `Pipfile`, `poetry.lock`, `uv.lock` | FastAPI (`uvicorn module:app`), Flask (`gunicorn module:app`), Django (`gunicorn <project>.wsgi`), Streamlit; or a Procfile `web:` | pip / Poetry / pipenv / uv, uvicorn or gunicorn added if missing | 8000 (Flask 5000, Streamlit 8501) |
+| PHP | `composer.json`, `index.php`, `public/index.php` | Laravel, Symfony (served from `public/`) | `php:<v>-apache`, `composer install --no-dev` | 8080 |
+| Go | `go.mod` | Gin, Echo, Fiber, chi | `go build` of `main.go` or the one `cmd/<name>`, run on distroless (non-root) | 8080, or hard-coded |
+| Java | `pom.xml`, `build.gradle[.kts]` (wrappers used) | Spring Boot, Quarkus, Micronaut | Maven/Gradle in a JDK, jar run on a Temurin JRE | 8080, or `server.port` |
+| Rust | `Cargo.toml` | Actix Web, Axum, Rocket, warp, Poem | `cargo build --release`, binary on Debian slim (non-root) | 8080 (Rocket 8000), or hard-coded |
+| Static | `index.html` with no build | | served by nginx; dotfiles never served | 8080 |
+
+**Monorepos.** With no configured source directory, a repository root that
+isn't an app itself is searched for the service: workspace packages
+(`package.json` `workspaces`, `pnpm-workspace.yaml`), `apps/*`, `services/*`,
+`frontend`, `backend`, `server`, `client`, `web`, `api`, …, `packages/*`, and
+compose build contexts (at most 40 directories; never `node_modules`, build
+output, virtualenvs or symlinks). Libraries (no start script, no framework)
+don't count. **One** application found → it is used, and the log says why.
+**Several** → the deployment fails with their list and the `shipyard.yaml`
+that declares them, instead of guessing. A package inside a workspace is
+built from the workspace root with its lockfile (Turborepo when configured,
+else `pnpm --filter <name>...`, `npm --workspace`, `yarn workspace`) and runs
+from its own directory.
+
+**Not deployable** is said plainly: a Python library or CLI (no web
+framework or Procfile), a Rust library, a SvelteKit app without a server or
+static adapter, or a recognised but unsupported language (Ruby, .NET,
+Elixir, Deno, …) each get a message saying what was found and what to do.
+
+Every build log starts with the detection summary:
+
+```text
+Detected:
+  Language:        Node.js
+  Framework:       Next.js
+  Runtime:         Node 24
+  Package manager: pnpm
+  Service:         apps/web
+  Build context:   .
+  Build:           pnpm --filter web... run build
+  Start:           pnpm start
+  Port:            3000 (Next.js default)
+  Dockerfile:      generated
+  Confidence:      95%
+  Why:
+    - the repository root isn't an app itself; the only service found is in apps/web
+    - …
+```
+
+**Safety.** Repository content is untrusted: files are read only if they are
+regular files (no symlinks, size-capped), directories are never followed
+through symlinks, and every repository-derived path, module or binary name
+is validated before it reaches a Dockerfile. Commands (npm scripts, Procfile,
+configured commands) run only inside the build or the container, in exec
+form (`["sh","-c", …]`), so they can't add Dockerfile instructions. Paths in
+compose files or framework configs that point outside the repository are
+ignored. Generated images run as non-root users (`node`, `bun`, `app`,
+distroless `nonroot`, nginx `101`); PHP's Apache drops to `www-data`.
+
+### Node.js details
 
 Every decision that might surprise (no lockfile, several lockfiles, Node 20)
 is written to the build log as a `note:`, followed by the full generated
@@ -212,16 +276,18 @@ checks that the install step came from the cache and the new code shipped.
 If the repository has no `.dockerignore`, a default one (`node_modules`, `.git`)
 is added so a committed `node_modules` with host binaries is never copied in.
 
-**Not supported by generation** (add a Dockerfile instead): monorepo
-sub-directories, static sites without a server, non-Node languages, Node
-versions other than 20/22/24. Generation is deliberately conservative: when it
-can't be sure, it fails with `PROJECT_DETECTION_FAILED` and says why, rather
-than guessing and producing an image that fails at runtime.
+Generation is deliberately conservative: when it can't be sure, it fails
+with `PROJECT_DETECTION_FAILED` and says why, rather than guessing and
+producing an image that fails at runtime.
 
 ## Port detection
 
-1. Repository Dockerfile: last `EXPOSE <n>` (or `<n>/tcp`), otherwise `3000`.
-2. Generated Dockerfile: always `3000`.
+1. A port configured for the service always wins.
+2. Repository Dockerfile: last `EXPOSE <n>` (or `<n>/tcp`), otherwise `3000`;
+   docker-compose's container port when the Dockerfile came from compose.
+3. Generated Dockerfile: evidence in the source (a hard-coded `listen(8080)`,
+   `ListenAndServe(":9000")`, `server.port=8081`) when the app doesn't read
+   `PORT`, else the framework's default (table above).
 
 Shipyard passes the port to the app as `PORT`. Apps must bind `0.0.0.0` — a
 server bound to `localhost` inside a container is unreachable from outside it.
@@ -350,8 +416,8 @@ LOG_LEVEL=debug npm run shipyard -- deploy <url>  # 6. Verbose engine logs
 | ----------------------------------------- | ------------------------------------------------------ |
 | `DOCKER_UNAVAILABLE` / `connect ENOENT`   | Docker Desktop not running                             |
 | `GIT_CLONE_FAILED … could not read Username` | Private or non-existent repo (private repos need M4)  |
-| `DOCKERFILE_NOT_FOUND`                    | Neither a `Dockerfile` nor a `package.json` at repo root |
-| `PROJECT_DETECTION_FAILED`                | Node project Shipyard can't build safely — message says why (no start script, unsupported Node, …) |
+| `DOCKERFILE_NOT_FOUND`                    | No supported application found — the message lists what was checked and found |
+| `PROJECT_DETECTION_FAILED`                | A project Shipyard can't build safely, or several services and none chosen — the message says why and what to set |
 | `DOCKER_BUILD_FAILED`                     | A step in the Dockerfile failed — read the build log   |
 | `exited with code N before becoming healthy` | App crashed on boot — check runtime logs            |
 | health check times out with `ECONNREFUSED` | App listens on `localhost` or a different port       |
