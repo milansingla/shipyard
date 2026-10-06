@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { PrismaClient, User } from "../../db/prisma.js";
 import { AppError, ErrorCode, UnauthenticatedError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
-import type { SecretBox } from "../../lib/secretBox.js";
+import type { SecretProvider } from "../../lib/secrets.js";
 import type { GitHubClient } from "../../services/github/GitHubClient.js";
 
 /** What the API exposes about a user. Deliberately excludes the GitHub token. */
@@ -22,7 +22,7 @@ export interface AuthUser {
 export interface AuthServiceDeps {
   prisma: PrismaClient;
   github: Pick<GitHubClient, "authorizeUrl" | "exchangeCode" | "getUser">;
-  secretBox: SecretBox;
+  secretBox: SecretProvider;
   /** Absolute URL of GET /api/auth/github/callback; must match the GitHub OAuth App. */
   redirectUri: string;
   sessionTtlMs: number;

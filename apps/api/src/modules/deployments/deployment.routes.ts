@@ -50,6 +50,25 @@ export function createDeploymentRouter(deployments: DeploymentService, logger?: 
   });
 
   /** Brings back the previous working deployment. Responds once traffic has moved. */
+  /** Whether it waits for an ADMIN's approval (organization policy), and who decided. */
+  router.get("/deployments/:id/approval", async (req, res) => {
+    const user = requireUser(req);
+    const { id } = parseInput(idParamsSchema, req.params, "deployment id");
+    sendData(res, await deployments.approvalOf(id, user.id));
+  });
+
+  router.post("/deployments/:id/approve", async (req, res) => {
+    const user = requireUser(req);
+    const { id } = parseInput(idParamsSchema, req.params, "deployment id");
+    sendData(res, await deployments.decide(id, user.id, true));
+  });
+
+  router.post("/deployments/:id/reject", async (req, res) => {
+    const user = requireUser(req);
+    const { id } = parseInput(idParamsSchema, req.params, "deployment id");
+    sendData(res, await deployments.decide(id, user.id, false));
+  });
+
   /** Only while still waiting in the queue. */
   router.post("/deployments/:id/cancel", async (req, res) => {
     const user = requireUser(req);

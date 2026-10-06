@@ -1,7 +1,7 @@
 import type { EnvironmentVariable, Prisma, PrismaClient } from "../../db/prisma.js";
 import { AppError, ErrorCode, NotFoundError, ValidationError } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
-import type { SecretBox } from "../../lib/secretBox.js";
+import type { SecretProvider } from "../../lib/secrets.js";
 import { OrgRole } from "../../db/prisma.js";
 import { type AccessService, atLeast } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
@@ -34,7 +34,7 @@ export interface DeploymentEnvironment {
 
 export interface EnvironmentServiceDeps {
   prisma: PrismaClient;
-  secretBox: SecretBox;
+  secretBox: SecretProvider;
   access: AccessService;
   audit: Pick<AuditService, "record">;
   logger: Logger;

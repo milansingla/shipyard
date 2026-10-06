@@ -4,6 +4,7 @@ import type { Logger } from "../../lib/logger.js";
 import { isValidHostname } from "../../services/routing/Router.js";
 import { OrgRole } from "../../db/prisma.js";
 import type { AccessService } from "../access/AccessService.js";
+import type { PolicyService } from "../policies/PolicyService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import type { DeploymentService } from "../deployments/DeploymentService.js";
 
@@ -26,6 +27,8 @@ export interface DomainServiceDeps {
   https: boolean;
   access: AccessService;
   audit: Pick<AuditService, "record">;
+  /** The organization's allowed domains, if it set any. */
+  policies?: Pick<PolicyService, "assertDomainAllowed">;
   logger: Logger;
 }
 
@@ -65,6 +68,7 @@ export class DomainService {
     if (hostname === publicDomain || hostname.endsWith(`.${publicDomain}`)) {
       throw new ValidationError(`Addresses under ${publicDomain} are Shipyard's own; each project already has one.`);
     }
+    await this.deps.policies?.assertDomainAllowed(project.organizationId, hostname);
     if (serviceId) {
       const service = await prisma.service.findFirst({ where: { id: serviceId, projectId } });
       if (!service) throw new NotFoundError(`Service not found: ${serviceId}`);

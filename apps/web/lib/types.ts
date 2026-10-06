@@ -355,3 +355,19 @@ export interface ServiceAccount {
   role: OrgRole;
   keys: ApiKey[];
 }
+
+export interface Policy {
+  organizationId: string;
+  maxMemoryMb: number | null;
+  maxCpu: number | null;
+  maxReplicas: number | null;
+  requireHealthCheckPath: boolean;
+  allowedDomainSuffixes: string[];
+  requireApproval: boolean;
+}
+
+export interface Approval {
+  status: "NOT_REQUIRED" | "AWAITING" | "APPROVED" | "REJECTED";
+  decidedBy: string | null;
+  decidedAt: string | null;
+}

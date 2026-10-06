@@ -60,6 +60,7 @@ const app = createApp({
   metrics: services.metrics,
   alerts: services.alerts,
   teams: services.teams,
+  policies: services.policies,
   serviceAccounts: services.serviceAccounts ?? undefined,
   workerRouting: services.workerRouting,
   environments: services.environments,

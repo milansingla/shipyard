@@ -29,6 +29,7 @@ import { AlertService } from "../../src/modules/alerts/AlertService.js";
 import { CleanupService } from "../../src/modules/cleanup/CleanupService.js";
 import { TeamService } from "../../src/modules/access/TeamService.js";
 import { ServiceAccountService } from "../../src/modules/access/ServiceAccountService.js";
+import { PolicyService } from "../../src/modules/policies/PolicyService.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "../../src/services/notify/NotificationProvider.js";
 import { WorkerCalls } from "../../src/modules/workers/WorkerCalls.js";
 import { RemoteEngine } from "../../src/modules/workers/RemoteEngine.js";
@@ -353,6 +354,7 @@ beforeAll(async () => {
     }),
     engine: fakeEngine,
     onFinished: (input) => alerts.deploymentFinished(input),
+    policies: new PolicyService({ prisma, access, audit }),
     remoteEngine: (workerId) =>
       new RemoteEngine(workerId, workerCalls, fakeEngine, async (target) => {
         const worker = await prisma.worker.findUniqueOrThrow({ where: { id: workerId } });
@@ -414,7 +416,8 @@ beforeAll(async () => {
       })),
       workerRouting: { mode: "traefik", domain: "localhost", httpPort: 80, httpsPort: null },
       cron: (cron = new CronService({ prisma, access, audit, environment, runner: cronRunner, logger: silentLogger })),
-      domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger }),
+      domains: new DomainService({ prisma, deployments, publicDomain: "localhost", https: false, access, audit, logger: silentLogger, policies: new PolicyService({ prisma, access, audit }) }),
+      policies: new PolicyService({ prisma, access, audit }),
       auth: {
         service: auth,
         github,
@@ -3141,5 +3144,76 @@ describe("API versioning and audit search", () => {
     expect((await call(alice, "GET", `/api/projects/${projectId}/domains`)).body!.data).toMatchObject([{ hostname: "shop.example.com" }]);
     expect(await run(["domains", "cli-domains", "remove", "shop.example.com"])).toBe(0);
     expect((await call(alice, "GET", `/api/projects/${projectId}/domains`)).body!.data).toEqual([]);
+  });
+});
+
+describe("policies and deploy approval", () => {
+  async function org(owner: string, name: string, members: Array<[string, string]> = []) {
+    const orgId = (await call(owner, "POST", "/api/organizations", { name })).body!.data.id as string;
+    for (const [login, role] of members) await call(owner, "POST", `/api/organizations/${orgId}/members`, { login, role });
+    return orgId;
+  }
+
+  it("refuses a deploy that breaks the policy, saying every reason; allowed once the project complies", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const orgId = await org(alice, "Strict", [["bob", "VIEWER"]]);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/strict", organizationId: orgId })).body!.data.id as string;
+
+    expect((await call(bob, "PATCH", `/api/organizations/${orgId}/policy`, { maxMemoryMb: 512 })).status).toBe(403);
+    expect((await call(alice, "PATCH", `/api/organizations/${orgId}/policy`, { maxMemoryMb: 512, requireHealthCheckPath: true, allowedDomainSuffixes: ["example.com"] })).status).toBe(200);
+    expect((await call(bob, "GET", `/api/organizations/${orgId}/policy`)).body!.data).toMatchObject({ maxMemoryMb: 512, allowedDomainSuffixes: [".example.com"] });
+
+    const refused = await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    expect(refused.status).toBe(422);
+    expect(refused.body!.error.code).toBe("POLICY_VIOLATION");
+    expect(refused.body!.error.message).toContain("web: memory limit must be set, at most 512 MB (it is unlimited)");
+    expect(refused.body!.error.message).toContain("web: needs a health check path");
+    expect(await prisma.deployment.count({ where: { projectId } })).toBe(0);
+
+    await call(alice, "PATCH", `/api/projects/${projectId}`, { memoryLimitMb: 256, healthCheckPath: "/healthz" });
+    expect((await call(alice, "POST", `/api/projects/${projectId}/deploy`)).status).toBe(202);
+    await deployments.waitForIdle();
+
+    expect((await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: "shop.other.io" })).status).toBe(422);
+    expect((await call(alice, "POST", `/api/projects/${projectId}/domains`, { hostname: "shop.example.com" })).status).toBe(201);
+  });
+
+  it("holds production deploys by non-admins for an admin's approval; admins, previews and approved retries go straight through", async () => {
+    const alice = await sessionFor(ALICE);
+    const bob = await sessionFor(BOB);
+    const orgId = await org(alice, "Gated", [["bob", "DEVELOPER"]]);
+    const projectId = (await call(alice, "POST", "/api/projects", { repositoryUrl: "https://github.com/acme/gated", organizationId: orgId })).body!.data.id as string;
+    await call(alice, "PATCH", `/api/organizations/${orgId}/policy`, { requireApproval: true });
+
+    jobs.length = 0;
+    const asked = (await call(bob, "POST", `/api/projects/${projectId}/deploy`)).body!.data;
+    expect(asked.status).toBe("QUEUED");
+    await deployments.waitForIdle();
+    expect(jobs).toHaveLength(0); // waiting, not running
+    expect((await call(bob, "GET", `/api/deployments/${asked.id}/approval`)).body!.data).toMatchObject({ status: "AWAITING" });
+    expect((await call(bob, "POST", `/api/deployments/${asked.id}/approve`)).status).toBe(403);
+
+    expect((await call(alice, "POST", `/api/deployments/${asked.id}/approve`)).status).toBe(200);
+    await deployments.waitForIdle();
+    expect((await call(bob, "GET", `/api/deployments/${asked.id}`)).body!.data.status).toBe("RUNNING");
+    expect((await call(bob, "GET", `/api/deployments/${asked.id}/approval`)).body!.data).toMatchObject({ status: "APPROVED", decidedBy: "alice" });
+
+    const second = (await call(bob, "POST", `/api/projects/${projectId}/deploy`)).body!.data.id as string;
+    const rejected = await call(alice, "POST", `/api/deployments/${second}/reject`);
+    expect(rejected.body!.data).toMatchObject({ status: "FAILED", errorMessage: "Rejected by alice." });
+    expect((await call(alice, "POST", `/api/deployments/${second}/approve`)).status).toBe(409);
+
+    // An admin's own deploy needs nobody.
+    jobs.length = 0;
+    await call(alice, "POST", `/api/projects/${projectId}/deploy`);
+    await deployments.waitForIdle();
+    expect(jobs).toHaveLength(1);
+    // A development environment never waits.
+    const devId = (await call(alice, "POST", `/api/projects/${projectId}/environments`, { type: "DEVELOPMENT", branch: "develop" })).body!.data.id;
+    expect((await call(bob, "POST", `/api/environments/${devId}/deploy`)).status).toBe(202);
+    await deployments.waitForIdle();
+    expect(jobs).toHaveLength(2);
+    expect(await prisma.auditLog.count({ where: { action: { in: ["DEPLOYMENT_APPROVED", "DEPLOYMENT_REJECTED"] } } })).toBe(2);
   });
 });

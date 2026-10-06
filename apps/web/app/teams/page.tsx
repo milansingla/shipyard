@@ -3,6 +3,7 @@
 import { type FormEvent, useState } from "react";
 
 import { OrgTeams } from "@/components/OrgTeams";
+import { PolicyPanel } from "@/components/PolicyPanel";
 import { ServiceAccounts } from "@/components/ServiceAccounts";
 import { Button, ErrorNote, Label } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
@@ -95,6 +96,7 @@ export default function TeamsPage() {
           <div key={selected.id}>
             <Members team={selected} onChanged={() => void organizations.reload()} />
             <OrgTeams organization={selected} />
+            <PolicyPanel organization={selected} />
             {can(selected.role, "ADMIN") && <ServiceAccounts organization={selected} />}
           </div>
         )}

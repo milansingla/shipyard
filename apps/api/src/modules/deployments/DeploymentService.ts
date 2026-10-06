@@ -20,13 +20,14 @@ import { parseRepositoryUrl } from "../../services/git/repositoryUrl.js";
 import type { RouteTarget, Router } from "../../services/routing/Router.js";
 import type { DeployJob, Environment, Service } from "../../db/prisma.js";
 import { JOB_SLOTS_PER_WORKER, eligibleWorkers, pickWorker } from "./scheduler.js";
+import type { PolicyService } from "../policies/PolicyService.js";
 
 /** A running job's claim; its worker renews it every 20 s. */
 const LEASE_SECONDS = 60;
 /** A job lost with its worker is retried at most this many times in all. */
 const MAX_JOB_ATTEMPTS = 3;
 import { environmentRouteName, variableEnvironment } from "../environments/environmentRules.js";
-import type { AccessService } from "../access/AccessService.js";
+import type { AccessService, ProjectWithRole } from "../access/AccessService.js";
 import type { AuditService } from "../audit/AuditService.js";
 import type { EnvironmentService } from "../environment/EnvironmentService.js";
 import type { ConfigSync } from "../services/ConfigSync.js";
@@ -61,6 +62,8 @@ export interface DeploymentServiceDeps {
   prisma: PrismaClient;
   /** This machine's engine (the built-in worker). */
   engine: EngineLike;
+  /** The organization's rules: checked before queueing; may hold production deploys for approval. */
+  policies?: Pick<PolicyService, "assertCanDeploy" | "needsApproval">;
   /** Told when a deployment finished (alerting). */
   onFinished?: (input: { deployment: Deployment; project: Project; serviceName: string }) => Promise<void>;
   /** The engine of a remote worker, by id; omitted = every deployment runs here. */
@@ -275,7 +278,7 @@ export class DeploymentService {
     projectId: string,
     actorId: string | null,
     trigger: DeploymentTrigger = DeploymentTrigger.MANUAL,
-    options: { serviceIds?: readonly string[]; environmentId?: string; retryOf?: string } = {},
+    options: { serviceIds?: readonly string[]; environmentId?: string; retryOf?: string; preApproved?: boolean } = {},
   ): Promise<Deployment> {
     const project =
       actorId === null
@@ -308,6 +311,9 @@ export class DeploymentService {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "Nothing to deploy: the database is already running. Deploy it from its service to restart it.");
     }
     const lock = lockKey(projectId, environment?.id ?? null);
+    await this.deps.policies?.assertCanDeploy(project, selected, environment);
+    const actorRole = actorId === null ? null : (project as ProjectWithRole).role;
+    const awaitingApproval = !options.preApproved && Boolean(await this.deps.policies?.needsApproval(project, actorRole, environment));
 
     const deployments: Deployment[] = await this.deps.prisma.$transaction(async (tx) => {
         const created: Deployment[] = [];
@@ -348,6 +354,7 @@ export class DeploymentService {
             // A person waiting beats a push.
             priority: trigger === DeploymentTrigger.MANUAL ? 10 : 0,
             retryOfId: options.retryOf ?? null,
+            status: awaitingApproval ? "AWAITING_APPROVAL" : "QUEUED",
           },
         });
         return created;
@@ -382,7 +389,12 @@ export class DeploymentService {
     const key = lockKey(projectId, environmentId);
     const { prisma } = this.deps;
     // A push deploy still waiting will build the branch's latest commit: this push rides along.
-    if (await prisma.deployJob.findFirst({ where: { lockKey: key, status: "QUEUED", trigger: DeploymentTrigger.PUSH }, select: { id: true } })) {
+    if (
+      await prisma.deployJob.findFirst({
+        where: { lockKey: key, status: { in: ["QUEUED", "AWAITING_APPROVAL"] }, trigger: DeploymentTrigger.PUSH },
+        select: { id: true },
+      })
+    ) {
       return { outcome: "queued" };
     }
     const busy =
@@ -396,11 +408,11 @@ export class DeploymentService {
   async cancel(id: string, userId: string): Promise<Deployment> {
     const { deployment } = await this.deps.access.deployment(id, userId, OrgRole.DEVELOPER);
     const job = await this.deps.prisma.deployJob.findFirst({ where: { deploymentIds: { has: id } } });
-    if (!job || job.status !== "QUEUED") {
+    if (!job || (job.status !== "QUEUED" && job.status !== "AWAITING_APPROVAL")) {
       throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "Only a deployment still waiting in the queue can be cancelled.");
     }
     const { count } = await this.deps.prisma.deployJob.updateMany({
-      where: { id: job.id, status: "QUEUED" },
+      where: { id: job.id, status: { in: ["QUEUED", "AWAITING_APPROVAL"] } },
       data: { status: "CANCELLED", finishedAt: new Date(), error: "Cancelled" },
     });
     if (count !== 1) throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "It has just started; it can't be cancelled any more.");
@@ -1280,6 +1292,42 @@ export class DeploymentService {
     if (route) await this.deps.router.deactivate(route.name, deployment.id);
   }
 
+  /** Whether a deployment waits for approval, and how that was decided. */
+  async approvalOf(id: string, userId: string): Promise<{ status: "NOT_REQUIRED" | "AWAITING" | "APPROVED" | "REJECTED"; decidedBy: string | null; decidedAt: Date | null }> {
+    await this.deps.access.deployment(id, userId, OrgRole.VIEWER);
+    const job = await this.deps.prisma.deployJob.findFirst({ where: { deploymentIds: { has: id } } });
+    if (!job || (!job.decidedAt && job.status !== "AWAITING_APPROVAL")) return { status: "NOT_REQUIRED", decidedBy: null, decidedAt: null };
+    const decider = job.decidedById ? await this.deps.prisma.user.findUnique({ where: { id: job.decidedById }, select: { login: true } }) : null;
+    const status = job.status === "AWAITING_APPROVAL" ? "AWAITING" : job.status === "CANCELLED" && job.error === "Rejected" ? "REJECTED" : "APPROVED";
+    return { status, decidedBy: decider?.login ?? null, decidedAt: job.decidedAt };
+  }
+
+  /** An ADMIN approves (it is queued) or rejects (its deployments fail) a deploy waiting for approval. */
+  async decide(id: string, userId: string, approve: boolean): Promise<Deployment> {
+    const { deployment, project } = await this.deps.access.deployment(id, userId, OrgRole.ADMIN);
+    const job = await this.deps.prisma.deployJob.findFirst({ where: { deploymentIds: { has: id }, status: "AWAITING_APPROVAL" } });
+    if (!job) throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "This deployment isn't waiting for approval.");
+    const { count } = await this.deps.prisma.deployJob.updateMany({
+      where: { id: job.id, status: "AWAITING_APPROVAL" },
+      data: approve
+        ? { status: "QUEUED", decidedById: userId, decidedAt: new Date() }
+        : { status: "CANCELLED", decidedById: userId, decidedAt: new Date(), finishedAt: new Date(), error: "Rejected" },
+    });
+    if (count !== 1) throw new ConflictError(ErrorCode.INVALID_STATUS_TRANSITION, "Someone else decided it just now.");
+    const login = (await this.deps.prisma.user.findUnique({ where: { id: userId }, select: { login: true } }))?.login ?? "an admin";
+    if (!approve) {
+      for (const deploymentId of job.deploymentIds) await this.markFailed(deploymentId, `Rejected by ${login}.`, DeploymentStatus.QUEUED);
+    }
+    await this.deps.audit.record({
+      action: approve ? "DEPLOYMENT_APPROVED" : "DEPLOYMENT_REJECTED",
+      actorId: userId,
+      project,
+      metadata: { deploymentIds: job.deploymentIds.join(",") },
+    });
+    if (approve) this.kick();
+    return this.load(deployment.id);
+  }
+
   // ───────────────────────── the queue ─────────────────────────
 
   /** Wakes the executor: claims and runs queued jobs this process may run. */
@@ -1481,6 +1529,7 @@ export class DeploymentService {
           serviceIds: deployments.map((d) => d.serviceId),
           ...(job.environmentId && { environmentId: job.environmentId }),
           retryOf: job.id,
+          preApproved: true, // it was approved (or didn't need to be) the first time
         }).catch((error: unknown) => logger.warn({ err: error, jobId: job.id }, "Could not retry the lost job"));
       }
     }

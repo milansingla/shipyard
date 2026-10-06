@@ -7,6 +7,7 @@ import { type ReactNode, useState } from "react";
 import { DraftScale } from "@/components/DraftScale";
 import { History } from "@/components/History";
 import { LogPanel } from "@/components/LogPanel";
+import { ApprovalBanner } from "@/components/ApprovalBanner";
 import { Button, ErrorNote, HullName, Label, Mono, StatusBadge } from "@/components/ui";
 import { ApiError, api } from "@/lib/api";
 import { duration, relativeTime, safeHttpUrl, shortId, shortSha } from "@/lib/format";
@@ -168,6 +169,10 @@ export default function DeploymentPage() {
               </Fact>
             )}
           </dl>
+
+          {d.status === "QUEUED" && (
+            <ApprovalBanner deploymentId={d.id} canDecide={can(project.data?.role, "ADMIN")} onDecided={() => void deployment.reload()} />
+          )}
 
           <LogPanel deploymentId={d.id} status={d.status} />
 

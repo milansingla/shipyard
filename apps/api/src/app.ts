@@ -31,6 +31,8 @@ import { createWorkerAdminRouter, createWorkerAgentRouter } from "./modules/work
 import type { WorkerCalls } from "./modules/workers/WorkerCalls.js";
 import { apiKeyScopes } from "./middleware/apiKeyScopes.js";
 import { createTeamRouter } from "./modules/access/team.routes.js";
+import { createPolicyRouter } from "./modules/policies/policy.routes.js";
+import type { PolicyService } from "./modules/policies/PolicyService.js";
 import type { TeamService } from "./modules/access/TeamService.js";
 import type { ServiceAccountService } from "./modules/access/ServiceAccountService.js";
 import { createMetricsRouter } from "./modules/metrics/metrics.routes.js";
@@ -74,6 +76,7 @@ export interface AppDeps {
   metrics?: MetricsService;
   alerts?: AlertService;
   teams?: TeamService;
+  policies?: PolicyService;
   serviceAccounts?: ServiceAccountService;
   /** Engine calls to remote workers; null = remote workers can't run deploys. */
   workerCalls?: WorkerCalls | null;
@@ -159,6 +162,7 @@ export function createApp(deps: AppDeps): Express {
     if (deps.metrics) app.use("/api", createMetricsRouter(deps.metrics));
     if (deps.alerts) app.use("/api", createAlertRouter(deps.alerts));
     if (deps.teams && deps.serviceAccounts) app.use("/api", createTeamRouter(deps.teams, deps.serviceAccounts));
+    if (deps.policies) app.use("/api", createPolicyRouter(deps.policies));
   }
 
   app.use(notFoundHandler);

@@ -3,7 +3,7 @@ import { PrismaPg } from "@prisma/adapter-pg";
 import { Prisma, PrismaClient } from "../generated/prisma/client.js";
 
 export { Prisma, PrismaClient };
-export type { CronJob, CronRun, DeployJob, Deployment, Environment, EnvironmentVariable, Organization, Project, Service, User, Volume, Worker, WorkerCall, Alert, NotificationChannel } from "../generated/prisma/client.js";
+export type { CronJob, CronRun, DeployJob, Deployment, Environment, EnvironmentVariable, Organization, Project, Service, User, Volume, Worker, WorkerCall, Alert, NotificationChannel, OrganizationPolicy } from "../generated/prisma/client.js";
 export { AuditAction, DeploymentEventType, DeploymentTrigger, OrgRole } from "../generated/prisma/enums.js";
 
 /**

@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { type Alert, type NotificationChannel, OrgRole, type PrismaClient, isUniqueViolation } from "../../db/prisma.js";
 import { AppError, ErrorCode, ForbiddenError, NotFoundError, errorMessage } from "../../lib/errors.js";
 import type { Logger } from "../../lib/logger.js";
-import type { SecretBox } from "../../lib/secretBox.js";
+import type { SecretProvider } from "../../lib/secrets.js";
 import { DeploymentStatus } from "../../services/deployment/status.js";
 import type { Notification, NotificationProvider, UrlGuard } from "../../services/notify/NotificationProvider.js";
 import type { AccessService } from "../access/AccessService.js";
@@ -19,7 +19,7 @@ export interface AlertServiceDeps {
   prisma: PrismaClient;
   access: AccessService;
   /** Encrypts channel URLs (a Slack webhook URL is a credential); null = channels unavailable. */
-  secretBox: SecretBox | null;
+  secretBox: SecretProvider | null;
   providers: Record<NotificationChannel["type"], NotificationProvider>;
   guard: UrlGuard;
   /** Platform administrators (worker alerts and platform channels). */
@@ -348,7 +348,7 @@ export class AlertService {
     await this.deps.access.organization(organizationId, user.id, OrgRole.ADMIN);
   }
 
-  private box(): SecretBox {
+  private box(): SecretProvider {
     if (!this.deps.secretBox) {
       throw new AppError(ErrorCode.CONFIG_INVALID, "Notification channels need SHIPYARD_SECRET_KEY (their URLs are stored encrypted).", { statusCode: 503 });
     }

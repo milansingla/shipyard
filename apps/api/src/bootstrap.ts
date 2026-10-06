@@ -30,6 +30,7 @@ import { MetricsService } from "./modules/metrics/MetricsService.js";
 import { AlertService } from "./modules/alerts/AlertService.js";
 import { CleanupService } from "./modules/cleanup/CleanupService.js";
 import { TeamService } from "./modules/access/TeamService.js";
+import { PolicyService } from "./modules/policies/PolicyService.js";
 import { ServiceAccountService } from "./modules/access/ServiceAccountService.js";
 import { SlackProvider, UrlGuard, WebhookProvider } from "./services/notify/NotificationProvider.js";
 import { WebhookService } from "./modules/webhooks/WebhookService.js";
@@ -70,6 +71,7 @@ export interface ApiServices extends EngineServices {
   cleanup: CleanupService;
   alerts: AlertService;
   teams: TeamService;
+  policies: PolicyService;
   serviceAccounts: ServiceAccountService | null;
   workerRouting: unknown;
   /** null when GitHub sign-in is not configured. */
@@ -167,7 +169,9 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     return engine;
   };
 
+  const policies = new PolicyService({ prisma, access, audit });
   const deployments = new DeploymentService({
+    policies,
     remoteEngine,
     onFinished: (input) => alerts.deploymentFinished(input),
     prisma,
@@ -215,6 +219,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
     : null;
 
   const domains = new DomainService({
+    policies,
     prisma,
     deployments,
     publicDomain: config.routing?.domain ?? null,
@@ -264,6 +269,7 @@ export function createApiServices(config: AppConfig, databaseUrl: string, logger
   });
   const metrics = new MetricsService({ prisma, access, deployments, logger: logger.child({ component: "metrics" }) });
   return {
+    policies,
     teams,
     serviceAccounts,
     workers,

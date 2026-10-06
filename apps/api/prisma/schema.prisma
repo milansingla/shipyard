@@ -155,6 +155,7 @@ model Organization {
   memberships Membership[]
   projects    Project[]
   teams       Team[]
+  policy      OrganizationPolicy?
   notificationChannels NotificationChannel[]
   alerts      Alert[]
 
@@ -228,6 +229,9 @@ enum AuditAction {
   TEAM_DELETED
   SERVICE_ACCOUNT_CREATED
   SERVICE_ACCOUNT_DELETED
+  POLICY_CHANGED
+  DEPLOYMENT_APPROVED
+  DEPLOYMENT_REJECTED
 }
 
 /// Who did what, append-only. Kept when the project is deleted (no foreign
@@ -643,6 +647,8 @@ model Worker {
 }
 
 enum DeployJobStatus {
+  /// A production deploy waiting for an ADMIN's approval (the organization's policy); then QUEUED.
+  AWAITING_APPROVAL
   /// Waiting for a worker (and for any running job of the same project environment).
   QUEUED
   /// Claimed by a worker, which holds a lease on it.
@@ -679,6 +685,9 @@ model DeployJob {
   attempts       Int             @default(0)
   /// The job this one retries after its worker was lost.
   retryOfId      String?         @db.Uuid
+  /// Who approved (or rejected) it, when approval was required.
+  decidedById    String?         @db.Uuid
+  decidedAt      DateTime?
   error          String?
   createdAt      DateTime        @default(now())
   startedAt      DateTime?
@@ -851,4 +860,25 @@ model TeamProjectGrant {
   @@id([teamId, projectId])
   @@index([projectId])
   @@map("team_project_grants")
+}
+
+/// Rules an organization sets for its projects, checked before every
+/// deployment (and when domains are added). null = no rule.
+model OrganizationPolicy {
+  organizationId         String       @id @db.Uuid
+  organization           Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Every service must set a memory limit at most this (MB).
+  maxMemoryMb            Int?
+  /// Every service must set a CPU limit at most this.
+  maxCpu                 Float?
+  maxReplicas            Int?
+  /// Web services must have a health check path other than "/".
+  requireHealthCheckPath Boolean      @default(false)
+  /// Custom domains must end with one of these (e.g. ".example.com"); empty = any.
+  allowedDomainSuffixes  String[]     @default([])
+  /// Production deploys by non-ADMINs (and pushes) wait for an ADMIN to approve.
+  requireApproval        Boolean      @default(false)
+  updatedAt              DateTime     @updatedAt
+
+  @@map("organization_policies")
 }

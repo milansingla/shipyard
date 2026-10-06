@@ -84,3 +84,37 @@ deletion), time and details, never secret values.
 
 `/api/v1/…` is the stable path (the CLI uses it, responses carry
 `API-Version: 1`); `/api/…` reaches the same handlers for existing clients.
+
+## Policies
+
+Code: [`PolicyService`](../apps/api/src/modules/policies/PolicyService.ts).
+Organizations page → **Policy**, or `GET/PATCH /api/organizations/:id/policy` (ADMIN to change).
+
+| Rule | Checked |
+| ---- | ------- |
+| `maxMemoryMb`, `maxCpu`: every service must set a limit, at most this | before a deploy is queued |
+| `maxReplicas` (production) | before a deploy is queued |
+| `requireHealthCheckPath`: web services need a path other than `/` | before a deploy is queued |
+| `allowedDomainSuffixes`: custom domains must end with one | when a domain is added |
+| `requireApproval`: production deploys by non-ADMINs (and pushes) wait for an ADMIN | before a deploy runs |
+
+A deploy that breaks the policy is refused (422 `POLICY_VIOLATION`) with every
+reason at once, and nothing is queued.
+
+### Deploy approval
+
+With `requireApproval`, such a deploy is recorded and waits (its job is
+`AWAITING_APPROVAL`; the deployment shows "Waiting for approval"). An ADMIN
+approves (`POST /api/deployments/:id/approve`: it is queued and runs) or
+rejects (`…/reject`: its deployments fail, "Rejected by …"); the requester
+can cancel it. Both decisions are in the audit log. ADMINs' own deploys,
+previews and development environments never wait; a retry after a lost
+worker doesn't ask again.
+
+## Secrets
+
+Everything secret (variables, GitHub tokens, alert channel URLs) is sealed
+through a `SecretProvider` ([`lib/secrets.ts`](../apps/api/src/lib/secrets.ts)),
+bound to a context so a value copied to another row won't open. The local
+provider is AES-256-GCM with `SHIPYARD_SECRET_KEY`; a Vault or KMS provider
+would implement the same two methods.
