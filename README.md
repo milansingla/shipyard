@@ -173,7 +173,6 @@ apps/api/            Express API + CLI + deployment engine (TypeScript)
   test/integration/  real Docker / network tests
 examples/hello-node/ sample deployable app
 docs/                architecture, engine, database, security, learning notes
-phase-1/             the original V0.1 JavaScript prototype (kept for reference)
 ```
 
 ## Documentation

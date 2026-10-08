@@ -13,7 +13,6 @@ coverage/
 .shipyard/
 
 # V0.1 leftovers: cloned repositories (contain nested .git directories)
-phase-1/docker-controller/tmp/
 
 # OS / editor
 .DS_Store

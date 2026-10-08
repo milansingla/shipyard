@@ -1,7 +1,0 @@
-build-test-app/
-├── node_modules/       ← exists locally
-├── .dockerignore       ← tells Docker to ignore it
-├── Dockerfile
-├── package.json
-├── package-lock.json
-└── server.js
