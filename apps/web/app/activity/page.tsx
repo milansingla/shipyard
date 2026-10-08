@@ -23,7 +23,34 @@ const DESCRIBE: Record<string, (m: AuditEntry["metadata"]) => string> = {
   DOMAIN_REMOVED: (m) => `removed the domain ${m.hostname}`,
   API_KEY_CREATED: (m) => `created the API key “${m.name}”`,
   API_KEY_REVOKED: (m) => `revoked the API key “${m.name}”`,
+  ORGANIZATION_CREATED: (m) => `created the organization ${m.name}`,
+  MEMBER_ADDED: (m) => `added ${m.login} as ${role(m.role)}`,
+  MEMBER_ROLE_CHANGED: (m) => `changed ${m.login}'s role from ${role(m.from)} to ${role(m.to)}`,
+  MEMBER_REMOVED: (m) => `removed ${m.login}`,
+  SERVICE_CREATED: (m) => `added the ${String(m.type ?? "").toLowerCase() === "postgres" ? "PostgreSQL" : String(m.type ?? "").toLowerCase()} service ${m.service}`,
+  SERVICE_CHANGED: (m) => `changed the service ${m.service}${m.settings ? ` (${String(m.settings).replaceAll(",", ", ")})` : ""}`,
+  SERVICE_DELETED: (m) => `deleted the service ${m.service}`,
+  VOLUME_CREATED: (m) => `added the volume ${m.volume} at ${m.mountPath} to ${m.service}`,
+  VOLUME_DELETED: (m) => `${m.dataKept ? "detached" : "deleted"} the volume ${m.volume} from ${m.service}${m.dataKept ? " (data kept)" : ""}`,
+  CRON_JOB_CREATED: (m) => `added the cron job ${m.cronJob} (${m.schedule})`,
+  CRON_JOB_CHANGED: (m) => `changed the cron job ${m.cronJob}${m.settings ? ` (${String(m.settings).replaceAll(",", ", ")})` : ""}`,
+  CRON_JOB_DELETED: (m) => `deleted the cron job ${m.cronJob}`,
+  CRON_JOB_RUN: (m) => `ran the cron job ${m.cronJob}${m.status ? ` (${String(m.status).toLowerCase().replace("_", " ")})` : ""}`,
+  TEAM_CREATED: (m) => `created the team ${m.team}`,
+  TEAM_CHANGED: (m) => `changed the team ${m.team}`,
+  TEAM_DELETED: (m) => `deleted the team ${m.team}`,
+  SERVICE_ACCOUNT_CREATED: (m) => `created the service account ${m.serviceAccount} as ${role(m.role)}`,
+  SERVICE_ACCOUNT_DELETED: (m) => `deleted the service account ${m.serviceAccount}`,
+  POLICY_CHANGED: (m) => `changed the organization policy${m.settings ? ` (${String(m.settings).replaceAll(",", ", ")})` : ""}`,
+  DEPLOYMENT_APPROVED: () => "approved a production deploy",
+  DEPLOYMENT_REJECTED: () => "rejected a production deploy",
+  PUBLIC_LINK_ENABLED: () => "turned on the public link",
+  PUBLIC_LINK_DISABLED: () => "turned off the public link",
 };
+
+function role(value: unknown): string {
+  return typeof value === "string" ? value.toLowerCase() : "member";
+}
 
 /** Who did what: the audit log of your projects and your account. */
 export default function ActivityPage() {
