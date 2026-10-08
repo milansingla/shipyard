@@ -43,6 +43,14 @@ The scope is real-world: **~24,600 lines of TypeScript**, a **27-model PostgreSQ
 | 🔐 **Governance** | GitHub OAuth, organizations and teams, OWNER/ADMIN/DEVELOPER/VIEWER roles, scoped API keys, service accounts, policies, production approvals, audit log, encrypted secrets |
 | 📈 **Operations** | metrics, alerts to Slack and webhooks, backups with tested restores, live logs over SSE, and a CLI for CI pipelines |
 
+## Full walk-through
+
+Two minutes through every page: projects, creating a project, a live project (services, metrics, environments, public link, cron, the AI assistant, variables, settings), a failed deployment and its diagnosis, activity, the assistant answering a question, organizations, alerts and API keys.
+
+<a href="docs/assets/walkthrough.mp4"><img src="docs/assets/walkthrough-thumb.png" width="800" alt="Watch the full walk-through: 2 minutes, every page" /></a>
+
+<sub>Click to play (opens GitHub's video player). Sample data.</sub>
+
 ## Screenshots
 
 | Projects | Project |
