@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, unit tests, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # postinstall runs `prisma generate`, which needs no database.
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      # Unit tests only: no Docker, network or database needed.
+      # Integration tests (real Docker, Traefik, PostgreSQL) run locally: npm run test:integration
+      - run: npm test
+
+      - run: npm run build

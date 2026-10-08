@@ -1,244 +1,241 @@
-# Shipyard 🚢
+<div align="center">
 
-A small, understandable, self-hosted deployment platform — think a tiny
-Render/Railway you can read end to end.
+<img src="docs/assets/logo.svg" width="88" alt="Shipyard logo" />
 
+# Shipyard
+
+**A self-hosted deployment platform: a small Vercel/Render you can run on your own machines and read end to end.**
+
+Connect a GitHub repository → Shipyard detects the stack, builds it, runs it, health-checks it, and serves it at a stable URL with zero-downtime redeploys.
+
+[![CI](https://github.com/milansingla/shipyard/actions/workflows/ci.yml/badge.svg)](https://github.com/milansingla/shipyard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-white.svg)](LICENSE)
+![Version](https://img.shields.io/badge/version-5.0.0-white)
+![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6?logo=typescript&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522-339933?logo=nodedotjs&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169e1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-engine-2496ed?logo=docker&logoColor=white)
+
+<img src="docs/assets/demo.gif" width="800" alt="Shipyard dashboard walk-through: projects, a project, its public link, a failed deployment with its diagnosis" />
+
+</div>
+
+---
+
+## Why this project
+
+Platforms like Vercel and Render make deploying feel like magic. Shipyard rebuilds that magic in the open, as one TypeScript codebase small enough to understand: how a repository becomes a container, how traffic moves between versions with no downtime, how a deploy queue survives a crashed worker, and how access control, secrets and audit trails fit around it.
+
+The scope is real-world: **~24,600 lines of TypeScript**, a **27-model PostgreSQL schema** with 28 migrations, **639 unit tests**, and **156 integration tests** that drive the real Docker daemon, Traefik and PostgreSQL.
+
+## Highlights
+
+| | |
+| --- | --- |
+| 🔍 **Detects any common stack** | Node.js (npm / pnpm / yarn / bun, workspaces, Turborepo), Next.js, Nuxt, SvelteKit, Astro, NestJS, Vite/React/Vue/Angular, Python (FastAPI, Flask, Django), PHP/Laravel, Go, Java, Rust, static HTML. It generates a production Dockerfile, or uses yours |
+| 🚦 **Zero-downtime deploys** | Traefik switches traffic only once the new version passes its health check; one-click rollback; rolling updates across replicas |
+| 🧠 **Failures explained** | "Dependency installation failed: the lockfile is out of date…", with the cause, the fix and the tool's own error, instead of `exit code 1`. An optional AI assistant diagnoses from logs, read-only |
+| 🌍 **Free public links** | one click gives a running app a public `https://….trycloudflare.com` URL through a Cloudflare tunnel: no domain, DNS or router setup |
+| 🧩 **Multi-service projects** | web, workers and managed PostgreSQL on a private network, persistent volumes, cron jobs, `shipyard.yaml` config-as-code |
+| 🌱 **Environments** | production, a development environment and a preview per pull request, each with its own variables |
+| 🖥️ **Scales across machines** | worker agents, a PostgreSQL-backed deploy queue with leases, scheduling by capacity, and recovery of lost workers |
+| 🔐 **Governance** | GitHub OAuth, organizations and teams, OWNER/ADMIN/DEVELOPER/VIEWER roles, scoped API keys, service accounts, policies, production approvals, audit log, encrypted secrets |
+| 📈 **Operations** | metrics, alerts to Slack and webhooks, backups with tested restores, live logs over SSE, and a CLI for CI pipelines |
+
+## Screenshots
+
+| Projects | Project |
+| --- | --- |
+| ![Projects dashboard](docs/assets/dashboard.png) | ![Project page](docs/assets/project.png) |
+| **Failure diagnosis** | **Sign in** |
+| ![Failed deployment with its diagnosis](docs/assets/deployment-diagnosis.png) | ![Sign-in](docs/assets/sign-in.png) |
+| **Free public link** | **Live metrics** |
+| ![Public link panel](docs/assets/public-link.png) | ![Metrics panel](docs/assets/metrics.png) |
+
+<sub>Screenshots use sample data.</sub>
+
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Clients
+        B[Browser]
+        C[CLI / CI<br/>API keys]
+        G[GitHub<br/>webhooks]
+    end
+
+    subgraph CP[Control plane]
+        W[Next.js dashboard<br/>apps/web]
+        A[Express API<br/>apps/api]
+        Q[(PostgreSQL<br/>state · deploy queue<br/>audit · metrics)]
+    end
+
+    subgraph Run[Runtime]
+        E[Deployment engine<br/>detect → build → run]
+        D[Docker]
+        T[Traefik<br/>reverse proxy]
+        R[Remote worker agents]
+        CF[Cloudflare tunnel<br/>public links]
+    end
+
+    B --> W -->|/api proxy| A
+    C --> A
+    G --> A
+    A <--> Q
+    A --> E --> D
+    A -->|long-poll RPC| R --> D
+    A -->|route table| T
+    T --> D
+    CF --> T
+    V[Visitors] --> T
+    V --> CF
 ```
-GitHub repo → clone → detect → docker build → container → health check → http://<project>.localhost
+
+**A deployment, step by step**
+
+```mermaid
+flowchart LR
+    Q[QUEUED] --> CL[CLONING] --> DE[DETECTING] --> BU[BUILDING] --> ST[STARTING] --> HC[HEALTH_CHECKING] --> HE[HEALTHY] --> RO[ROUTING] --> RU[RUNNING]
+    BU -.->|failure: stage + diagnosis recorded| F[FAILED]
+    HC -.-> F
 ```
 
-> **Status: V5 — a self-hosted platform across machines.** Sign in
-> with GitHub, pick a repository, deploy. A project is a set of services (web,
-> workers, PostgreSQL) on a private network, declared in the dashboard or in
-> `shipyard.yaml`, with persistent volumes, replicas and rolling deploys, cron
-> jobs, a development environment and a preview per pull request. Every project
-> lives at a stable address (or your own domain over HTTPS) and switches
-> traffic with zero downtime. Deploys queue and run on any registered worker
-> machine; metrics, alerts, backups and cleanup keep it running; teams,
-> service accounts, scoped API keys, policies and approvals govern who does
-> what; an AI assistant explains failures without being able to change
-> anything. See [the roadmap](#roadmap).
+- **One source of truth.** Every decision (who may do what, which worker, which version receives traffic) is made by the API and recorded in PostgreSQL.
+- **The queue is the database.** Workers claim jobs with `FOR UPDATE SKIP LOCKED`, hold 60-second leases, and a lost worker's job is retried only if nothing had started.
+- **Traffic follows health.** A new version gets traffic only after it answers its health check; the old one keeps serving until then.
 
-## Requirements
+More in [docs/architecture.md](docs/architecture.md) and [docs/deployment-engine.md](docs/deployment-engine.md).
 
-| Tool           | Version | Check                     |
-| -------------- | ------- | ------------------------- |
-| Node.js        | ≥ 22.12 | `node -v`                 |
-| npm            | ≥ 10    | `npm -v`                  |
-| Docker Desktop | running | `docker version`          |
-| git            | any     | `git --version`           |
+## Tech stack
 
-## Setup
+| Layer | Technology |
+| --- | --- |
+| Dashboard | Next.js 16 (App Router), React 19, Tailwind CSS 4, TypeScript |
+| API & engine | Node.js, Express 5, TypeScript (strict), Zod validation, Pino logging |
+| Data | PostgreSQL 17, Prisma 7 ORM, 28 migrations |
+| Containers & routing | Docker (dockerode), Traefik v3, Let's Encrypt, Cloudflare quick tunnels |
+| Auth & security | GitHub OAuth, hashed API keys, AES-256-GCM encrypted secrets, CSRF origin checks, rate limiting |
+| Testing | Vitest: unit tests plus integration tests against real Docker, Traefik and PostgreSQL |
+| Tooling | npm workspaces monorepo, GitHub Actions CI, a CLI (`shipyard`) |
+
+## Quick start
+
+**Requirements:** Node.js ≥ 22.12 · npm ≥ 10 · Docker Desktop (running) · git
 
 ```bash
+git clone https://github.com/milansingla/shipyard.git
+cd shipyard
 npm install
-cp .env.example .env      # optional — every variable has a safe default
+cp .env.example .env      # every variable has a safe default
 npm run db:up             # PostgreSQL (127.0.0.1:5433) and Traefik (127.0.0.1:80) in Docker
-npm run db:deploy         # apply migrations
+npm run db:deploy         # apply the database migrations
 ```
 
-Set `SHIPYARD_PUBLIC_DOMAIN=localhost` in `.env` to reach each project at
-`http://<project>.localhost` through Traefik (port 80 taken? set
-`SHIPYARD_HTTP_PORT`). Without it, each deployment gets its own
-`http://localhost:<port>` URL. See [docs/routing.md](docs/routing.md).
+Set up GitHub sign-in once (about 2 minutes): create a GitHub OAuth App and fill `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SHIPYARD_SECRET_KEY` and `SHIPYARD_ALLOWED_GITHUB_USERS` in `.env`. The steps are in [docs/github.md](docs/github.md#setup).
 
-Then set up GitHub sign-in (one-time, ~2 minutes): create a GitHub OAuth App and
-fill `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SHIPYARD_SECRET_KEY` and
-`SHIPYARD_ALLOWED_GITHUB_USERS` in `.env` — step by step in
-[docs/github.md](docs/github.md#setup).
+```bash
+npm run dev:api   # terminal 1: API on http://localhost:4000
+npm run dev:web   # terminal 2: dashboard on http://localhost:3000
+```
 
-## The `shipyard` CLI
+Open <http://localhost:3000>, sign in with GitHub, choose **New project**, pick a repository, and **Create and deploy**. Once it's running, the app lives at `http://<project>.localhost` and keeps that address across redeploys. Try it with the sample app in [`examples/hello-node`](examples/hello-node).
+
+> Your app should listen on `0.0.0.0` and on the port in `$PORT`. Shipyard sets `$PORT` for you.
+
+## CLI
 
 Create an API key in the dashboard (**API keys**), then:
 
 ```bash
 npm run shipyard -- login --url http://localhost:3000 --token shp_…
-npm run shipyard -- projects
-npm run shipyard -- deploy shop            # streams the build, exits 0 once live, 1 if it failed
+npm run shipyard -- deploy shop            # streams the build; exits 0 once live, 1 on failure
 npm run shipyard -- status shop
-npm run shipyard -- logs shop --follow     # the app's output; --build for the build log
+npm run shipyard -- logs shop --follow     # app output; --build for the build log
 npm run shipyard -- rollback shop
 npm run shipyard -- env shop set DATABASE_URL=postgres://… --secret
 ```
 
-It only talks to the API, as you, with your team roles. In CI, set
-`SHIPYARD_URL` and `SHIPYARD_TOKEN` instead of logging in. Details:
-[docs/cli.md](docs/cli.md).
+In CI, set `SHIPYARD_URL` and `SHIPYARD_TOKEN` instead of logging in. See [docs/cli.md](docs/cli.md).
 
-`npm run shipyard:local -- deploy <repo-url>` is the older engine-only tool:
-it deploys straight through Docker on this machine, without the database or
-API. It's kept for working on the deployment engine itself.
+## API
 
-A sample app lives in [`examples/hello-node`](examples/hello-node) — push it to
-a GitHub repo of your own to try a full deployment.
-
-**Your app must** listen on `0.0.0.0` and on the port in `$PORT` (Shipyard sets
-it to the Dockerfile's `EXPOSE` port, or 3000 when there is none or when
-Shipyard generated the Dockerfile — see [build detection](docs/deployment-engine.md#build-detection--dockerfile-generation)).
-
-## Run Shipyard
+A REST API under `/api/v1` with session or API-key authentication: 100+ endpoints covering projects, deployments, logs (SSE), services, environments, domains, public links, cron, teams, policies, alerts, the AI assistant and workers.
 
 ```bash
-npm run dev:api   # terminal 1 — API on http://localhost:4000
-npm run dev:web   # terminal 2 — dashboard on http://localhost:3000
+curl -H "Authorization: Bearer $SHIPYARD_TOKEN" http://localhost:4000/api/v1/projects
 ```
 
-Open <http://localhost:3000>, sign in with GitHub, choose **New project**, pick
-a repository and branch, and **Create and deploy**. The deployment page follows
-the pipeline stage by stage and streams the build log. Once RUNNING, the app is
-live at `http://<project>.localhost`, and stays at that address across
-redeploys.
+**Full reference: [docs/api.md](docs/api.md)**
 
-The dashboard proxies `/api/*` to the API, so the browser only ever talks to
-one origin (no CORS; the session cookie and CSRF checks work unchanged). See
-[docs/dashboard.md](docs/dashboard.md).
-
-### Use the API directly
+## Testing
 
 ```bash
-curl http://localhost:4000/api/health # {"data":{"status":"ok","docker":"reachable"}}
-```
-
-Sign in through the dashboard, then copy the `shipyard_session` cookie
-(browser dev tools → Application → Cookies) for curl:
-
-```bash
-export S='shipyard_session=<value>'
-alias api='curl -s -b "$S"'
-
-# 1. Create a project (repository + branch are checked against GitHub now, not at deploy time)
-api -X POST localhost:4000/api/projects -H 'content-type: application/json' \
-  -d '{"repositoryUrl":"https://github.com/<owner>/<repo>","branch":"main"}'
-
-# 2. Deploy — returns 202 immediately; the pipeline runs in the background
-api -X POST localhost:4000/api/projects/<projectId>/deploy
-
-# 3. Watch it: QUEUED → CLONING → DETECTING → BUILDING → STARTING → HEALTH_CHECKING → HEALTHY → ROUTING → RUNNING
-api localhost:4000/api/deployments/<deploymentId>
-api 'localhost:4000/api/deployments/<deploymentId>/logs?type=build'
-api 'localhost:4000/api/deployments/<deploymentId>/logs?type=runtime&tail=100'
-```
-
-| Endpoint                                   | Does                                              |
-| ------------------------------------------ | ------------------------------------------------- |
-| `GET /api/auth/github/login` · `GET /api/auth/me` · `POST /api/auth/logout` | sign in (browser) · current user · sign out |
-| `GET /api/github/repos` · `GET /api/github/repos/:owner/:repo/branches` | repository & branch pickers |
-| `GET /api/audit-logs?projectId=&limit=&before=` | who did what (Activity page) |
-| `GET/POST /api/projects/:id/services` · `PATCH/DELETE /api/services/:id` · `POST /api/services/:id/deploy` | services — see [docs/services.md](docs/services.md); `{"type": "POSTGRES"}` adds a database ([docs/databases.md](docs/databases.md)) |
-| `GET/POST /api/services/:id/volumes` · `DELETE /api/volumes/:id` | persistent volumes (detaching keeps the data) |
-| `GET/POST /api/projects/:id/environments` · `PATCH /api/environments/:id` · `POST /api/environments/:id/deploy` · `…/close` | environments — see [docs/environments.md](docs/environments.md) |
-| `GET/POST /api/projects/:id/cron-jobs` · `PATCH/DELETE /api/cron-jobs/:id` · `POST /api/cron-jobs/:id/run` · `GET /api/cron-jobs/:id/runs` · `GET /api/cron-runs/:id` | cron jobs — see [docs/cron.md](docs/cron.md) |
-| `GET/POST /api/organizations` · `…/:id/members` | teams and members — see [docs/teams.md](docs/teams.md) |
-| `GET/POST /api/api-keys` · `DELETE /api/api-keys/:id` | API keys for the CLI/scripts (`Authorization: Bearer shp_…`) |
-| `POST /api/projects`                       | create (`repositoryUrl`, optional `branch`, `name`) |
-| `GET /api/projects` · `GET /api/projects/:id` | list / get, with latest deployment             |
-| `PATCH /api/projects/:id`                  | settings: `healthCheckPath`, `healthCheckPort`, `healthCheckTimeoutSeconds`, `cpuLimit`, `memoryLimitMb`, `restartPolicy` |
-| `DELETE /api/projects/:id`                 | remove project, its containers, images and logs   |
-| `POST /api/projects/:id/deploy`            | new deployment (202)                              |
-| `GET /api/projects/:id/deployments?limit=` | deployment history, newest first                  |
-| `GET /api/projects/:id/env`                | environment variables (secrets: value hidden)     |
-| `GET/POST /api/projects/:id/domains` · `DELETE …/domains/:hostname` | custom domains, live immediately |
-| `PUT /api/projects/:id/env/:key` · `DELETE …` | set (`value`, `secret`, `target`) · remove — applies on next deploy |
-| `GET /api/deployments/:id`                 | one deployment                                    |
-| `GET /api/deployments/:id/events`          | its history: created by whom, every status change, why |
-| `GET /api/deployments/:id/logs?type=build\|runtime&tail=` | logs                              |
-| `GET /api/deployments/:id/logs/stream?type=…` | live logs (Server-Sent Events: `log`, then `end`) |
-| `POST /api/deployments/:id/stop`           | stop (idempotent)                                 |
-| `POST /api/deployments/:id/restart`        | restart + health check; on an old deployment = rollback to it |
-| `POST /api/deployments/:id/rollback`       | bring back the previous working deployment (idempotent) |
-| `POST /api/deployments/:id/redeploy`       | new deployment of the same project (202)          |
-| `POST /api/webhooks/github`                | GitHub push webhook (HMAC-signed; no session)     |
-
-Everything except `/api/health` and sign-in requires a session; you only see
-your own projects. Responses are `{ "data": … }` or
-`{ "error": { "code", "message", "details?" } }`.
-
-## Tests
-
-```bash
-npm test                  # unit tests — fast, no Docker or network needed
-npm run test:integration  # real Docker, Traefik, PostgreSQL (shipyard_test, reset each run) and GitHub clone
+npm test                  # unit tests: fast, no Docker or network needed (run in CI)
+npm run test:integration  # real Docker, Traefik, PostgreSQL and network
 npm run typecheck
 ```
 
-## Repository layout
+Integration tests deploy real fixture apps (Node, pnpm workspaces, Python, Go, PHP, static sites), route them through a real Traefik, and even reach an app from the internet through a Cloudflare tunnel.
+
+## Project structure
 
 ```
-apps/web/            Next.js dashboard (proxies /api to apps/api)
-apps/api/            Express API + CLI + deployment engine (TypeScript)
-  prisma/            schema + migrations
-  src/modules/       projects, deployments (HTTP routes + database rules)
-  src/services/      git, docker, detection, build, deployment engine, routing, workspace
-  test/unit/         fast tests
-  test/integration/  real Docker / network tests
-examples/hello-node/ sample deployable app
-docs/                architecture, engine, database, security, learning notes
+apps/
+  api/                 Express API, deployment engine, worker agent, CLI (local)
+    prisma/            schema + migrations
+    src/modules/       HTTP routes + business rules (projects, deployments, access, …)
+    src/services/      git, docker, detection, build, routing, tunnels, workspace
+    test/              unit tests, integration tests, fixture apps
+  web/                 Next.js dashboard (proxies /api to the API)
+  cli/                 the `shipyard` CLI (talks to /api/v1)
+docs/                  architecture, engine, API reference, security, operations, …
+examples/hello-node/   a sample app to deploy
+docker-compose.yml     PostgreSQL + Traefik for development
+docker-compose.production.yml   HTTPS (Let's Encrypt) override
 ```
+
+## Engineering decisions
+
+- **Correctness over cleverness in builds.** Installs are always frozen when a lockfile exists, and never silently relaxed. A stale lockfile is reported before Docker runs, and explained if the install fails.
+- **Untrusted input everywhere.** Repository content is treated as hostile: no symlink following, size-capped reads, validated paths, and commands passed in exec form so they can't inject Dockerfile instructions.
+- **Secrets never leave encrypted storage.** Variables are encrypted with AES-256-GCM, never returned by the API, and never baked into images. API keys are stored as SHA-256 hashes and shown only once.
+- **Least privilege by default.** Roles are checked on every request; API keys can be narrowed to read or deploy; the AI assistant uses read-only tools within the caller's permissions.
+- **Operability built in.** Every status change, who caused it and why is recorded; failures carry their stage and a human explanation; metrics, alerts and backups ship with the platform.
+
+Deeper write-ups: [security](docs/security.md) · [routing](docs/routing.md) · [workers](docs/workers.md) · [learning notes](docs/learning-notes.md)
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) — components and why they are split this way
-- [Deployment engine](docs/deployment-engine.md) — pipeline, statuses, health checks, debugging
-- [Routing](docs/routing.md) — Traefik, stable hostnames, zero-downtime redeploys
-- [Configuration as code](docs/configuration.md) — `shipyard.yaml`, and which setting wins
-- [Services](docs/services.md) — multi-service projects, private networking, per-service settings, volumes
-- [Databases](docs/databases.md) — self-hosted PostgreSQL services, `DATABASE_URL`, backups
-- [Cron jobs](docs/cron.md) — scheduled commands in a service's image, with every run recorded
-- [Access control](docs/rbac.md) — roles, teams, service accounts, API key scopes
-- [AI assistant](docs/ai.md) — diagnosis, incident summaries, repository analysis, questions; what it can and can't do
-- [Workers](docs/workers.md) — worker machines, the deploy queue, scheduler and leases
-- [Observability](docs/observability.md) — metrics · [Operations](docs/operations.md) — alerts, backups, restore, cleanup, disaster recovery
-- [Environments](docs/environments.md) — production, development, pull-request previews; variables per environment
-- [Teams & roles](docs/teams.md) — organizations, OWNER/ADMIN/DEVELOPER/VIEWER, what each may do
-- [Environment variables & secrets](docs/environment.md) — encrypted per-project config, runtime vs build
-- [Database](docs/database.md) — schema and persistence decisions
-- [GitHub](docs/github.md) — sign-in setup, sessions, authorization, repository selection
-- [Dashboard](docs/dashboard.md) — how the web app talks to the API, and its visual language
-- [Security](docs/security.md) — threat model and what is (not yet) safe
-- [Learning notes](docs/learning-notes.md) — concepts + interview prep per milestone
+| Topic | |
+| --- | --- |
+| [Architecture](docs/architecture.md) | components and why they are split this way |
+| [Deployment engine](docs/deployment-engine.md) | pipeline, detection, Dockerfile generation, health checks |
+| [API reference](docs/api.md) | every endpoint |
+| [Routing](docs/routing.md) | Traefik, stable hostnames, zero downtime, custom domains, public links |
+| [Services](docs/services.md) · [Databases](docs/databases.md) | multi-service projects, volumes, managed PostgreSQL |
+| [Configuration as code](docs/configuration.md) | `shipyard.yaml` |
+| [Environments](docs/environments.md) · [Variables & secrets](docs/environment.md) | dev, previews, encrypted config |
+| [Cron jobs](docs/cron.md) | scheduled commands with recorded runs |
+| [Access control](docs/rbac.md) · [Teams](docs/teams.md) | roles, teams, service accounts, API key scopes |
+| [Workers](docs/workers.md) | multi-machine scheduling, queue and leases |
+| [Observability](docs/observability.md) · [Operations](docs/operations.md) | metrics, alerts, backups, restore, cleanup |
+| [AI assistant](docs/ai.md) | what it can and can't do |
+| [GitHub](docs/github.md) · [CLI](docs/cli.md) · [Dashboard](docs/dashboard.md) | sign-in setup, CLI, UI |
+| [Security](docs/security.md) | threat model |
+| [Learning notes](docs/learning-notes.md) | concepts behind each milestone |
 
-## Roadmap
+## Versions
 
-- [x] **M1** TypeScript foundation, status model, health checks, tests
-- [x] **M2** PostgreSQL + Prisma, REST deployment API, deployment history
-- [x] **M3** Node.js project detection + Dockerfile generation
-- [x] **M4** GitHub OAuth, repository & branch selection
-- [x] **M5** Next.js dashboard
-- [x] **M6** GitHub webhooks (auto-deploy on push)
-- [x] **M7** Traefik routing, zero-downtime redeploy — **V2 released (v2.0.0)**
+| Version | Theme |
+| --- | --- |
+| **5.0.0** | multi-machine platform: workers, deploy queue, metrics, alerts, backups, governance, AI assistant, any-stack detection, public links, new dashboard |
+| 4.0.0 | developer platform: CLI, API keys, multi-service projects, databases, replicas, cron, environments, previews |
+| 3.0.0 | production platform: state machine, secrets, rollback, live logs, HTTPS, custom domains |
+| 2.0.0 | first complete version: GitHub sign-in, detection, dashboard, webhooks, Traefik routing |
 
-### V3 — production deployment platform (v3.0.0)
+Details in [CHANGELOG.md](CHANGELOG.md).
 
-- [x] Deployment state machine: QUEUED → CLONING → DETECTING → BUILDING →
-      STARTING → HEALTH_CHECKING → HEALTHY → ROUTING → RUNNING, ROLLING_BACK,
-      recorded failure stage
-- [x] Environment variables & secrets (encrypted, runtime/build, never shown or baked into images)
-- [x] Health checks per project (path, port, timeout)
-- [x] CPU/memory limits and restart policy per project
-- [x] Deployment history: who started it, every status, why
-- [x] One-click rollback to the previous working deployment
-- [x] Live build and runtime logs (Server-Sent Events)
-- [x] Custom domains, HTTPS via Let's Encrypt (production compose override)
-- [x] Rate limiting
+## License
 
-### V4 — developer platform (v4.0.0)
-
-- [x] API keys (hashed, shown once) and the `shipyard` CLI
-- [x] Audit log; organizations with OWNER/ADMIN/DEVELOPER/VIEWER roles
-- [x] Build cache (dependency installs reused) and an image registry abstraction
-- [x] Multi-service projects with private networking; `shipyard.yaml`
-- [x] Persistent volumes; self-hosted PostgreSQL services
-- [x] Replicas and rolling deployments, load-balanced by Traefik
-- [x] Cron jobs with recorded runs
-- [x] Development environments, per-environment variables, pull request previews
-
-### V5 — full platform (v5.0.0, final)
-
-- [x] Workers: registration with a join token, heartbeats, draining, remote execution (`npm run worker -w @shipyard/api`)
-- [x] Deploy queue in PostgreSQL: priorities, FIFO per project, leases, recovery of lost workers, scheduling by capacity and affinity
-- [x] Metrics (CPU, memory, restarts, uptime) and alerts to webhooks and Slack
-- [x] Backups and tested restores (Shipyard's database, PostgreSQL services, volumes); hourly cleanup
-- [x] Teams with per-project grants, service accounts, API key scopes (read / deploy / write)
-- [x] Searchable audit log, versioned API (`/api/v1`), CLI domains
-- [x] Organization policies (resource caps, health checks, domain suffixes) and production deploy approval
-- [x] AI assistant: deployment diagnosis, incident summaries, repository analysis, Dockerfile help, questions with proposed actions ([docs/ai.md](docs/ai.md))
+[MIT](LICENSE) © 2026 Milan Singla
